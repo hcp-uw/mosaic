@@ -50,13 +50,9 @@ func fileSplit(file []byte, shards int) ([][]byte, error) {
 
 	var splitFile [][]byte
 
-	for i := 0; i < shards; i++ {
+	for i := range shards {
 		currentChunkStart := shardSize * i
-		currentChunkEnd := (shardSize * i) + shardSize
-
-		if currentChunkEnd > len(file) {
-			currentChunkEnd = len(file)
-		}
+		currentChunkEnd := min(currentChunkStart+shardSize, len(file))
 
 		currentChunk := file[currentChunkStart:currentChunkEnd]
 		splitFile = append(splitFile, currentChunk)
@@ -75,7 +71,7 @@ func gfAdd(a byte, b byte) byte {
 }
 
 // multiplies a gf
-func GfMultiply(a byte, b byte) byte {
+func gfMultiply(a byte, b byte) byte {
 	if a == 0 || b == 0 {
 		return 0
 	}
@@ -90,7 +86,7 @@ func GfMultiply(a byte, b byte) byte {
 }
 
 // divides a gf not quite sure ts is necessary yet
-func GfDivid(a byte, b byte) (byte, error) {
+func gfDivid(a byte, b byte) (byte, error) {
 	if b == 0 {
 		return 0, errors.New("divide by zero lookin ahh")
 	}
@@ -111,11 +107,26 @@ func GfDivid(a byte, b byte) (byte, error) {
 	return exp[difLog], nil
 }
 
+// when you raise gf to a power
+func gfPow(a byte, p int) byte {
+	if p == 0 {
+		return 1
+	}
+
+	if a == 0 {
+		return 0
+	}
+
+	exp := (p * int(logTable[a])) % 255
+
+	return byte(exp)
+}
+
 // initializes gf tables to do super uber fast multiplication
 func initGFTables() {
 	x := 1
 
-	for i := 0; i < 255; i++ {
+	for i := range 255 {
 		exp[i] = byte(x)
 		logTable[byte(x)] = byte(i)
 
@@ -131,4 +142,18 @@ func initGFTables() {
 	for i := 255; i < 512; i++ {
 		exp[i] = exp[i-255]
 	}
+}
+
+// creates a vandermonde matrix in GF zone
+func createMatrix(baseShards int, parityShards int) [][]byte {
+	matrix := make([][]byte, baseShards+parityShards)
+
+	for row := 0; row < baseShards+parityShards; row++ {
+		matrix[row] = make([]byte, baseShards)
+		for col := range baseShards {
+			matrix[row][col] = gfPow(byte(row+1), col)
+		}
+	}
+
+	return matrix
 }
