@@ -2,9 +2,20 @@ package encoding
 
 import (
 	"errors"
+	"log"
 	"math"
 	"os"
 )
+
+var exp [512]byte
+var logTable [256]byte
+
+const primitive = byte(0x1D)
+
+func init() {
+	initGFTables()
+	log.Println(exp)
+}
 
 // ts function is the main encode function -- will return a list of files which are the shards
 func RSEncode(path string, shards int, parity int) ([]*os.File, error) {
@@ -18,6 +29,7 @@ func RSEncode(path string, shards int, parity int) ([]*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
+	log.Println(brokenFile)
 
 	return nil, errors.New("temp")
 
@@ -51,4 +63,72 @@ func fileSplit(file []byte, shards int) ([][]byte, error) {
 	}
 
 	return splitFile, nil
+}
+
+// for RS encoding algebraic operations need to be definined in a finite field
+// basically if two bytes are added together they dont go over the byte limit or 255
+// for some reason finite field is notated to GF (galois field)
+
+// adds a gf
+func gfAdd(a byte, b byte) byte {
+	return a ^ b
+}
+
+// multiplies a gf
+func GfMultiply(a byte, b byte) byte {
+	if a == 0 || b == 0 {
+		return 0
+	}
+
+	logA := int(logTable[a])
+	logB := int(logTable[b])
+	log.Printf("logA: %d, logB: %d\n", logA, logB)
+
+	sumLog := logA + logB
+
+	return exp[sumLog]
+}
+
+// divides a gf not quite sure ts is necessary yet
+func GfDivid(a byte, b byte) (byte, error) {
+	if b == 0 {
+		return 0, errors.New("divide by zero lookin ahh")
+	}
+
+	if a == 0 {
+		return 0, nil
+	}
+
+	logA := int(logTable[a])
+	logB := int(logTable[b])
+
+	difLog := logA - logB
+
+	if difLog < 0 {
+		difLog += 255
+	}
+
+	return exp[difLog], nil
+}
+
+// initializes gf tables to do super uber fast multiplication
+func initGFTables() {
+	x := 1
+
+	for i := 0; i < 255; i++ {
+		exp[i] = byte(x)
+		logTable[byte(x)] = byte(i)
+
+		x <<= 1
+
+		if (x & 0x100) != 0 {
+			x ^= int(primitive)
+		}
+	}
+
+	logTable[0] = 255
+
+	for i := 255; i < 512; i++ {
+		exp[i] = exp[i-255]
+	}
 }
