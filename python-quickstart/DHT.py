@@ -41,7 +41,7 @@ class BaseNode:
 
         self.data = DHT(self, "data")
 
-        self.k = 5
+        self.k = 3
 
     def _get_bucket_index(self, target_hash):
         distance = hash_distance(self.hash, target_hash)
@@ -163,21 +163,14 @@ class Central(BaseNode):
         # node.neighbors = set(closest[:3])
 
         # self.neighbors.add(node)
-        ...
 
         node.bootstrap(self)
         self.all_nodes[node.hash] = node
+        self.add_contact(node)
 
 
     def closest_to(self, hashed, threshold=-1):
-        candidates = list(self.all_nodes.values())
-        
-        unique = {peer.hash: peer for peer in candidates}.values()
-        sorted_peers = sorted(unique, key=lambda other: hash_distance(hashed, other.hash))
-
-        if threshold == -1:
-            return sorted_peers
-        return sorted_peers[:threshold]
+        return super().closest_to(hashed, threshold)
         
 
 class DHT(MutableMapping):
@@ -289,24 +282,39 @@ central = Central()
 
 nodes = {}
 
-for word in range(5000):
+import time
+
+start = time.time()
+a = time.time()
+N = 10_000
+
+for word in range(N):
     n = BaseNode(str(word))
     central.register(n)
     nodes[word] = n
-    if word % 10 == 0: print(n)
+
+print(f"Register {N} nodes: {(time.time() - a):.4f}s")
 
 # for n in nodes:
 #     central.register(nodes[n])
 
-print("all nodes registered")
-
-
+a = time.time()
 nodes[0].data["key"] = "value"
+print(f"Set single K/V: {(time.time() - a):.4f}s")
 
+a = time.time()
+error = 0
 for n in nodes:
     try:
-        nodes[n].data["key"]
+        assert nodes[n].data["key"] == "value"
     except:
-        print(n)
+        # print(f"Error on node {n}")
+        error += 1
     else:
         ...
+
+print(f"{error} lookup errors")
+
+print(f"Retrieve on {N} nodes: {(time.time() - a):.4f}s")
+
+print(f"Total: {time.time() - start:.4f}s")
