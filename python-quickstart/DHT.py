@@ -2,6 +2,7 @@ from typing import *
 from collections.abc import MutableMapping
 import hashlib
 import random
+import heapq
 
 
 def sha(content):
@@ -87,7 +88,7 @@ class BaseNode:
         self.add_contact(bootstrap_node)
         
         # Find nodes close to us
-        nodes_found = bootstrap_node.closest_to(self.hash, threshold=self.k*2)
+        nodes_found = bootstrap_node.closest_to(self.hash, threshold=self.k)
         
         # Add all discovered nodes to our k-buckets
         for node in nodes_found:
@@ -145,13 +146,15 @@ class BaseNode:
         # Add ourselves as a candidate
         candidates.append(self)
         
-        # Remove duplicates and sort by actual distance
+        # Remove duplicates
         unique = {peer.hash: peer for peer in candidates}
-        sorted_peers = sorted(unique.values(), key=lambda other: hash_distance(hashed, other.hash))
         
+        key_func = lambda other: hash_distance(hashed, other.hash)
+
         if threshold == -1:
-            return sorted_peers
-        return sorted_peers[:threshold]
+            return sorted(unique.values(), key=key_func)
+
+        return heapq.nsmallest(threshold, unique.values(), key=key_func)
         
     def __repr__(self):
         return f"BaseNode({self.identifier}, connections={len(self.neighbors)})"
@@ -177,11 +180,13 @@ class Central(BaseNode):
     def closest_to(self, hashed, threshold=-1):
         # Central is omniscient - use all_nodes, not buckets
         candidates = list(self.all_nodes.values())
-        sorted_peers = sorted(candidates, key=lambda other: hash_distance(hashed, other.hash))
         
+        key_func = lambda other: hash_distance(hashed, other.hash)
+
         if threshold == -1:
-            return sorted_peers
-        return sorted_peers[:threshold]
+            return sorted(candidates, key=key_func)
+        
+        return heapq.nsmallest(threshold, candidates, key=key_func)
         
 
 class DHT(MutableMapping):
@@ -191,7 +196,7 @@ class DHT(MutableMapping):
 
         self.config = {
             "use_references": True,
-            "closest_threshold": -1,
+            "closest_threshold": 5,
             "query_threshold": 3,
             "shortlist_threshold": 5
         }    
@@ -200,8 +205,11 @@ class DHT(MutableMapping):
         initialcandidates = self.node.neighbors | {self.node}
 
         seen = set()
+        
+        key_func = lambda peer: hash_distance(hashed, peer.hash)
+        k = self.config["shortlist_threshold"]
 
-        shortlist = sorted(initialcandidates, key=lambda peer: hash_distance(hashed, peer.hash))[:self.config["shortlist_threshold"]]
+        shortlist = heapq.nsmallest(k, initialcandidates, key=key_func)
         staging = []
         while staging != shortlist:
             staging = shortlist
@@ -243,7 +251,7 @@ class DHT(MutableMapping):
             for peer in new_peers:
                 combined[peer.hash] = peer
 
-            shortlist = sorted(combined.values(), key=lambda peer: hash_distance(hashed, peer.hash))[:self.config["shortlist_threshold"]]
+            shortlist = heapq.nsmallest(k, combined.values(), key=key_func)
 
         if single_return:
             return None
@@ -297,7 +305,7 @@ import time
 
 start = time.time()
 a = time.time()
-N = 5000
+N = 5
 
 for word in range(N):
     n = BaseNode(str(word))
@@ -319,9 +327,9 @@ if len(central.neighbors) != len(central.all_nodes):
 # Check bucket distribution
 filled_buckets = sum(1 for b in central.buckets if b)
 print(f"Central has {filled_buckets} non-empty buckets")
-for i, bucket in enumerate(central.buckets):
-    if len(bucket) > 0:
-        print(f"  Bucket {i}: {len(bucket)} nodes (max={central.k})")
+# for i, bucket in enumerate(central.buckets):
+#     if len(bucket) > 0:
+#         print(f"  Bucket {i}: {len(bucket)} nodes (max={central.k})")
 
 
 print(f"Register {N} nodes: {(time.time() - a):.4f}s")
@@ -349,4 +357,3 @@ print(f"{error} lookup errors")
 print(f"Retrieve on {N} nodes: {(time.time() - a):.4f}s")
 
 print(f"Total: {time.time() - start:.4f}s")
-
