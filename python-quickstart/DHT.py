@@ -27,17 +27,40 @@ class NetworkError(Exception):
 
 # base node class
 class BaseNode:
+    K = 5
     def __init__(self, identifier):
         self.identifier = identifier
 
         self.internal_data: Dict[bytes, Dict[bytes, bytes]] = {} # data that the node itself contains
         self.internal_references: Dict[bytes, Dict[bytes, BaseNode]] = {} # "i know who has this data"
 
-        self.neighbors: Set[BaseNode] = set()
+        self.buckets = [[] for _ in range(256)]
+
+        # self.neighbors: Set[BaseNode] = set()
 
         self.hash = sha(identifier)
 
         self.data = DHT(self, "data")
+
+    @property
+    def neighbors(self):
+        all_neighbors = set()
+        for bucket in self.k_buckets:
+            all_neighbors.update(bucket)
+        return all_neighbors
+
+    def bootstrap(self, bootstrap_node):
+        self.neighbors.add(bootstrap_node) 
+        
+        # 2. Run discover(self.hash)
+        #    This will query central, which *now* has the full list.
+        nodes_found = self.data.discover(self.hash)
+        
+        # 3. We *replace* our old neighbors with the new, correct list.
+        #    (We must keep 'self' and 'central')
+        self.neighbors = {bootstrap_node, self}
+        self.neighbors.update(nodes_found)
+
 
     def add(self, identifier, k, v):
 
@@ -81,16 +104,29 @@ class BaseNode:
 class Central(BaseNode):
     def __init__(self):
         super().__init__("central")
-        self.neighbors.add(self)
+        # self.neighbors.add(self)
+        self.all_nodes = {self.hash: self}
 
     def register(self, node: BaseNode):
-        closest = sorted([n for n in self.neighbors if n != node], key=lambda other: node_distance(node, other))
-        node.neighbors = set(closest[:3])
+        # closest = sorted([n for n in self.neighbors if n != node], key=lambda other: node_distance(node, other))
+        # node.neighbors = set(closest[:3])
 
-        self.neighbors.add(node)
+        # self.neighbors.add(node)
+        ...
 
-    def recalculate(self, node):
-        self.register(node)
+        node.bootstrap(self)
+        self.all_nodes[node.hash] = node
+
+
+    def closest_to(self, hashed, threshold=-1):
+        candidates = list(self.all_nodes.values())
+        
+        unique = {peer.hash: peer for peer in candidates}.values()
+        sorted_peers = sorted(unique, key=lambda other: hash_distance(hashed, other.hash))
+
+        if threshold == -1:
+            return sorted_peers
+        return sorted_peers[:threshold]
         
 
 class DHT(MutableMapping):
@@ -114,7 +150,6 @@ class DHT(MutableMapping):
 
         shortlist = sorted(unique, key=lambda peer: hash_distance(hashed, peer.hash))[:self.config["shortlist_threshold"]]
         staging = []
-        hops = 1
         while staging != shortlist:
             staging = shortlist
             query = []
@@ -145,9 +180,7 @@ class DHT(MutableMapping):
             unique = {peer.hash: peer for peer in combined}.values()
 
             shortlist = sorted(unique, key=lambda peer: hash_distance(hashed, peer.hash))[:self.config["shortlist_threshold"]]
-            hops += 1
 
-        print(hops)
         if single_return:
             return None
         return shortlist
@@ -201,6 +234,16 @@ for word in range(50):
     central.register(n)
     nodes[word] = n
 
+for n in nodes:
+    central.register(nodes)
+
+
+nodes[10].data["key"] = "value"
 
 for n in nodes:
-    central.recalculate(nodes[n])
+    try:
+        nodes[n].data["key"]
+    except:
+        pass
+    else:
+        print(n)
