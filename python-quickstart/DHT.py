@@ -30,8 +30,8 @@ class BaseNode:
     def __init__(self, identifier):
         self.identifier = identifier
 
-        self.internal_data: Dict[bytes, bytes] = {} # data that the node itself contains
-        self.internal_references: Dict[bytes, BaseNode] = {} # "i know who has this data"
+        self.internal_data: Dict[bytes, Dict[bytes, bytes]] = {} # data that the node itself contains
+        self.internal_references: Dict[bytes, Dict[bytes, BaseNode]] = {} # "i know who has this data"
 
         self.neighbors: Set[BaseNode] = set()
 
@@ -39,21 +39,31 @@ class BaseNode:
 
         self.data = DHT(self, "data")
 
-    def add(self, k, v):
-        self.internal_data[k] = v
+    def add(self, identifier, k, v):
 
-    def reference(self, k, v):
-        self.internal_references[k] = v 
+        if identifier not in self.internal_data:
+            self.internal_data[identifier] = {}
+
+        self.internal_data[identifier][k] = v
+
+    def reference(self, identifier, k, v):
+        if identifier not in self.internal_references:
+            self.internal_references[identifier] = {}
+        self.internal_references[identifier][k] = v 
         # reference hash k with node v
         # is v a reference to the node itself or the node's identifier?
         # how would this work in go, or when we bring this to the actual network?
         # tbh idk (yet)
 
-    def find_reference(self, k):
-        return self.internal_references.get(k)
+    def find_reference(self, identifier, k):
+        if identifier not in self.internal_references:
+            return None
+        return self.internal_references[identifier].get(k)
     
-    def get_data(self, k):
-        return self.internal_data.get(k)
+    def get_data(self, identifier, k):
+        if identifier not in self.internal_data:
+            return None
+        return self.internal_data[identifier].get(k)
 
     def closest_to(self, hashed, threshold=-1):
         candidates = list(self.neighbors) + [self]
@@ -74,7 +84,7 @@ class Central(BaseNode):
         self.neighbors.add(self)
 
     def register(self, node: BaseNode):
-        closest = sorted(self.neighbors, key=lambda other: node_distance(node, other))
+        closest = sorted([n for n in self.neighbors if n != node], key=lambda other: node_distance(node, other))
         node.neighbors = set(closest[:3])
 
         self.neighbors.add(node)
@@ -86,13 +96,14 @@ class Central(BaseNode):
 class DHT(MutableMapping):
     def __init__(self, node, identifier, *args, **kwargs):
         self.node: BaseNode = node
-        self.identifier = identifier
+        self.identifier = sha(identifier)
 
         self.config = {
             "use_references": True,
             "closest_threshold": -1,
             "query_threshold": 3,
-            "use_references": True
+            "use_references": True,
+            "shortlist_threshold": 5
         }    
 
     def discover(self, hashed, single_return=False):
@@ -101,20 +112,20 @@ class DHT(MutableMapping):
 
         seen = set()
 
-        shortlist = sorted(unique, key=lambda peer: hash_distance(hashed, peer.hash))
+        shortlist = sorted(unique, key=lambda peer: hash_distance(hashed, peer.hash))[:self.config["shortlist_threshold"]]
         staging = []
-
+        hops = 1
         while staging != shortlist:
             staging = shortlist
             query = []
             for peer in shortlist:
 
                 if single_return:
-                    potential = peer.get_data(hashed)
+                    potential = peer.get_data(self.identifier, hashed)
                     if potential:
                         return peer
 
-                    referenced = peer.find_reference(hashed)
+                    referenced = peer.find_reference(self.identifier, hashed)
                     if referenced:
                         return referenced
 
@@ -133,8 +144,10 @@ class DHT(MutableMapping):
             combined = shortlist + new_peers
             unique = {peer.hash: peer for peer in combined}.values()
 
-            shortlist = sorted(unique, key=lambda peer: hash_distance(hashed, peer.hash))
+            shortlist = sorted(unique, key=lambda peer: hash_distance(hashed, peer.hash))[:self.config["shortlist_threshold"]]
+            hops += 1
 
+        print(hops)
         if single_return:
             return None
         return shortlist
@@ -151,12 +164,12 @@ class DHT(MutableMapping):
 
         if self.config["use_references"]:
             storage = shortlist[0]
-            storage.add(hashed, value)
+            storage.add(self.identifier, hashed, value)
             for node in shortlist[1:]:
-                node.reference(hashed, storage)
+                node.reference(self.identifier, hashed, storage)
         else:
             for node in shortlist:
-                node.add(hashed, value)
+                node.add(self.identifier, hashed, value)
 
     def __getitem__(self, key):
         hashed = sha(key)
@@ -164,7 +177,7 @@ class DHT(MutableMapping):
         if not peer: 
             raise NetworkError(f"key \"{key}\" not found in {self}") 
         
-        return peer.get_data(hashed)
+        return peer.get_data(self.identifier, hashed)
         
     def __repr__(self):
         return f"DHT({self.identifier})"
@@ -188,7 +201,6 @@ for word in range(50):
     central.register(n)
     nodes[word] = n
 
-central.recalculate(nodes[0])
 
-nodes[0].data["abcde"] = "hi"
-print(nodes[0].data["abcde"])
+for n in nodes:
+    central.recalculate(nodes[n])
