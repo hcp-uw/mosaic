@@ -19,7 +19,8 @@ def hash_distance(h1, h2):
     return htoi(h1) ^ htoi(h2)
 
 def node_distance(n1, n2):
-    return random.random()
+    # return random.random()
+    return hash_distance(n1.hash, n2.hash)
 
 class NetworkError(Exception):
     pass
@@ -57,7 +58,7 @@ class BaseNode:
     def closest_to(self, hashed, threshold=-1):
         candidates = list(self.neighbors) + [self]
         unique = {peer.hash: peer for peer in candidates}.values()
-        sorted_peers = sorted(unique, key=lambda other: hash_distance(hashed, self.hash))
+        sorted_peers = sorted(unique, key=lambda other: hash_distance(hashed, other.hash))
 
         if threshold == -1:
             return sorted_peers
@@ -134,6 +135,8 @@ class DHT(MutableMapping):
 
             shortlist = sorted(unique, key=lambda peer: hash_distance(hashed, peer.hash))
 
+        if single_return:
+            return None
         return shortlist
 
 
@@ -141,7 +144,7 @@ class DHT(MutableMapping):
     def __setitem__(self, key, value):
         hashed = sha(key)
         shortlist = self.discover(hashed)
-        shortlist = [peer for peer in shortlist if peer != self]
+        
 
         if len(shortlist) == 0:
             raise NetworkError("unable to find peers to set {" + repr({key: value}) + "}")
@@ -175,8 +178,6 @@ class DHT(MutableMapping):
     def __len__(self):
         ...
 
-    def _keytransform(self, key):
-        ...
 
 central = Central()
 
