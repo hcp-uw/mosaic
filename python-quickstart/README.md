@@ -1,0 +1,1 @@
+writing initial POC code in python first, then translating to go for future speedups/concurrency tests
