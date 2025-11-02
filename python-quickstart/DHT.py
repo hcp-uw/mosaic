@@ -41,7 +41,10 @@ class BaseNode:
 
         self.data = DHT(self, "data")
 
-        self.k = 3
+        self.k = self.data.config["shortlist_threshold"] + 1
+
+        self._neighbors_dirty = None
+        self._neighbors_cache = None
 
     def _get_bucket_index(self, target_hash):
         distance = hash_distance(self.hash, target_hash)
@@ -67,22 +70,24 @@ class BaseNode:
             # Bucket full - EVICT OLDEST, add new node
             bucket.pop(0)  # remove least recently seen
             bucket.append(node)
+        self._neighbors_dirty = True
 
     @property
     def neighbors(self):
-        all_neighbors = set()
-        for bucket in self.buckets:
-            all_neighbors.update(bucket)
-        return all_neighbors
+        if self._neighbors_dirty:
+            self._neighbors_cache = set()
+            for bucket in self.buckets:
+                self._neighbors_cache.update(bucket)
+            self._neighbors_dirty = False
+        return self._neighbors_cache
 
     def bootstrap(self, bootstrap_node):
-        k = self.data.config["shortlist_threshold"] + 1
         
         # Add bootstrap node to our buckets
         self.add_contact(bootstrap_node)
         
         # Find nodes close to us
-        nodes_found = bootstrap_node.closest_to(self.hash, threshold=k)
+        nodes_found = bootstrap_node.closest_to(self.hash, threshold=self.k*2)
         
         # Add all discovered nodes to our k-buckets
         for node in nodes_found:
@@ -141,8 +146,8 @@ class BaseNode:
         candidates.append(self)
         
         # Remove duplicates and sort by actual distance
-        unique = {peer.hash: peer for peer in candidates}.values()
-        sorted_peers = sorted(unique, key=lambda other: hash_distance(hashed, other.hash))
+        unique = {peer.hash: peer for peer in candidates}
+        sorted_peers = sorted(unique.values(), key=lambda other: hash_distance(hashed, other.hash))
         
         if threshold == -1:
             return sorted_peers
@@ -155,22 +160,28 @@ class BaseNode:
 class Central(BaseNode):
     def __init__(self):
         super().__init__("central")
-        # self.neighbors.add(self)
         self.all_nodes = {self.hash: self}
 
     def register(self, node: BaseNode):
-        # closest = sorted([n for n in self.neighbors if n != node], key=lambda other: node_distance(node, other))
-        # node.neighbors = set(closest[:3])
-
-        # self.neighbors.add(node)
-
         node.bootstrap(self)
         self.all_nodes[node.hash] = node
-        self.add_contact(node)
+        # Don't need add_contact - Central uses all_nodes directly
 
+    def add_contact(self, node):
+        pass
+
+    @property
+    def neighbors(self):
+        return set(self.all_nodes.values()) - {self}
 
     def closest_to(self, hashed, threshold=-1):
-        return super().closest_to(hashed, threshold)
+        # Central is omniscient - use all_nodes, not buckets
+        candidates = list(self.all_nodes.values())
+        sorted_peers = sorted(candidates, key=lambda other: hash_distance(hashed, other.hash))
+        
+        if threshold == -1:
+            return sorted_peers
+        return sorted_peers[:threshold]
         
 
 class DHT(MutableMapping):
@@ -182,17 +193,15 @@ class DHT(MutableMapping):
             "use_references": True,
             "closest_threshold": -1,
             "query_threshold": 3,
-            "use_references": True,
             "shortlist_threshold": 5
         }    
 
     def discover(self, hashed, single_return=False):
-        initialcandidates = list(self.node.neighbors) + [self.node]
-        unique = {peer.hash: peer for peer in initialcandidates}.values()
+        initialcandidates = self.node.neighbors | {self.node}
 
         seen = set()
 
-        shortlist = sorted(unique, key=lambda peer: hash_distance(hashed, peer.hash))[:self.config["shortlist_threshold"]]
+        shortlist = sorted(initialcandidates, key=lambda peer: hash_distance(hashed, peer.hash))[:self.config["shortlist_threshold"]]
         staging = []
         while staging != shortlist:
             staging = shortlist
@@ -221,18 +230,20 @@ class DHT(MutableMapping):
                         return referenced
 
 
-                adjacent = peer.closest_to(hashed, threshold=self.config["closest_threshold"])
+                adjacent = peer.closest_to(hashed, threshold=self.node.k)
 
                 for p in adjacent:
-                    self.node.add_contact(p)
+                    if p.hash not in seen:
+                        self.node.add_contact(p)
 
                 new_peers.extend(adjacent)
                 seen.add(peer.hash)
 
-            combined = shortlist + new_peers
-            unique = {peer.hash: peer for peer in combined}.values()
+            combined = {peer.hash: peer for peer in shortlist}
+            for peer in new_peers:
+                combined[peer.hash] = peer
 
-            shortlist = sorted(unique, key=lambda peer: hash_distance(hashed, peer.hash))[:self.config["shortlist_threshold"]]
+            shortlist = sorted(combined.values(), key=lambda peer: hash_distance(hashed, peer.hash))[:self.config["shortlist_threshold"]]
 
         if single_return:
             return None
@@ -286,12 +297,32 @@ import time
 
 start = time.time()
 a = time.time()
-N = 10_000
+N = 5000
 
 for word in range(N):
     n = BaseNode(str(word))
     central.register(n)
     nodes[word] = n
+
+# After registration, before lookups
+neighbor_counts = [len(nodes[i].neighbors) for i in range(N)]
+print(f"Neighbors: min={min(neighbor_counts)}, max={max(neighbor_counts)}, avg={sum(neighbor_counts)/len(neighbor_counts):.1f}")
+
+# After registering all nodes
+print(f"Central has {len(central.neighbors)} total neighbors")
+print(f"Central.all_nodes has {len(central.all_nodes)} entries")
+
+# Should be equal!
+if len(central.neighbors) != len(central.all_nodes):
+    print("BUG: Central's buckets don't match all_nodes!")
+    
+# Check bucket distribution
+filled_buckets = sum(1 for b in central.buckets if b)
+print(f"Central has {filled_buckets} non-empty buckets")
+for i, bucket in enumerate(central.buckets):
+    if len(bucket) > 0:
+        print(f"  Bucket {i}: {len(bucket)} nodes (max={central.k})")
+
 
 print(f"Register {N} nodes: {(time.time() - a):.4f}s")
 
@@ -318,3 +349,4 @@ print(f"{error} lookup errors")
 print(f"Retrieve on {N} nodes: {(time.time() - a):.4f}s")
 
 print(f"Total: {time.time() - start:.4f}s")
+
