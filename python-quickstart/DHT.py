@@ -27,7 +27,6 @@ class NetworkError(Exception):
 
 # base node class
 class BaseNode:
-    K = 5
     def __init__(self, identifier):
         self.identifier = identifier
 
@@ -42,24 +41,53 @@ class BaseNode:
 
         self.data = DHT(self, "data")
 
+        self.k = 5
+
+    def _get_bucket_index(self, target_hash):
+        distance = hash_distance(self.hash, target_hash)
+        if distance == 0:
+            return None  
+        return distance.bit_length() - 1
+
+    def add_contact(self, node):
+        bucket_idx = self._get_bucket_index(node.hash)
+        if bucket_idx is None:
+            return
+        
+        bucket = self.buckets[bucket_idx]
+        
+        if node in bucket:
+            # Already have it - move to end (most recently seen)
+            bucket.remove(node)
+            bucket.append(node)
+        elif len(bucket) < self.k:
+            # Bucket not full - just add it
+            bucket.append(node)
+        else:
+            # Bucket full - EVICT OLDEST, add new node
+            bucket.pop(0)  # remove least recently seen
+            bucket.append(node)
+
     @property
     def neighbors(self):
         all_neighbors = set()
-        for bucket in self.k_buckets:
+        for bucket in self.buckets:
             all_neighbors.update(bucket)
         return all_neighbors
 
     def bootstrap(self, bootstrap_node):
-        self.neighbors.add(bootstrap_node) 
+        k = self.data.config["shortlist_threshold"] + 1
         
-        # 2. Run discover(self.hash)
-        #    This will query central, which *now* has the full list.
-        nodes_found = self.data.discover(self.hash)
+        # Add bootstrap node to our buckets
+        self.add_contact(bootstrap_node)
         
-        # 3. We *replace* our old neighbors with the new, correct list.
-        #    (We must keep 'self' and 'central')
-        self.neighbors = {bootstrap_node, self}
-        self.neighbors.update(nodes_found)
+        # Find nodes close to us
+        nodes_found = bootstrap_node.closest_to(self.hash, threshold=k)
+        
+        # Add all discovered nodes to our k-buckets
+        for node in nodes_found:
+            if node != self:
+                self.add_contact(node)
 
 
     def add(self, identifier, k, v):
@@ -89,14 +117,37 @@ class BaseNode:
         return self.internal_data[identifier].get(k)
 
     def closest_to(self, hashed, threshold=-1):
-        candidates = list(self.neighbors) + [self]
+        """Find closest nodes using k-buckets efficiently"""
+        bucket_idx = self._get_bucket_index(hashed)
+        
+        candidates = []
+        
+        if bucket_idx is not None:
+            # Start with the target bucket
+            candidates.extend(self.buckets[bucket_idx])
+            
+            # Expand outward to neighboring buckets until we have enough
+            distance = 1
+            while len(candidates) < (threshold if threshold > 0 else 50):
+                if bucket_idx - distance >= 0:
+                    candidates.extend(self.buckets[bucket_idx - distance])
+                if bucket_idx + distance < 256:
+                    candidates.extend(self.buckets[bucket_idx + distance])
+                distance += 1
+                if bucket_idx - distance < 0 and bucket_idx + distance >= 256:
+                    break
+        
+        # Add ourselves as a candidate
+        candidates.append(self)
+        
+        # Remove duplicates and sort by actual distance
         unique = {peer.hash: peer for peer in candidates}.values()
         sorted_peers = sorted(unique, key=lambda other: hash_distance(hashed, other.hash))
-
+        
         if threshold == -1:
             return sorted_peers
         return sorted_peers[:threshold]
-    
+        
     def __repr__(self):
         return f"BaseNode({self.identifier}, connections={len(self.neighbors)})"
 
@@ -155,6 +206,18 @@ class DHT(MutableMapping):
             query = []
             for peer in shortlist:
 
+                
+
+                if peer.hash not in seen:
+                    query.append(peer)
+                if len(query) == self.config["query_threshold"]: break
+        
+            if not query: break
+
+            new_peers = []
+            for peer in query:
+                self.node.add_contact(peer)
+
                 if single_return:
                     potential = peer.get_data(self.identifier, hashed)
                     if potential:
@@ -165,15 +228,12 @@ class DHT(MutableMapping):
                         return referenced
 
 
-                if peer.hash not in seen:
-                    query.append(peer)
-                if len(query) == self.config["query_threshold"]: break
-        
-            if not query: break
+                adjacent = peer.closest_to(hashed, threshold=self.config["closest_threshold"])
 
-            new_peers = []
-            for peer in query:
-                new_peers.extend(peer.closest_to(hashed, threshold=self.config["closest_threshold"]))
+                for p in adjacent:
+                    self.node.add_contact(p)
+
+                new_peers.extend(adjacent)
                 seen.add(peer.hash)
 
             combined = shortlist + new_peers
@@ -229,21 +289,24 @@ central = Central()
 
 nodes = {}
 
-for word in range(50):
+for word in range(5000):
     n = BaseNode(str(word))
     central.register(n)
     nodes[word] = n
+    if word % 10 == 0: print(n)
 
-for n in nodes:
-    central.register(nodes)
+# for n in nodes:
+#     central.register(nodes[n])
+
+print("all nodes registered")
 
 
-nodes[10].data["key"] = "value"
+nodes[0].data["key"] = "value"
 
 for n in nodes:
     try:
         nodes[n].data["key"]
     except:
-        pass
-    else:
         print(n)
+    else:
+        ...
