@@ -1,0 +1,7 @@
+google.com
+theverge.com
+arstechnica.com
+polygon.com
+nbcnews.com
+api.trigtbh.dev
+somethingthatdoesntexist.trigtbh.dev
