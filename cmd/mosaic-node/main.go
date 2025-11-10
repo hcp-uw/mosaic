@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"os"
 
 	"github.com/hcp-uw/mosaic/internal/encoding"
 )
@@ -9,7 +10,13 @@ import (
 func main() {
 	//for testing purposes rn
 
-	fileSize := 1267513984
+	// fileSize := 1267513984
+	file, err := os.ReadFile("output_file.jpg")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fileSize := len(file)
 
 	encoder, err := encoding.NewEncoder(8, 4, "./files", "./files/.bin")
 
@@ -24,7 +31,7 @@ func main() {
 
 	//fmt.Println(fileSize)
 
-	err = encoder.DecodeShards("pictures/BIG.txt", fileSize)
+	err = encoder.DecodeShards("pictures/pic.jpg", fileSize)
 	if err != nil {
 		log.Fatal(err)
 	}
