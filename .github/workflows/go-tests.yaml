@@ -39,35 +39,26 @@ jobs:
       # --- Run tests and collect coverage ---
       - name: Run tests with coverage
         run: |
+          # Ensure coverage.out is created and has content
           go test -v -coverprofile=coverage.out ./...
           go tool cover -func=coverage.out
 
-      # --- Generate coverage badge (Now runs on ALL branches/PRs) ---
+      # --- Generate coverage badge (Pinned to v2) ---
+      # Set continue-on-error: true so failure here doesn't block the next step
       - name: Generate coverage badge
-        id: generate-coverage-badge
         uses: tj-actions/coverage-badge-go@v2
+        if: github.ref == 'refs/heads/main'
         with:
           filename: coverage.out
-          # FIX: Explicitly set the output filename to force SVG creation
-          output: coverage-badge.svg
-        continue-on-error: true
+        continue-on-error: true # Added for robustness
 
-      # --- Upload Badge as Artifact (for Branches/PRs) ---
-      - name: Upload coverage badge artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-badge
-          path: coverage-badge.svg
-          retention-days: 5
-        if: steps.generate-coverage-badge.outcome == 'success'
-
-      # --- Commit coverage badge (Still main only) ---
+      # --- Commit coverage badge (main only) ---
       - name: Commit coverage badge
         if: github.ref == 'refs/heads/main'
         run: |
-          # The shell check is still good practice for robustness
+          # Robust check: Only proceed if the badge file actually exists.
           if [ ! -f coverage-badge.svg ]; then
-            echo "Skipping commit: coverage-badge.svg file was not generated in the previous step."
+            echo "Skipping commit: coverage-badge.svg file was not generated."
             exit 0
           fi
           
