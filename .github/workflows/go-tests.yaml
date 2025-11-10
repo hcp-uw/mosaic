@@ -19,7 +19,6 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          # Your targeted Go version
           go-version: v1.25.1
 
       # --- Cache Go modules (Pinned to v4) ---
@@ -33,7 +32,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-
 
-      # --- Download Dependencies (Best Practice) ---
+      # --- Download Dependencies (Recommended Practice) ---
       - name: Download Go modules
         run: go mod download
 
@@ -41,8 +40,8 @@ jobs:
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v4
         with:
-          # FIX: Pinning the linter version to ensure compatibility with Go 1.25.1
-          version: v1.59.1
+          # FIX: Updated version to v1.60.2 for compatibility with Go 1.25.1
+          version: v1.60.2 
           args: ./...
           
       # --- Run tests and collect coverage ---
@@ -65,6 +64,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add coverage-badge.svg
-          # Use --allow-empty in case coverage percentage didn't change
           git commit -m "chore: update coverage badge" || echo "No changes to commit"
           git push
