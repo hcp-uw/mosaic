@@ -1,0 +1,57 @@
+name: Go Tests
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Run tests and collect coverage
+        run: |
+          go test -v -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out
+
+      - name: Upload coverage to badge service
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.out
+
+      # --- OPTIONAL: generate a badge automatically via shields.io or go-coverage-badge ---
+      - name: Generate coverage badge
+        uses: tj-actions/coverage-badge-go@v2
+        with:
+          filename: coverage.out
+          output: coverage-badge.svg
+
+      - name: Commit coverage badge
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add coverage-badge.svg
+          git commit -m "update coverage badge" || echo "no changes to commit"
+          git push
+
