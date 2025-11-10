@@ -8,6 +8,9 @@ import (
 	_ "embed" // required for //go:embed
 	"fmt"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 )
 
 //go:embed HelpMessage.txt
@@ -22,31 +25,6 @@ func Run(Args []string) {
 	}
 
 	switch args[1] {
-	case "join":
-		switch args[2] {
-		case "network":
-			joinNetwork()
-		default:
-			fmt.Println("Unknown argument:", args[2])
-			os.Exit(1)
-		}
-	case "status":
-		if len(args) != 3 {
-			fmt.Println("Please give a valid command.")
-			os.Exit(1)
-		}
-		switch args[2] {
-		case "network":
-			statusNetwork()
-		case "node":
-			statusNode()
-		case "account":
-			statusAccount()
-		default:
-			fmt.Println("Unknown argument:", args[2])
-			os.Exit(1)
-
-		}
 	case "login":
 		if len(args) != 4 {
 			fmt.Println("Usage: mos login key <key>")
@@ -71,27 +49,16 @@ func Run(Args []string) {
 			fmt.Println("Unknown argument:", args[2])
 			os.Exit(1)
 		}
-
-	case "peers":
-		if len(args) != 3 {
-			fmt.Println("Use mos peers network to view peers.")
+	case "version":
+		if len(args) != 2 {
+			fmt.Println("Please give a valid command.")
 			os.Exit(1)
 		}
+		version()
+	case "join":
 		switch args[2] {
 		case "network":
-			peersNetwork()
-		default:
-			fmt.Println("Unknown argument:", args[2])
-			os.Exit(1)
-		}
-	case "empty":
-		if len(args) != 3 {
-			fmt.Println("Use mos peers network to view peers.")
-			os.Exit(1)
-		}
-		switch args[2] {
-		case "storage":
-			emptyStorage()
+			joinNetwork()
 		default:
 			fmt.Println("Unknown argument:", args[2])
 			os.Exit(1)
@@ -108,9 +75,61 @@ func Run(Args []string) {
 			fmt.Println("Unknown argument:", args[2])
 			os.Exit(1)
 		}
+	case "status":
+		if len(args) != 3 || len(args) != 4 {
+			fmt.Println("Please give a valid command.")
+			os.Exit(1)
+		}
+		switch args[2] {
+		case "network":
+			statusNetwork()
+		case "node":
+			statusNode()
+		case "account":
+			statusAccount()
+		default:
+			fmt.Println("Unknown argument:", args[2])
+			os.Exit(1)
+		}
+	case "peers":
+		if len(args) != 3 {
+			fmt.Println("Use mos peers network to view peers.")
+			os.Exit(1)
+		}
+		switch args[2] {
+		case "network":
+			peersNetwork()
+		default:
+			fmt.Println("Unknown argument:", args[2])
+			os.Exit(1)
+		}
+	case "set":
+		if len(args) != 4 {
+			fmt.Println("Use mos set storage <amount> to set storage.")
+			os.Exit(1)
+		}
+		switch args[2] {
+		case "storage":
+			setStorage()
+		default:
+			fmt.Println("Unknown argument:", args[2])
+			os.Exit(1)
+		}
+	case "empty":
+		if len(args) != 3 {
+			fmt.Println("Use mos empty storage to delete all stored data in the network.")
+			os.Exit(1)
+		}
+		switch args[2] {
+		case "storage":
+			emptyStorage()
+		default:
+			fmt.Println("Unknown argument:", args[2])
+			os.Exit(1)
+		}
 	case "list":
 		if len(args) != 3 {
-			fmt.Println("Use mos list file to view peers.")
+			fmt.Println("Use mos list file to list all files on the network.")
 			os.Exit(1)
 		}
 		switch args[2] {
@@ -120,12 +139,70 @@ func Run(Args []string) {
 			fmt.Println("Unknown argument:", args[2])
 			os.Exit(1)
 		}
-	case "version":
-		if len(args) != 2 {
-			fmt.Println("Please give a valid command.")
+	case "upload":
+		if len(args) != 4 {
+			fmt.Println("Usage:")
+			fmt.Println("mos upload file <path>")
+			fmt.Println("mos upload folder <path>")
 			os.Exit(1)
 		}
-		version()
+		switch args[2] {
+		case "file":
+			uploadFile()
+		case "folder":
+			uploadFolder()
+		default:
+			fmt.Println("Unknown argument:", args[2])
+			os.Exit(1)
+		}
+	case "download":
+		if len(args) != 4 {
+			fmt.Println("Usage:")
+			fmt.Println("mos download file <path>")
+			fmt.Println("mos download folder <path>")
+			os.Exit(1)
+		}
+		switch args[2] {
+		case "file":
+			downloadFile()
+		case "folder":
+			downloadFolder()
+		default:
+			fmt.Println("Unknown argument:", args[2])
+			os.Exit(1)
+		}
+	case "info":
+		if len(args) != 4 {
+			fmt.Println("Usage:")
+			fmt.Println("mos info file <path>")
+			fmt.Println("mos info folder <path>")
+			os.Exit(1)
+		}
+		switch args[2] {
+		case "file":
+			fileInfo()
+		case "folder":
+			folderInfo()
+		default:
+			fmt.Println("Unknown argument:", args[2])
+			os.Exit(1)
+		}
+	case "delete":
+		if len(args) != 4 {
+			fmt.Println("Usage:")
+			fmt.Println("mos delete file <path>")
+			fmt.Println("mos delete folder <path>")
+			os.Exit(1)
+		}
+		switch args[2] {
+		case "file":
+			deleteFile()
+		case "folder":
+			deleteFolder()
+		default:
+			fmt.Println("Unknown argument:", args[2])
+			os.Exit(1)
+		}
 	case "help":
 		help()
 	default:
@@ -144,7 +221,6 @@ func joinNetwork() {
 	fmt.Printf("%d GB of storage shared\n", storage)
 	fmt.Printf("Connected to %d peers\n", peers)
 }
-
 func statusNetwork() {
 	//totalStor, freeStor, peers, err := statusNetwork()
 	totalStor := 0
@@ -168,7 +244,7 @@ func statusNode() {
 	storUsed := 69
 	var err error = nil
 	exitOnErr(err, "Error getting node status:")
-	fmt.Printf("Node ID: %s@node-%d\n", username, nodeID)
+	fmt.Printf("Node ID: %s@node-%v\n", username, nodeID)
 	fmt.Printf("Storage Shared: %d GB\n", storShared)
 	fmt.Printf("Storage Used: %d GB\n", storUsed)
 }
@@ -216,18 +292,37 @@ func peersNetwork() {
 		fmt.Printf("%s@node-%d | Shared: %d GB\n", peer.user, peer.id, peer.data)
 	}
 }
+func setStorage() {
+	amountStr := args[3]
+	amount, err := strconv.Atoi(amountStr)
+	if err != nil {
+		fmt.Println("Please enter a valid integer amount (in GB).")
+		os.Exit(1)
+	}
+	total := GetTotalStorage()
+	if amount > total {
+		fmt.Printf("Error: cannot set storage to %d GB, exceeds total capacity of %d GB.\n", amount, total)
+		os.Exit(1)
+	}
+
+	// storUsable, err := setStorageMethod(amount)
+	storUsable := 80
+	var errStor error = nil
+	exitOnErr(errStor, "Error setting storage: ")
+	fmt.Printf("Storage successfully set to %d GB.\nUsable storage: %d GB.\n", amount, storUsable)
+}
 func emptyStorage() {
 	// data, err := emptyStorage()
 	data := 12
 	var err error = nil
 	exitOnErr(err, "Error emptying storage:")
-	fmt.Printf("%d GB of data deleted successfully.", data)
+	fmt.Printf("%d GB of data deleted successfully.\n", data)
 }
 func leaveNetwork() {
 	// err := leaveNetworkMethod()
 	var err error = nil
 	exitOnErr(err, "Error leaving network:")
-	fmt.Printf("Network left successfully.")
+	fmt.Println("Network left successfully.")
 }
 func listFile() {
 	// []files, err := listFiles()
@@ -241,6 +336,164 @@ func listFile() {
 	}
 
 }
+func uploadFile() {
+	filePath := args[3]
+
+	fileInfo, err := os.Stat(filePath)
+	if os.IsNotExist(err) {
+		fmt.Println("Error: file does not exist at path:", filePath)
+		os.Exit(1)
+	}
+	exitOnErr(err, "Error reading file info:")
+
+	if fileInfo.IsDir() {
+		fmt.Println("Your provided path points to a directory. Use 'mos upload folder <path>' instead.")
+		os.Exit(1)
+	}
+
+	// uploadErr := uploadFile(filePath)
+	var uploadErr error = nil
+	exitOnErr(uploadErr, "Error uploading file.")
+	fileSize := fileInfo.Size() / 1024
+	fmt.Printf("Uploading file: %s (%d KB)\n", fileInfo.Name(), fileSize)
+	fmt.Printf("File '%s' uploaded successfully to network.\n", fileInfo.Name())
+	storage := GetTotalStorage()
+	fmt.Printf("Storage remaining: %d GB\n", storage)
+}
+func uploadFolder() {
+	root := args[3]
+
+	info, err := os.Stat(root)
+	if os.IsNotExist(err) {
+		fmt.Println("Error: folder does not exist at path:", root)
+		os.Exit(1)
+	}
+	exitOnErr(err, "Error reading folder info:")
+
+	if !info.IsDir() {
+		fmt.Println("Error: path points to a file. Use 'mos upload file <path>' instead.")
+		os.Exit(1)
+	}
+
+	fmt.Printf("Starting upload of folder: %s\n", root)
+	err = UploadFolderRecursive(root, false, true)
+	exitOnErr(err, "Error uploading folder:")
+	if root == "." {
+		fmt.Println("Finished uploading current folder.")
+	} else {
+		fmt.Printf("Finished uploading folder: %s\n", root)
+	}
+	storage := GetTotalStorage()
+	fmt.Printf("Storage remaining: %d GB\n", storage)
+}
+func UploadFolderRecursive(path string, showSubFiles bool, isRoot bool) error {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		fullPath := filepath.Join(path, entry.Name())
+
+		if entry.IsDir() {
+			fmt.Println("Uploading folder:", entry.Name())
+			err := UploadFolderRecursive(fullPath, showSubFiles, false)
+			if err != nil {
+				return err
+			}
+		} else {
+			// replace with: uploadErr := uploadFile(fullPath)
+			var uploadErr error = nil
+			if uploadErr != nil {
+				return uploadErr
+			}
+			if isRoot || showSubFiles {
+				fmt.Println("Uploading file:", entry.Name())
+			}
+		}
+	}
+
+	return nil
+}
+func downloadFile() {
+	filePath := args[3]
+	// err := downloadFileMethod(filePath)
+	var err error = nil
+	exitOnErr(err, "Error downloading "+filePath+": ")
+	fmt.Printf("File '%v' downloaded successfully from network.\n", filePath)
+}
+func downloadFolder() {
+	folderPath := args[3]
+	// err := downloadFolderMethod(folderPath)
+	var err error = nil
+	exitOnErr(err, "Error downloading "+folderPath+": ")
+	fmt.Printf("Folder '%v' downloaded successfully from network.\n", folderPath)
+}
+func deleteFile() {
+	// since the deleting wont be local I cant really do much for it here
+	filePath := args[3]
+	// err := deleteFileMethod(filePath)
+	var err error = nil
+	exitOnErr(err, "Error deleting "+filePath+": ")
+	fmt.Printf("File '%v' deleted successfully from network.\n", filePath)
+	storage := GetTotalStorage()
+	fmt.Printf("Storage remaining: %d GB\n", storage)
+}
+func deleteFolder() {
+	// since the deleting wont be local I cant really do much for it here
+	folderPath := args[3]
+	// err := deleteFolderMethod(folderPath)
+	var err error = nil
+	exitOnErr(err, "Error deleting "+folderPath+": ")
+	fmt.Printf("Folder '%v' deleted successfully from network.\n", folderPath)
+	storage := GetTotalStorage()
+	fmt.Printf("Storage remaining: %d GB\n", storage)
+}
+func fileInfo() {
+	// idk what metadata we want exactly but this should be a rough estimate to serve as a model
+	type File struct {
+		name      string
+		nodeID    int
+		dateAdded string
+		size      int
+	}
+	// info, err := getFileInfo(args[3])
+	var err error = nil
+	exitOnErr(err, "Error getting info on file.")
+	info := File{"image.jpg", 67, "06-07-2025", 20}
+	fmt.Printf(
+		"Name: %s\n"+
+			"	NodeID: %d\n"+
+			"	Date Added: %v\n"+
+			"	Size: %d GB\n",
+		info.name, info.nodeID, info.dateAdded, info.size,
+	)
+}
+func folderInfo() {
+	// idk what metadata we want exactly but this should be a rough estimate to serve as a model
+	type Folder struct {
+		name      string
+		nodeID    int
+		dateAdded string
+		size      int
+		numFiles  int
+	}
+	// info, err := getFolderInfo(args[3])
+	var err error = nil
+	exitOnErr(err, "Error getting info on folder.")
+	info := Folder{"FriesInBag", 67, "06-08-2025", 50, 23}
+	fmt.Printf(
+		"Name: %s\n"+
+			"	NodeID: %d\n"+
+			"	Date Added: %v\n"+
+			"	Size: %d GB\n"+
+			"	Number of files: %d",
+		info.name, info.nodeID, info.dateAdded, info.size, info.numFiles,
+	)
+}
 func version() {
 	// vers := getVersion()
 	vers := "1.2.26"
@@ -251,6 +504,14 @@ func version() {
 }
 func help() {
 	fmt.Println(helpMessage)
+}
+func GetTotalStorage() int {
+	// also add a method to check how much storage is left and print that out
+	// storage, err := getStorage()
+	storage := 67
+	var errS error = nil
+	exitOnErr(errS, "Error fetching storage.")
+	return storage
 }
 func exitOnErr(err error, msg string) {
 	if err != nil {
