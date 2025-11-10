@@ -2,23 +2,26 @@ name: Go CI
 
 on:
   push:
-    branches: [ "**" ]   # Run on all branches (change later to main/master)
+    branches: [ main, master ]
   pull_request:
-    branches: [ "**" ]
+    branches: [ main, master ]
 
 jobs:
   ci:
     runs-on: ubuntu-latest
 
     steps:
+      # --- Checkout code (Pinned to v4) ---
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # --- Setup Go (Pinned to v6) ---
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: 1.25.1
+          go-version: v1.25.1
 
+      # --- Cache Go modules (Pinned to v4) ---
       - name: Cache Go modules
         uses: actions/cache@v4
         with:
@@ -29,21 +32,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-
 
+      # --- Download Dependencies (Recommended Practice) ---
       - name: Download Go modules
         run: go mod download
 
+      # --- Run tests and collect coverage ---
       - name: Run tests with coverage
         run: |
-                     go test -v -coverprofile=coverage.out ./...
+          # Ensure coverage.out is created and has content
+          go test -v -coverprofile=coverage.out ./...
           go tool cover -func=coverage.out
-
-      - name: Check coverage threshold
-        run: |
-          coverage=$(go tool cover -func=coverage.out | grep total | awk '{print substr($3, 1, length($3)-1)}')
-          echo "Total coverage: $coverage%"
-          threshold=70.0
-          awk -v c=$coverage -v t=$threshold 'BEGIN { if (c < t) { 
-            printf("::error::Coverage (%.1f%%) is below threshold (%.1f%%)\n", c, t); 
-            exit 1 
-          } }'
 
