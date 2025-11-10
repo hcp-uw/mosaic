@@ -43,23 +43,17 @@ jobs:
           go test -v -coverprofile=coverage.out ./...
           go tool cover -func=coverage.out
 
-      # --- Generate coverage badge (Pinned to v2) ---
-      # Set continue-on-error: true so failure here doesn't block the next step
-      - name: Generate coverage badge
-        uses: tj-actions/coverage-badge-go@v2
-        if: github.ref == 'refs/heads/main'
-        with:
-          filename: coverage.out
-        continue-on-error: true # Added for robustness
-
-      # --- Commit coverage badge (main only) ---
-      - name: Commit coverage badge
-        if: github.ref == 'refs/heads/main'
+      - name: Check coverage threshold
         run: |
-          # Robust check: Only proceed if the badge file actually exists.
-          
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add .
-          git commit -m "chore: update coverage badge" || echo "No changes to commit"
-          git push
+          # Extract total coverage percentage
+          coverage=$(go tool cover -func=coverage.out | grep total | awk '{print substr($3, 1, length($3)-1)}')
+          echo "Total coverage: $coverage%"
+
+          # Define minimum threshold
+          threshold=70.0
+
+          # Compare and fail if below threshold
+          awk -v c=$coverage -v t=$threshold 'BEGIN { if (c < t) { 
+            printf("::error::Coverage (%.1f%%) is below threshold (%.1f%%)\n", c, t); 
+            exit 1 
+          } }'
