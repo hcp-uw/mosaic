@@ -1,3 +1,4 @@
+
 name: Go CI
 
 on:
@@ -46,25 +47,36 @@ jobs:
       # --- Run tests and collect coverage ---
       - name: Run tests with coverage
         run: |
-          # Ensure coverage.out is created and has content
           go test -v -coverprofile=coverage.out ./...
           go tool cover -func=coverage.out
 
-      # --- Generate coverage badge (Pinned to v2) ---
-      # Set continue-on-error: true so failure here doesn't block the next step
+      # --- Generate coverage badge (Now runs on ALL branches/PRs) ---
       - name: Generate coverage badge
+        id: generate-coverage-badge # Added ID to reference this step
         uses: tj-actions/coverage-badge-go@v2
-        if: github.ref == 'refs/heads/main'
+        # REMOVED: The 'if' condition so it runs on all branches!
         with:
           filename: coverage.out
-        continue-on-error: true # Added for robustness
+        continue-on-error: true
 
-      # --- Commit coverage badge (main only) ---
+      # --- Upload Badge as Artifact (NEW STEP for Branches/PRs) ---
+      # This makes the badge viewable on the workflow summary page
+      - name: Upload coverage badge artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-badge
+          path: coverage-badge.svg
+          retention-days: 5
+        # Only upload if the badge generation step actually succeeded
+        if: steps.generate-coverage-badge.outcome == 'success'
+
+      # --- Commit coverage badge (Still main only) ---
       - name: Commit coverage badge
+        if: github.ref == 'refs/heads/main'
         run: |
-          # Robust check: Only proceed if the badge file actually exists.
+          # This shell check still acts as a fail-safe if the badge generation failed on 'main'.
           if [ ! -f coverage-badge.svg ]; then
-            echo "Skipping commit: coverage-badge.svg file was not generated."
+            echo "Skipping commit: coverage-badge.svg file was not generated in the previous step."
             exit 0
           fi
           
