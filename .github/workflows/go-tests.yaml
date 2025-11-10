@@ -47,12 +47,14 @@ jobs:
       # Set continue-on-error: true so failure here doesn't block the next step
       - name: Generate coverage badge
         uses: tj-actions/coverage-badge-go@v2
+        if: github.ref == 'refs/heads/main'
         with:
           filename: coverage.out
         continue-on-error: true # Added for robustness
 
       # --- Commit coverage badge (main only) ---
       - name: Commit coverage badge
+        if: github.ref == 'refs/heads/main'
         run: |
           # Robust check: Only proceed if the badge file actually exists.
           
