@@ -1,4 +1,4 @@
-name: Go CI
+ name: Go CI
 
 on:
   push:
@@ -19,7 +19,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: v1.25.1
+          go-version: 1.25.1
 
       # --- Cache Go modules (Pinned to v4) ---
       - name: Cache Go modules
@@ -32,14 +32,32 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-
 
-      # --- Download Dependencies (Recommended Practice) ---
+      # --- Download Dependencies ---
       - name: Download Go modules
         run: go mod download
 
       # --- Run tests and collect coverage ---
       - name: Run tests with coverage
         run: |
-          # Ensure coverage.out is created and has content
+          # Fail immediately if tests fail
           go test -v -coverprofile=coverage.out ./...
+
+          # Show coverage summary
           go tool cover -func=coverage.out
+
+      # --- Enforce coverage threshold ---
+      - name: Check coverage threshold
+        run: |
+          # Extract total coverage percentage
+          coverage=$(go tool cover -func=coverage.out | grep total | awk '{print substr($3, 1, length($3)-1)}')
+          echo "Total coverage: $coverage%"
+
+          # Define minimum threshold
+          threshold=70.0
+
+          # Compare and fail if below threshold
+          awk -v c=$coverage -v t=$threshold 'BEGIN { if (c < t) { 
+            printf("::error::Coverage (%.1f%%) is below threshold (%.1f%%)\n", c, t); 
+            exit 1 
+          } }'
 
