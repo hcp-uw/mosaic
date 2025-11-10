@@ -1,4 +1,4 @@
-name: Go Tests
+name: Go CI
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
     branches: [ main, master ]
 
 jobs:
-  test:
+  ci:
     runs-on: ubuntu-latest
 
     steps:
@@ -29,29 +29,34 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-
 
+      # --- Linting ---
+      - name: Install golangci-lint
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s latest
+          export PATH=$PATH:$(go env GOPATH)/bin
+
+      - name: Run golangci-lint
+        run: golangci-lint run ./...
+
+      # --- Tests with coverage ---
       - name: Run tests and collect coverage
         run: |
           go test -v -coverprofile=coverage.out ./...
           go tool cover -func=coverage.out
 
-      - name: Upload coverage to badge service
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-report
-          path: coverage.out
-
-      # --- OPTIONAL: generate a badge automatically via shields.io or go-coverage-badge ---
+      # --- Generate coverage badge ---
       - name: Generate coverage badge
         uses: tj-actions/coverage-badge-go@v2
+        if: github.ref == 'refs/heads/main'
         with:
           filename: coverage.out
-          output: coverage-badge.svg
 
       - name: Commit coverage badge
+        if: github.ref == 'refs/heads/main'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add coverage-badge.svg
-          git commit -m "update coverage badge" || echo "no changes to commit"
+          git commit -m "chore: update coverage badge" || echo "No changes to commit"
           git push
 
