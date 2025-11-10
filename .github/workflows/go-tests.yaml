@@ -43,3 +43,17 @@ jobs:
           go test -v -coverprofile=coverage.out ./...
           go tool cover -func=coverage.out
 
+      - name: Check coverage threshold
+        run: |
+          # Extract total coverage percentage
+          coverage=$(go tool cover -func=coverage.out | grep total | awk '{print substr($3, 1, length($3)-1)}')
+          echo "Total coverage: $coverage%"
+
+          # Define minimum threshold
+          threshold=70.0
+
+          # Compare and fail if below threshold
+          awk -v c=$coverage -v t=$threshold 'BEGIN { if (c < t) { 
+            printf("::error::Coverage (%.1f%%) is below threshold (%.1f%%)\n", c, t); 
+            exit 1 
+          } }'
