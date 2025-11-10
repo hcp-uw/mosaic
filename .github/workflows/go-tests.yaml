@@ -19,7 +19,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          version: v1.25.1
+          go-version: v1.25.1
 
       # --- Cache Go modules ---
       - name: Cache Go modules
