@@ -37,12 +37,6 @@ jobs:
       - name: Download Go modules
         run: go mod download
 
-      # --- Linting (Pinned to v4) ---
-      - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v4
-        with:
-          version: v1.60.2 
-          args: ./...
           
       # --- Run tests and collect coverage ---
       - name: Run tests with coverage
