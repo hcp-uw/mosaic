@@ -47,7 +47,6 @@ jobs:
       # Set continue-on-error: true so failure here doesn't block the next step
       - name: Generate coverage badge
         uses: tj-actions/coverage-badge-go@v2
-        if: github.ref == 'refs/heads/main'
         with:
           filename: coverage.out
         continue-on-error: true # Added for robustness
@@ -57,13 +56,9 @@ jobs:
         if: github.ref == 'refs/heads/main'
         run: |
           # Robust check: Only proceed if the badge file actually exists.
-          if [ ! -f coverage-badge.svg ]; then
-            echo "Skipping commit: coverage-badge.svg file was not generated."
-            exit 0
-          fi
           
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add coverage-badge.svg
+          git add .
           git commit -m "chore: update coverage badge" || echo "No changes to commit"
           git push
