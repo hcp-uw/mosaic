@@ -1,0 +1,61 @@
+name: Go CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    steps:
+      # --- Checkout code (Pinned to v4) ---
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # --- Setup Go (Pinned to v6) ---
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: v1.25.1
+
+      # --- Cache Go modules (Pinned to v4) ---
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      # --- Download Dependencies (Recommended Practice) ---
+      - name: Download Go modules
+        run: go mod download
+
+          
+      # --- Run tests and collect coverage ---
+      - name: Run tests with coverage
+        run: |
+          go test -v -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out
+
+      # --- Generate coverage badge (Pinned to v2) ---
+      - name: Generate coverage badge
+        uses: tj-actions/coverage-badge-go@v2
+        if: github.ref == 'refs/heads/main'
+        with:
+          filename: coverage.out
+
+      # --- Commit coverage badge (main only) ---
+      - name: Commit coverage badge
+        if: github.ref == 'refs/heads/main'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add coverage-badge.svg
+          git commit -m "chore: update coverage badge" || echo "No changes to commit"
+          git push
