@@ -1,8 +1,5 @@
 package cli
 
-// to use:
-// go build -o mos ./cmd/mosaic-node
-// sudo mv mos /usr/local/bin/
 import (
 	// "flag"
 	_ "embed" // required for //go:embed
@@ -11,6 +8,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/hcp-uw/mosaic/internal/client"
+	"github.com/hcp-uw/mosaic/internal/protocol"
 )
 
 //go:embed HelpMessage.txt
@@ -76,7 +76,7 @@ func Run(Args []string) {
 			os.Exit(1)
 		}
 	case "status":
-		if len(args) != 3 || len(args) != 4 {
+		if len(args) != 3 && len(args) != 4 {
 			fmt.Println("Please give a valid command.")
 			os.Exit(1)
 		}
@@ -206,7 +206,7 @@ func Run(Args []string) {
 	case "help":
 		help()
 	default:
-		fmt.Println("Unknown command:", args[1])
+		fmt.Printf("mos: '%v' is not a mos command. See 'mos help'.\n", args[1])
 		os.Exit(1)
 	}
 }
@@ -351,9 +351,12 @@ func uploadFile() {
 		os.Exit(1)
 	}
 
-	// uploadErr := uploadFile(filePath)
-	var uploadErr error = nil
+	resp, uploadErr := client.SendRequest("uploadFile", protocol.UploadRequest{
+		Path: filePath,
+	})
 	exitOnErr(uploadErr, "Error uploading file.")
+	fmt.Println(resp.Message)
+
 	fileSize := fileInfo.Size() / 1024
 	fmt.Printf("Uploading file: %s (%d KB)\n", fileInfo.Name(), fileSize)
 	fmt.Printf("File '%s' uploaded successfully to network.\n", fileInfo.Name())
@@ -399,7 +402,10 @@ func UploadFolderRecursive(path string, showSubFiles bool, isRoot bool) error {
 		fullPath := filepath.Join(path, entry.Name())
 
 		if entry.IsDir() {
-			fmt.Println("Uploading folder:", entry.Name())
+			if isRoot || showSubFiles {
+				fmt.Println("Uploading folder:", entry.Name())
+			}
+			//fmt.Println("Uploading folder:", entry.Name())
 			err := UploadFolderRecursive(fullPath, showSubFiles, false)
 			if err != nil {
 				return err
@@ -407,9 +413,7 @@ func UploadFolderRecursive(path string, showSubFiles bool, isRoot bool) error {
 		} else {
 			// replace with: uploadErr := uploadFile(fullPath)
 			var uploadErr error = nil
-			if uploadErr != nil {
-				return uploadErr
-			}
+			exitOnErr(uploadErr, "Error uploading file: "+fullPath)
 			if isRoot || showSubFiles {
 				fmt.Println("Uploading file:", entry.Name())
 			}
