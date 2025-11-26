@@ -6,12 +6,11 @@ import (
 	"net"
 	"time"
 
-	"github.com/hcp-uw/mosaic/internal/protocol"
-	"github.com/hcp-uw/mosaic/internal/shared"
+	"github.com/hcp-uw/mosaic/internal/cli/protocol"
+	"github.com/hcp-uw/mosaic/internal/cli/shared"
 )
 
 func SendRequest(command string, data interface{}) (*protocol.Response, error) {
-	fmt.Println("test10")
 	conn, err := net.DialTimeout("unix", shared.SocketPath, 2*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to daemon (%s): %w", shared.SocketPath, err)

@@ -6,9 +6,9 @@ import (
 	"net"
 	"os"
 
-	"github.com/hcp-uw/mosaic/internal/handlers"
-	"github.com/hcp-uw/mosaic/internal/protocol"
-	"github.com/hcp-uw/mosaic/internal/shared"
+	"github.com/hcp-uw/mosaic/internal/cli/handlers"
+	"github.com/hcp-uw/mosaic/internal/cli/protocol"
+	"github.com/hcp-uw/mosaic/internal/cli/shared"
 )
 
 func StartServer() error {
@@ -50,26 +50,54 @@ func handleConn(conn net.Conn) {
 	case "uploadFile":
 		var up protocol.UploadRequest
 		if err := toStruct(req.Data, &up); err != nil {
-			enc.Encode(&protocol.Response{Ok: false, Message: "bad upload request"})
+			enc.Encode(&protocol.Response{Ok: false, Message: "Upload request failed."})
 			return
 		}
 		resp := handlers.HandleUpload(up)
-		enc.Encode(&protocol.Response{Ok: true, Message: "ok", Data: resp})
+		// this line is terminal output if it works
+		message := fmt.Sprintf("File '%s' uploaded successfully to network.\n- Available storage remaining: %d GB.\n",
+			resp.Name, resp.AvailableStorage)
+		enc.Encode(&protocol.Response{Ok: true, Message: message, Data: resp})
 
-	/*
-		case "status":
-			resp := handlers.HandleStatus()
-			enc.Encode(&protocol.Response{Ok: true, Message: "ok", Data: resp})
+	case "statusNetwork":
+		var up protocol.NetworkStatusRequest
+		if err := toStruct(req.Data, &up); err != nil {
+			enc.Encode(&protocol.Response{Ok: false, Message: "Network status request failed."})
+			return
+		}
+		resp := handlers.StatusNetwork(up)
+		message := fmt.Sprintf("Network Status:\n- Total Network Storage: %d GB\n- Your Available Storage: %d GB\n- Number of Peers: %d\n",
+			resp.NetworkStorage, resp.AvailableStorage, resp.Peers)
+		enc.Encode(&protocol.Response{Ok: true, Message: message, Data: resp})
 
-		case "join":
-			var j protocol.JoinRequest
-			if err := toStruct(req.Data, &j); err != nil {
-				enc.Encode(&protocol.Response{Ok: false, Message: "bad join request"})
-				return
-			}
-			resp := handlers.HandleJoin(j)
-			enc.Encode(&protocol.Response{Ok: true, Message: "ok", Data: resp})
-	*/
+	case "joinNetwork":
+		var up protocol.JoinRequest
+		if err := toStruct(req.Data, &up); err != nil {
+			enc.Encode(&protocol.Response{Ok: false, Message: "Join request failed."})
+			return
+		}
+		resp := handlers.HandleJoin(up)
+		message := fmt.Sprintf("Joined network successfully.\n- Connected to %d peers.\n", resp.Peers)
+		enc.Encode(&protocol.Response{Ok: true, Message: message, Data: resp})
+
+	case "statusNode":
+		var up protocol.NodeStatusRequest
+		if err := toStruct(req.Data, &up); err != nil {
+			enc.Encode(&protocol.Response{Ok: false, Message: "Node status request failed."})
+			return
+		}
+		resp := handlers.StatusNode(up)
+		message := fmt.Sprintf("Node status processed successfully.\n- Node ID: %s@node-%v\n- Storage Shared: %d GB\n", resp.Username, resp.ID, resp.StorageShare)
+		enc.Encode(&protocol.Response{Ok: true, Message: message, Data: resp})
+	case "loginKey":
+		var up protocol.LoginKeyRequest
+		if err := toStruct(req.Data, &up); err != nil {
+			enc.Encode(&protocol.Response{Ok: false, Message: "Login request failed."})
+			return
+		}
+		resp := handlers.LoginKey(up)
+		message := fmt.Sprintf("Logged in with key successfully.\n- Current Node: %s@node-%v\n", resp.Username, resp.CurrentNode)
+		enc.Encode(&protocol.Response{Ok: true, Message: message, Data: resp})
 	default:
 		enc.Encode(&protocol.Response{Ok: false, Message: "unknown command"})
 	}

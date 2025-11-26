@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/hcp-uw/mosaic/internal/client"
-	"github.com/hcp-uw/mosaic/internal/protocol"
+	"github.com/hcp-uw/mosaic/internal/cli/client"
+	"github.com/hcp-uw/mosaic/internal/cli/protocol"
 )
 
 //go:embed HelpMessage.txt
@@ -84,6 +84,10 @@ func Run(Args []string) {
 		case "network":
 			statusNetwork()
 		case "node":
+			if len(args) != 4 {
+				fmt.Println("Usage: mos status node <node_id>")
+				os.Exit(1)
+			}
 			statusNode()
 		case "account":
 			statusAccount()
@@ -212,41 +216,20 @@ func Run(Args []string) {
 }
 
 func joinNetwork() {
-	//storage, peers, err := joinNetworkMethod()
-	storage := 0
-	peers := 0
-	var err error = nil
-	exitOnErr(err, "Error joining network:")
-	fmt.Println("Network joined successfully.")
-	fmt.Printf("%d GB of storage shared\n", storage)
-	fmt.Printf("Connected to %d peers\n", peers)
+	resp, err := client.SendRequest("joinNetwork", protocol.JoinRequest{})
+	exitOnErr(err, "Error joining network.")
+	fmt.Println(resp.Message)
 }
 func statusNetwork() {
-	//totalStor, freeStor, peers, err := statusNetwork()
-	totalStor := 0
-	freeStor := 0
-	peers := 0
-	var err error = nil
-	exitOnErr(err, "Error getting network status:")
-	fmt.Printf("Total Storage: %d\n", totalStor)
-	fmt.Printf("Storage Available: %d\n", freeStor)
-	fmt.Printf("Connected to %d peers\n", peers)
+	resp, err := client.SendRequest("statusNetwork", protocol.NetworkStatusRequest{})
+	exitOnErr(err, "Error getting network status.")
+	fmt.Println(resp.Message)
 }
 func statusNode() {
-	if len(args) < 4 {
-		fmt.Println("Usage: mos status node <node_id>")
-		os.Exit(1)
-	}
 	nodeID := args[3]
-	// username, id, storShared, storUsed, err := nodeStatus()
-	username := "GavJoons"
-	storShared := 68
-	storUsed := 69
-	var err error = nil
-	exitOnErr(err, "Error getting node status:")
-	fmt.Printf("Node ID: %s@node-%v\n", username, nodeID)
-	fmt.Printf("Storage Shared: %d GB\n", storShared)
-	fmt.Printf("Storage Used: %d GB\n", storUsed)
+	resp, err := client.SendRequest("statusNode", protocol.NodeStatusRequest{ID: nodeID})
+	exitOnErr(err, "Error getting node status.")
+	fmt.Println(resp.Message)
 }
 func statusAccount() {
 	// []nodes, accountStor, availStor, usedStor, err := statusNetwork()
@@ -264,10 +247,9 @@ func statusAccount() {
 }
 func loginWithKey() {
 	key := args[3]
-	//nodeID :=  createNode()
-	nodeID := 67
-	fmt.Printf("Logged in as: %s (login)\n", key)
-	fmt.Printf("Logged in at: %s@node-%d\n", key, nodeID)
+	resp, err := client.SendRequest("loginKey", protocol.LoginKeyRequest{Key: key})
+	exitOnErr(err, "Error logging in with key.")
+	fmt.Println(resp.Message)
 }
 func logoutAccount() {
 	// err := logout()
@@ -351,17 +333,13 @@ func uploadFile() {
 		os.Exit(1)
 	}
 
+	fileSize := fileInfo.Size() / 1024
+	fmt.Printf("Uploading file: %s (%d KB)\n", fileInfo.Name(), fileSize)
 	resp, uploadErr := client.SendRequest("uploadFile", protocol.UploadRequest{
 		Path: filePath,
 	})
 	exitOnErr(uploadErr, "Error uploading file.")
 	fmt.Println(resp.Message)
-
-	fileSize := fileInfo.Size() / 1024
-	fmt.Printf("Uploading file: %s (%d KB)\n", fileInfo.Name(), fileSize)
-	fmt.Printf("File '%s' uploaded successfully to network.\n", fileInfo.Name())
-	storage := GetTotalStorage()
-	fmt.Printf("Storage remaining: %d GB\n", storage)
 }
 func uploadFolder() {
 	root := args[3]

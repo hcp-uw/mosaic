@@ -16,9 +16,9 @@ install: build
 	@echo "✓ Installed successfully!"
 	@echo ""
 	@echo "Usage:"
-	@echo "  make start          - Start the daemon"
-	@echo "  mos upload file ... - Run commands"
-	@echo "  make stop           - Stop the daemon"
+	@echo "  make quickstart     - Quickstarts mosaic"
+	@echo "  mos help.           - View all mosaic-cli commands"
+	@echo "  make shutdown       - Kills mosaic process and cleans up files"
 
 # Remove built binaries
 clean:
@@ -51,7 +51,9 @@ stop:
 	fi
 
 # Restart daemon
-restart: stop start
+restart_daemon: stop start
+
+restart: shutdown quickstart
 
 # Uninstall from system
 uninstall: stop
