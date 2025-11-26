@@ -1,0 +1,65 @@
+% -------------------------------------------------------------------
+% Mosaic Distributed File System — Comprehensive Design Specification
+% -------------------------------------------------------------------
+
+\documentclass[11pt]{article}
+\usepackage{amsmath, amssymb, hyperref, geometry, xcolor}
+\geometry{margin=1in}
+\setlength{\parskip}{0.75em}
+\setlength{\parindent}{0em}
+
+\title{\textbf{Mosaic Distributed File System}\\large Comprehensive Design Specification}
+\author{G.J.}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Mosaic is a peer-to-peer distributed file system implemented in Go, providing robust, decentralized, and verifiable storage across a network of nodes. The system combines lightweight centralized bootstrapping with fully distributed metadata and file propagation. Nodes operate in a peer-to-peer manner using authenticated CRDT-based metadata, NAT traversal, and signed file operation logs. This document presents a structured specification suitable for implementers and reviewers.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Introduction}
+Mosaic enables decentralized storage with strong eventual consistency and verifiable operations. Each node maintains a local store, synchronizes with peers via CRDTs, and communicates through authenticated channels. The design ensures high availability, fault tolerance, and minimal reliance on central servers.
+
+\section{System Architecture}
+Mosaic consists of three primary components: the central coordination server, peer nodes, and the CRDT metadata layer. The central server handles bootstrap and membership announcements but does not store data. Peer nodes perform NAT traversal, CRDT synchronization, file replication, and validation. The CRDT layer provides verifiable history and eventual consistency.
+
+\section{Central Server Interface}
+The central server exposes two main functions. \texttt{join_network()} returns the IP of the current bootstrap peer, which holds the latest CRDT snapshot. \texttt{new_node(peerIp)} broadcasts information about a new node to the network. Peers validate these announcements against the CRDT before integrating new members.
+
+\section{Peer-to-Peer Command Interface}
+Peers establish connections using \texttt{establish_conn(NodeIP)}, performing handshake, version negotiation, and key verification. CRDT metadata is retrieved using \texttt{get_peerCrdt(ConnectedPeer)} and merged locally. NAT traversal is handled via \texttt{establish_stun_conn(ConnectedPeer)}, using hole punching and backoff strategies. File updates are transmitted with \texttt{set_data(ConnectedPeer, data)}, ensuring authenticated delivery.
+
+\section{CRDT Metadata Structures}
+The CRDT maintains signed join messages for peer membership and store operation messages for file updates. Each join message includes a public key, timestamp, signature, and nonce. Store operation messages contain an operation ID, block hash, signed request, and signed acknowledgment. CRDT merges use set union semantics, are associative, commutative, and idempotent, and reject invalid signatures.
+
+\section{Join Protocol}
+The \texttt{mos join network} procedure starts by verifying that no Mosaic daemon is running. A bootstrap peer is obtained via \texttt{join_network()} and authenticated. CRDT metadata is retrieved, and the node generates a signed join message. It then contacts all peers, establishes connections, performs NAT traversal, merges CRDT states, and broadcasts its membership. The join completes when the node is fully integrated.
+
+\section{New Node Protocol}
+When a new peer joins, existing nodes attempt connections, retrieve the join message, and validate it. Verified join messages are merged into the CRDT and propagated through gossip. Bi-directional NAT traversal is performed, and routing tables are updated.
+
+\section{Data Storage Protocol}
+File storage involves signing a block's hash, transmitting the block, and receiving a signed acknowledgment. Both peers append a new store operation message to their CRDT. Blocks are replicated across multiple peers, with integrity verified via Merkle roots.
+
+\section{Security Model}
+Each peer maintains a long-term key pair, and all CRDT operations are signed. The central server is untrusted; peers must validate all messages. Mosaic defends against replay, man-in-the-middle, and Sybil attacks, ensuring integrity and authenticity.
+
+\section{Networking Model}
+STUN-based hole punching enables NAT traversal, with fallbacks for symmetric NATs. Metadata is transmitted over TCP and file blocks via chunked UDP. Heartbeats maintain liveness, and exponential backoff governs retries.
+
+\section{File Storage Layer}
+Files are split into 1 MiB content-addressed blocks. Blocks are replicated, and conflicts are resolved deterministically through CRDT merges. Manifest compaction and garbage collection prune old entries to maintain efficiency.
+
+\section{Future Work}
+Planned enhancements include distributed snapshotting, gossip protocol improvements, CRDT compaction, and multi-leader or fully leaderless bootstrapping.
+
+\section{Conclusion}
+Mosaic provides a secure, peer-to-peer distributed file system with authenticated CRDT metadata, NAT traversal, and robust replication. Its architecture supports global operation with minimal reliance on central servers, forming a foundation for future extensions.
+
+\end{document}
+
