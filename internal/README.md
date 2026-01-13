@@ -1,3 +1,7 @@
+Only macOS is supported for now.
+
+Version 1:
+
 When in the mosaic directory, run:
 - go run ./cmd/mosaic-node &
 to start the mosaic background process. 
@@ -20,6 +24,15 @@ Mosaic should now work as needed!
 
 To kill the background process and clean up run:
 - pkill mosaicd && rm -f /tmp/mosaicd.sock /tmp/mosaicd.pid /tmp/mosaicd.log
+
+Version 2:
+While in mosaic:
+./install.sh
+
+To shutdown:
+mos shutdown
+
+Version 3:
 
 Or run:
 - make build

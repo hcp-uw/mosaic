@@ -17,15 +17,8 @@ install: build
 	@echo ""
 	@echo "Usage:"
 	@echo "  make quickstart     - Quickstarts mosaic"
-	@echo "  mos help.           - View all mosaic-cli commands"
+	@echo "  mos help            - View all mosaic-cli commands"
 	@echo "  make shutdown       - Kills mosaic process and cleans up files"
-
-# Remove built binaries
-clean:
-	@echo "Cleaning up..."
-	rm -rf bin/
-	rm -f /tmp/mosaicd.sock /tmp/mosaicd.pid /tmp/mosaicd.log
-	@echo "✓ Cleaned"
 
 # Start daemon
 start:
@@ -34,9 +27,16 @@ start:
 	else \
 		mosaicd > /tmp/mosaicd.log 2>&1 & \
 		echo $$! > /tmp/mosaicd.pid; \
-		sleep 1; \
+		rm -rf bin/; \
 		echo "✓ Daemon started (logs: /tmp/mosaicd.log)"; \
 	fi
+
+# Remove built binaries
+clean:
+	@echo "Cleaning up..."
+	rm -rf bin/
+	rm -f /tmp/mosaicd.sock /tmp/mosaicd.pid /tmp/mosaicd.log
+	@echo "✓ Cleaned"
 
 # Stop daemon
 stop:
@@ -90,4 +90,4 @@ help:
 	@echo "  make clean      - Remove build artifacts"
 	@echo "  make uninstall  - Remove from system"
 	@echo ""
-	@echo "After install, use: mos upload file <path>"
+	@echo "After install, use: mos help to view all mosaic commands"

@@ -1,14 +1,14 @@
 Mosaic Command Line Interface — Distributed Storage Network
 
 Core Commands:
-  login user <username>              Log in to your MOS account.
+  login key <key>                    Log in to your MOS account.
   logout account                     Log out of the current account.
 
 Network Management:
   join network                       Join the storage network.
   leave network                      Leave the connected network.
   status network                     View status and statistics for the network.
-  peers network <network_id>         List peers currently connected to the network.
+  peers network                      List peers currently connected to the network.
 
 Node & Account Management:
   status node <node_id>              View information about a specific node.

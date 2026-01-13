@@ -32,7 +32,122 @@ func StartServer() error {
 		go handleConn(conn)
 	}
 }
+func handleConn(conn net.Conn) {
+	defer conn.Close()
 
+	dec := json.NewDecoder(conn)
+	enc := json.NewEncoder(conn)
+
+	var req protocol.Request
+	if err := dec.Decode(&req); err != nil {
+		err := enc.Encode(&protocol.Response{Ok: false, Message: "invalid JSON request"})
+		if err != nil {
+			fmt.Println("encode error:", err)
+		}
+		return
+	}
+
+	switch req.Command {
+	case "joinNetwork":
+		var joinReq protocol.JoinRequest
+		handleWith(enc, req.Data, &joinReq, handlers.HandleJoin, "Join request failed.")
+	case "statusNetwork":
+		var statusReq protocol.NetworkStatusRequest
+		handleWith(enc, req.Data, &statusReq, handlers.StatusNetwork, "Network status request failed.")
+	case "statusNode":
+		var nodeStatusReq protocol.NodeStatusRequest
+		handleWith(enc, req.Data, &nodeStatusReq, handlers.StatusNode, "Node status request failed.")
+	case "statusAccount":
+		var accountReq protocol.StatusAccountRequest
+		handleWith(enc, req.Data, &accountReq, handlers.StatusAccount, "Status account request failed.")
+	case "loginKey":
+		var loginReq protocol.LoginKeyRequest
+		handleWith(enc, req.Data, &loginReq, handlers.LoginKey, "Login request failed.")
+	case "logout":
+		var logoutReq protocol.LogoutRequest
+		handleWith(enc, req.Data, &logoutReq, handlers.HandleLogout, "Logout request failed.")
+	case "getPeers":
+		var getPeersReq protocol.GetPeersRequest
+		handleWith(enc, req.Data, &getPeersReq, handlers.GetPeers, "Get peers request failed.")
+	case "setStorage":
+		var setStorageReq protocol.SetStorageRequest
+		handleWith(enc, req.Data, &setStorageReq, handlers.SetStorage, "Set storage request failed.")
+	case "emptyStorage":
+		var emptyStorageReq protocol.EmptyStorageRequest
+		handleWith(enc, req.Data, &emptyStorageReq, handlers.EmptyStorage, "Empty storage request failed.")
+	case "leaveNetwork":
+		var leaveNetworkReq protocol.LeaveNetworkRequest
+		handleWith(enc, req.Data, &leaveNetworkReq, handlers.LeaveNetwork, "Leave network request failed.")
+	case "listFiles":
+		var listFilesReq protocol.ListFilesRequest
+		handleWith(enc, req.Data, &listFilesReq, handlers.ListFiles, "List files request failed.")
+	case "uploadFile":
+		var uploadReq protocol.UploadFileRequest
+		handleWith(enc, req.Data, &uploadReq, handlers.UploadFile, "Upload file request failed.")
+	case "uploadFolder":
+		var uploadFolderReq protocol.UploadFolderRequest
+		handleWith(enc, req.Data, &uploadFolderReq, handlers.UploadFolder, "Upload folder request failed.")
+	case "downloadFile":
+		var downloadReq protocol.DownloadFileRequest
+		handleWith(enc, req.Data, &downloadReq, handlers.DownloadFile, "Download file request failed.")
+	case "downloadFolder":
+		var downloadFolderReq protocol.DownloadFolderRequest
+		handleWith(enc, req.Data, &downloadFolderReq, handlers.DownloadFolder, "Download folder request failed.")
+	case "deleteFile":
+		var deleteReq protocol.DeleteFileRequest
+		handleWith(enc, req.Data, &deleteReq, handlers.DeleteFile, "Delete file request failed.")
+	case "deleteFolder":
+		var deleteFolderReq protocol.DeleteFolderRequest
+		handleWith(enc, req.Data, &deleteFolderReq, handlers.DeleteFolder, "Delete folder request failed.")
+	case "fileInfo":
+		var fileInfoReq protocol.FileInfoRequest
+		handleWith(enc, req.Data, &fileInfoReq, handlers.GetFileInfo, "File info request failed.")
+	case "folderInfo":
+		var folderInfoReq protocol.FolderInfoRequest
+		handleWith(enc, req.Data, &folderInfoReq, handlers.GetFolderInfo, "Folder info request failed.")
+	case "getVersion":
+		var versionReq protocol.VersionRequest
+		handleWith(enc, req.Data, &versionReq, handlers.GetVersion, "Get version request failed.")
+
+	default:
+		err := enc.Encode(&protocol.Response{Ok: false, Message: "unknown command"})
+		if err != nil {
+			fmt.Println("encode error:", err)
+		}
+	}
+}
+
+// Helper that takes a pointer to pre-declared struct
+func handleWith[Req, Resp any](
+	enc *json.Encoder,
+	data interface{},
+	reqPtr *Req,
+	handler func(Req) Resp,
+	errMsg string,
+) {
+	if err := toStruct(data, reqPtr); err != nil {
+		err := enc.Encode(&protocol.Response{Ok: false, Message: errMsg})
+		if err != nil {
+			fmt.Println("encode error:", err)
+		}
+		return
+	}
+	resp := handler(*reqPtr)
+	err := enc.Encode(&protocol.Response{Ok: true, Message: "", Data: resp})
+	if err != nil {
+		fmt.Println("encode error:", err)
+	}
+}
+
+func toStruct(input interface{}, out interface{}) error {
+	raw, err := json.Marshal(input)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, out)
+}
+
+/*
 func handleConn(conn net.Conn) {
 	defer conn.Close()
 
@@ -54,10 +169,7 @@ func handleConn(conn net.Conn) {
 			return
 		}
 		resp := handlers.HandleUpload(up)
-		// this line is terminal output if it works
-		message := fmt.Sprintf("File '%s' uploaded successfully to network.\n- Available storage remaining: %d GB.\n",
-			resp.Name, resp.AvailableStorage)
-		enc.Encode(&protocol.Response{Ok: true, Message: message, Data: resp})
+		enc.Encode(&protocol.Response{Ok: true, Message: "", Data: resp})
 
 	case "statusNetwork":
 		var up protocol.NetworkStatusRequest
@@ -66,9 +178,7 @@ func handleConn(conn net.Conn) {
 			return
 		}
 		resp := handlers.StatusNetwork(up)
-		message := fmt.Sprintf("Network Status:\n- Total Network Storage: %d GB\n- Your Available Storage: %d GB\n- Number of Peers: %d\n",
-			resp.NetworkStorage, resp.AvailableStorage, resp.Peers)
-		enc.Encode(&protocol.Response{Ok: true, Message: message, Data: resp})
+		enc.Encode(&protocol.Response{Ok: true, Message: "", Data: resp})
 
 	case "joinNetwork":
 		var up protocol.JoinRequest
@@ -77,8 +187,7 @@ func handleConn(conn net.Conn) {
 			return
 		}
 		resp := handlers.HandleJoin(up)
-		message := fmt.Sprintf("Joined network successfully.\n- Connected to %d peers.\n", resp.Peers)
-		enc.Encode(&protocol.Response{Ok: true, Message: message, Data: resp})
+		enc.Encode(&protocol.Response{Ok: true, Message: "", Data: resp})
 
 	case "statusNode":
 		var up protocol.NodeStatusRequest
@@ -87,8 +196,7 @@ func handleConn(conn net.Conn) {
 			return
 		}
 		resp := handlers.StatusNode(up)
-		message := fmt.Sprintf("Node status processed successfully.\n- Node ID: %s@node-%v\n- Storage Shared: %d GB\n", resp.Username, resp.ID, resp.StorageShare)
-		enc.Encode(&protocol.Response{Ok: true, Message: message, Data: resp})
+		enc.Encode(&protocol.Response{Ok: true, Message: "", Data: resp})
 	case "loginKey":
 		var up protocol.LoginKeyRequest
 		if err := toStruct(req.Data, &up); err != nil {
@@ -96,8 +204,15 @@ func handleConn(conn net.Conn) {
 			return
 		}
 		resp := handlers.LoginKey(up)
-		message := fmt.Sprintf("Logged in with key successfully.\n- Current Node: %s@node-%v\n", resp.Username, resp.CurrentNode)
-		enc.Encode(&protocol.Response{Ok: true, Message: message, Data: resp})
+		enc.Encode(&protocol.Response{Ok: true, Message: "", Data: resp})
+	case "statusAccount":
+		var up protocol.StatusAccountRequest
+		if err := toStruct(req.Data, &up); err != nil {
+			enc.Encode(&protocol.Response{Ok: false, Message: "Login request failed."})
+			return
+		}
+		resp := handlers.StatusAccount(up)
+		enc.Encode(&protocol.Response{Ok: true, Message: "", Data: resp})
 	default:
 		enc.Encode(&protocol.Response{Ok: false, Message: "unknown command"})
 	}
@@ -111,3 +226,4 @@ func toStruct(input interface{}, out interface{}) error {
 	}
 	return json.Unmarshal(raw, out)
 }
+*/
