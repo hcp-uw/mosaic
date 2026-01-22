@@ -15,6 +15,25 @@ that updates the shared state of all user. For example a strand can say a user b
 in the cluster or dropped connection. They will also be used to signal where data is stored in 
 Mosaic.
 
+
+### The Client Side logic - the state machine
+Essentially the protocol buffer will contain the messages but, these messages will be translated
+into pertinent data on the client side via the state machine. 
+
+The bare-bones model of state found on the client end after receiving tapestry strands 
+```
+ type LiveState struct {
+    ActiveUsers map[string]bool          // Who is online
+    ShardMap    map[string]ShardStatus   // Where is each shard?
+}
+
+type ShardStatus struct {
+    Owner     string // The user who sent it
+    StoredAt  string // The node that has it (from Header of Received/Moved)
+    IsDeleted bool
+}
+```
+
 ### Header 
 All strands relating to a user will consist of a header that identifies the user.
 
@@ -70,7 +89,8 @@ message DataRecieved {
 ```
 
 ### DataMoved/DataDeleted
-These messages will describe if the state of stored data changes in some way.
+These messages will describe if the state of stored data changes in some way. There should be more
+and, the data shouldn't really be able to be deleted. We will see ts is just a prototype.
 ```
 message DataMoved {
     // Header new datalocation
