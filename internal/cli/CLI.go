@@ -10,8 +10,8 @@ import (
 	"syscall"
 
 	"github.com/hcp-uw/mosaic/internal/cli/client"
-	"github.com/hcp-uw/mosaic/internal/cli/handlers/helpers"
 	"github.com/hcp-uw/mosaic/internal/cli/protocol"
+	"github.com/hcp-uw/mosaic/internal/daemon/handlers/helpers"
 )
 
 //go:embed HelpMessage.txt

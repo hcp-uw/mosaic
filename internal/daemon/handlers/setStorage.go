@@ -3,8 +3,8 @@ package handlers
 import (
 	"fmt"
 
-	"github.com/hcp-uw/mosaic/internal/cli/handlers/helpers"
 	"github.com/hcp-uw/mosaic/internal/cli/protocol"
+	"github.com/hcp-uw/mosaic/internal/daemon/handlers/helpers"
 )
 
 // Sets the storage shared by the node and returns a SetStorageResponse

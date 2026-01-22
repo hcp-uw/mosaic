@@ -3,8 +3,8 @@ package handlers
 import (
 	"fmt"
 
-	"github.com/hcp-uw/mosaic/internal/cli/handlers/helpers"
 	"github.com/hcp-uw/mosaic/internal/cli/protocol"
+	"github.com/hcp-uw/mosaic/internal/daemon/handlers/helpers"
 )
 
 // Leaves the network and returns a LeaveNetworkResponse
