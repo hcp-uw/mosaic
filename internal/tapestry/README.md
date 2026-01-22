@@ -7,15 +7,6 @@ Each user will store a copy of the tapestry encoded as a protocol buffer data ty
 
 ***TBD NOTE > should the stun server have a copy of the tapestry?***
 
-
-## Strands
-
-The tapestry is made up of strands. A strand is a message sent at a specific time by one user 
-that updates the shared state of all user. For example a strand can say a user became active
-in the cluster or dropped connection. They will also be used to signal where data is stored in 
-Mosaic.
-
-
 ### The Client Side logic - the state machine
 Essentially the protocol buffer will contain the messages but, these messages will be translated
 into pertinent data on the client side via the state machine. 
@@ -33,6 +24,15 @@ type ShardStatus struct {
     IsDeleted bool
 }
 ```
+
+
+## Strands
+
+The tapestry is made up of strands. A strand is a message sent at a specific time by one user 
+that updates the shared state of all user. For example a strand can say a user became active
+in the cluster or dropped connection. They will also be used to signal where data is stored in 
+Mosaic.
+
 
 ### Header 
 All strands relating to a user will consist of a header that identifies the user.

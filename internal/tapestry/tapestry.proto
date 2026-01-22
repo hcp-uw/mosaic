@@ -1,0 +1,50 @@
+syntax = "proto3";
+package mosaic;
+
+option go_package = "./protocolBuffer";
+
+// The Master Box
+message Strand {
+    Header header = 1;
+
+    oneof payload {
+        UserOnline online = 2;
+        UserOffline offline = 3;
+        DataSent sent = 4;
+        DataReceived received = 5;
+        DataMoved moved = 6;
+        DataDeleted deleted = 7;
+    }
+}
+
+message Header {
+    bytes user_public_key = 1;
+    int64 timestamp = 2;
+    uint32 version = 3;
+    bytes signature = 4; // Signed hash of the payload
+}
+
+message UserOnline {}
+message UserOffline {}
+
+message DataSent {
+    string shard_hash = 1;
+    string filename = 2;
+    string file_extension = 3;
+    string file_size = 4;
+}
+
+message DataReceived {
+    bytes owner_public_key = 1; // User who owns the file
+    string shard_hash = 2;      // Links back to DataSent
+}
+
+message DataMoved {
+    bytes owner_public_key = 1;
+    string shard_hash = 2;
+}
+
+message DataDeleted {
+    bytes owner_public_key = 1;
+    string shard_hash = 2;
+}
