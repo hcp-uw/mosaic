@@ -1,0 +1,31 @@
+Mosaic Command Line Interface — Distributed Storage Network
+
+Core Commands:
+  login key <key>                    Log in to your MOS account.
+  logout account                     Log out of the current account.
+
+Network Management:
+  join network                       Join the storage network.
+  leave network                      Leave the connected network.
+  status network                     View status and statistics for the network.
+  peers network                      List peers currently connected to the network.
+
+Node & Account Management:
+  status node <node_id>              View information about a specific node.
+  status account                     View overall account status and all connected nodes.
+
+Storage Management:
+  set storage <amount>               Set the total storage to share with a network.
+  empty storage                      Delete all stored data from the network.
+
+File Operations:
+  list file                          List all files stored on the network.
+  upload (file/folder) <path>        Upload a file or folder to the connected network.
+  download (file/folder) <path>      Download a file from the network.
+  info (file/folder) <path>          Display information about a specific file on the network.
+  delete (file/folder) <path>>       Delete a specific file from the network.
+
+Other:
+  version                            Display current MOS client version.
+  help                               Show a list of usable commands for MOS
+
