@@ -10,8 +10,8 @@ import (
 	"syscall"
 
 	"github.com/hcp-uw/mosaic/internal/cli/client"
-	"github.com/hcp-uw/mosaic/internal/cli/handlers/helpers"
 	"github.com/hcp-uw/mosaic/internal/cli/protocol"
+	"github.com/hcp-uw/mosaic/internal/daemon/handlers/helpers"
 )
 
 //go:embed HelpMessage.txt
@@ -64,15 +64,15 @@ func Run(Args []string) {
 		}
 		version()
 	case "join":
-		if len(args) != 3 {
+		if len(args) != 4 {
 			fmt.Println()
 			fmt.Println("Usage:")
-			fmt.Println("- mos join network    Join the network.")
+			fmt.Println("- mos join network <Server address to connect to (e.g., 127.0.0.1:3478)> Join the network.")
 			os.Exit(1)
 		}
 		switch args[2] {
 		case "network":
-			joinNetwork()
+			joinNetwork(args[3])
 		default:
 			fmt.Println("Unknown argument:", args[2])
 			os.Exit(1)
@@ -255,15 +255,15 @@ func Run(Args []string) {
 }
 
 // Connects the user to the mosaic network
-func joinNetwork() {
-	resp, err := client.SendRequest("joinNetwork", protocol.JoinRequest{})
+func joinNetwork(serverAddr string) {
+	resp, err := client.SendRequest("joinNetwork", protocol.JoinRequest{ServerAddress: serverAddr})
 	exitOnErr(err, "Error joining network.")
 
 	var cmdResp protocol.JoinResponse
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
-	message := fmt.Sprintf("\nJoined network successfully.\n- Connected to %d peers.\n", cmdResp.Peers)
+	message := fmt.Sprintf("\nJoined network successfully.\n- Connected to %d peers.\n")
 	fmt.Println(message)
 }
 

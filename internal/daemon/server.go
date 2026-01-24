@@ -6,9 +6,9 @@ import (
 	"net"
 	"os"
 
-	"github.com/hcp-uw/mosaic/internal/cli/handlers"
 	"github.com/hcp-uw/mosaic/internal/cli/protocol"
 	"github.com/hcp-uw/mosaic/internal/cli/shared"
+	"github.com/hcp-uw/mosaic/internal/daemon/handlers"
 )
 
 func StartServer() error {
