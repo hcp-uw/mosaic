@@ -7,6 +7,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/hcp-uw/mosaic/internal/api"
 )
 
 // ClientInfo holds information about connected clients
@@ -110,6 +112,10 @@ func (s *Server) Stop() error {
 	return nil
 }
 
+func (s *Server) GetConn() *net.UDPConn {
+	return s.conn
+}
+
 // handleMessages processes incoming messages from clients
 func (s *Server) handleMessages(enableLogging bool) {
 	defer func() {
@@ -143,7 +149,7 @@ func (s *Server) handleMessages(enableLogging bool) {
 
 // processMessage handles a single message from a client
 func (s *Server) processMessage(data []byte, clientAddr *net.UDPAddr, enableLogging bool) {
-	msg, err := DeserializeMessage(data)
+	msg, err := api.DeserializeMessage(data)
 	if err != nil {
 		if enableLogging {
 			log.Printf("Failed to deserialize message from %s: %v", clientAddr, err)
@@ -153,9 +159,9 @@ func (s *Server) processMessage(data []byte, clientAddr *net.UDPAddr, enableLogg
 	}
 
 	switch msg.Type {
-	case ClientRegister:
+	case api.ClientRegister:
 		s.handleClientRegister(msg, clientAddr, enableLogging)
-	case ClientPing:
+	case api.ClientPing:
 		s.handleClientPing(msg, clientAddr, enableLogging)
 	default:
 		if enableLogging {
@@ -166,7 +172,7 @@ func (s *Server) processMessage(data []byte, clientAddr *net.UDPAddr, enableLogg
 }
 
 // handleClientRegister handles client registration
-func (s *Server) handleClientRegister(msg *Message, clientAddr *net.UDPAddr, enableLogging bool) {
+func (s *Server) handleClientRegister(msg *api.Message, clientAddr *net.UDPAddr, enableLogging bool) {
 	_, err := msg.GetClientRegisterData()
 	if err != nil {
 		if enableLogging {
@@ -223,7 +229,7 @@ func (s *Server) handleClientRegister(msg *Message, clientAddr *net.UDPAddr, ena
 }
 
 // handleClientPing handles ping messages
-func (s *Server) handleClientPing(msg *Message, clientAddr *net.UDPAddr, enableLogging bool) {
+func (s *Server) handleClientPing(msg *api.Message, clientAddr *net.UDPAddr, enableLogging bool) {
 	_, err := msg.GetClientRegisterData()
 	if err != nil {
 		if enableLogging {
@@ -260,7 +266,7 @@ func (s *Server) pairClients(client1, client2 *ClientInfo, enableLogging bool) {
 	// Remove both clients from server memory since they no longer need the server
 	delete(s.clients, client1.ID)
 	delete(s.clients, client2.ID)
-	
+
 	if enableLogging {
 		log.Printf("Removed paired clients %s and %s from server memory", client1.ID, client2.ID)
 	}
@@ -268,24 +274,24 @@ func (s *Server) pairClients(client1, client2 *ClientInfo, enableLogging bool) {
 
 // sendPeerAssignment sends peer information to a client
 func (s *Server) sendPeerAssignment(clientAddr, peerAddr *net.UDPAddr, peerID string) {
-	msg := NewPeerAssignmentMessage(peerAddr, peerID)
+	msg := api.NewPeerAssignmentMessage(peerAddr, peerID)
 	s.sendMessage(clientAddr, msg)
 }
 
 // sendWaitingMessage sends waiting message to a client
 func (s *Server) sendWaitingMessage(clientAddr *net.UDPAddr) {
-	msg := NewWaitingForPeerMessage()
+	msg := api.NewWaitingForPeerMessage()
 	s.sendMessage(clientAddr, msg)
 }
 
 // sendErrorMessage sends error message to a client
 func (s *Server) sendErrorMessage(clientAddr *net.UDPAddr, errorMsg, errorCode string) {
-	msg := NewServerErrorMessage(errorMsg, errorCode)
+	msg := api.NewServerErrorMessage(errorMsg, errorCode)
 	s.sendMessage(clientAddr, msg)
 }
 
 // sendMessage sends a message to a client
-func (s *Server) sendMessage(clientAddr *net.UDPAddr, msg *Message) {
+func (s *Server) sendMessage(clientAddr *net.UDPAddr, msg *api.Message) {
 	data, err := msg.Serialize()
 	if err != nil {
 		log.Printf("Failed to serialize message: %v", err)

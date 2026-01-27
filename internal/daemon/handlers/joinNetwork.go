@@ -1,15 +1,15 @@
 package handlers
 
 import (
+	"bufio"
 	"fmt"
 	"log"
-	"os/signal"
 	"os"
+	"os/signal"
 	"syscall"
-	"bufio"
 
 	"github.com/hcp-uw/mosaic/internal/cli/protocol"
-	"github.com/hcp-uw/mosaic/internal/stun"
+	"github.com/hcp-uw/mosaic/internal/p2p"
 )
 
 // Joins the network and returns a JoinResponse
@@ -18,9 +18,7 @@ func HandleJoin(req protocol.JoinRequest) protocol.JoinResponse {
 	// all the actual logic and stuff goes here
 	// Details goes in the logs (not printed in terminal)
 
-
-
-    runClient(req.ServerAddress)
+	runClient(req.ServerAddress)
 
 	return protocol.JoinResponse{
 		Success: true,
@@ -29,18 +27,18 @@ func HandleJoin(req protocol.JoinRequest) protocol.JoinResponse {
 }
 
 func runClient(serverAddr string) {
-	config := stun.DefaultClientConfig(serverAddr)
-	client, err := stun.NewClient(config)
+	config := p2p.DefaultClientConfig(serverAddr)
+	client, err := p2p.NewClient(config)
 	if err != nil {
 		log.Fatalf("Failed to create client: %v", err)
 	}
 
 	// Set up callbacks
-	client.OnStateChange(func(state stun.ClientState) {
+	client.OnStateChange(func(state p2p.ClientState) {
 		fmt.Printf("[State] %s\n", state)
 	})
 
-	client.OnPeerAssigned(func(peer *stun.PeerInfo) {
+	client.OnPeerAssigned(func(peer *p2p.PeerInfo) {
 		fmt.Printf("[Peer Assigned] ID: %s, Address: %s\n", peer.ID, peer.Address)
 		fmt.Println("Connecting to peer...")
 		if err := client.ConnectToPeer(); err != nil {

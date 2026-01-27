@@ -1,4 +1,4 @@
-package stun
+package p2p
 
 import (
 	"fmt"
@@ -7,24 +7,27 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/hcp-uw/mosaic/internal/api"
+	"github.com/hcp-uw/mosaic/internal/stun"
 )
 
 func TestClientConnect(t *testing.T) {
 	// Start a test server
-	config := &ServerConfig{
+	config := &stun.ServerConfig{
 		ListenAddress: "127.0.0.1:0",
 		ClientTimeout: 5 * time.Second,
 		EnableLogging: false,
 	}
 
-	server := NewServer(config)
+	server := stun.NewServer(config)
 	err := server.Start(config)
 	if err != nil {
 		t.Fatalf("Failed to start server: %v", err)
 	}
 	defer server.Stop()
 
-	serverAddr := server.conn.LocalAddr().(*net.UDPAddr)
+	serverAddr := server.GetConn().LocalAddr().(*net.UDPAddr)
 
 	// Create client
 	clientConfig := DefaultClientConfig(serverAddr.String())
@@ -52,20 +55,20 @@ func TestClientConnect(t *testing.T) {
 
 func TestClientPairingWithServer(t *testing.T) {
 	// Start a test server
-	config := &ServerConfig{
+	config := &stun.ServerConfig{
 		ListenAddress: "127.0.0.1:0",
 		ClientTimeout: 10 * time.Second, // Increased timeout for stability
 		EnableLogging: false,
 	}
 
-	server := NewServer(config)
+	server := stun.NewServer(config)
 	err := server.Start(config)
 	if err != nil {
 		t.Fatalf("Failed to start server: %v", err)
 	}
 	defer server.Stop()
 
-	serverAddr := server.conn.LocalAddr().(*net.UDPAddr)
+	serverAddr := server.GetConn().LocalAddr().(*net.UDPAddr)
 
 	// Create two clients
 	client1Config := DefaultClientConfig(serverAddr.String())
@@ -134,7 +137,7 @@ func TestClientPairingWithServer(t *testing.T) {
 	// Wait for both clients to be paired with timeout
 	timeout := time.After(7 * time.Second)
 	var client1PeerInfo, client2PeerInfo *PeerInfo
-	
+
 	// Wait for client 1 pairing
 	select {
 	case <-client1Paired:
@@ -193,7 +196,6 @@ func TestClientPairingWithServer(t *testing.T) {
 	client2.Disconnect()
 }
 
-
 func TestClientStateTransitions(t *testing.T) {
 	client, err := NewClient(&ClientConfig{
 		ServerAddress: "localhost:1234",
@@ -249,20 +251,20 @@ func TestClientErrorHandling(t *testing.T) {
 	}
 
 	// Test connecting when already connected
-	config := &ServerConfig{
+	config := &stun.ServerConfig{
 		ListenAddress: "127.0.0.1:0",
 		ClientTimeout: 5 * time.Second,
 		EnableLogging: false,
 	}
 
-	server := NewServer(config)
+	server := stun.NewServer(config)
 	err = server.Start(config)
 	if err != nil {
 		t.Fatalf("Failed to start server: %v", err)
 	}
 	defer server.Stop()
 
-	serverAddr := server.conn.LocalAddr().(*net.UDPAddr)
+	serverAddr := server.GetConn().LocalAddr().(*net.UDPAddr)
 
 	client, err = NewClient(DefaultClientConfig(serverAddr.String()))
 	if err != nil {
@@ -321,7 +323,7 @@ func TestClientStateString(t *testing.T) {
 	for _, test := range tests {
 		result := test.state.String()
 		if result != test.expected {
-			t.Errorf("Expected %s.String() to return %q, got %q", 
+			t.Errorf("Expected %s.String() to return %q, got %q",
 				test.state, test.expected, result)
 		}
 	}
@@ -329,15 +331,15 @@ func TestClientStateString(t *testing.T) {
 
 func TestDefaultClientConfig(t *testing.T) {
 	config := DefaultClientConfig("localhost:1234")
-	
+
 	if config.ServerAddress != "localhost:1234" {
 		t.Errorf("Expected ServerAddress to be 'localhost:1234', got %q", config.ServerAddress)
 	}
-	
+
 	if config.PingInterval != 10*time.Second {
 		t.Errorf("Expected PingInterval to be 10s, got %v", config.PingInterval)
 	}
-	
+
 	if config.ConnectTimeout != 30*time.Second {
 		t.Errorf("Expected ConnectTimeout to be 30s, got %v", config.ConnectTimeout)
 	}
@@ -509,7 +511,7 @@ func TestPeerMessageProcessing(t *testing.T) {
 	// Should not trigger any callbacks - this is just a hole punching packet
 
 	// Test peer ping message processing
-	pingMsg := NewPeerPingMessage()
+	pingMsg := api.NewPeerPingMessage()
 	pingData, _ := pingMsg.Serialize()
 
 	// Set up peer connection so sendPeerPong works
@@ -533,7 +535,7 @@ func TestPeerMessageProcessing(t *testing.T) {
 	client.processPeerMessage(pingData)
 
 	// Test peer pong message processing
-	pongMsg := NewPeerPongMessage()
+	pongMsg := api.NewPeerPongMessage()
 	pongData, _ := pongMsg.Serialize()
 
 	// Process peer pong - should update lastPeerPong time
@@ -643,8 +645,8 @@ func TestEdgeCasesAndErrorScenarios(t *testing.T) {
 	// Should trigger error callback but not crash
 
 	// Test unknown message type processing
-	unknownMsg := &Message{
-		Type: MessageType("unknown_type"),
+	unknownMsg := &api.Message{
+		Type: api.MessageType("unknown_type"),
 	}
 	client.processMessage(unknownMsg)
 	// Should trigger error callback but not crash

@@ -1,4 +1,4 @@
-package stun
+package p2p
 
 import (
 	"context"
@@ -6,6 +6,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/hcp-uw/mosaic/internal/api"
 )
 
 // ClientState represents the current state of the client
@@ -45,15 +47,15 @@ type PeerInfo struct {
 
 // Client represents a STUN client
 type Client struct {
-	serverAddr     *net.UDPAddr
-	conn           *net.UDPConn
-	state          ClientState
-	peerInfo       *PeerInfo
-	peerConn       *net.UDPConn
-	lastPeerPong   time.Time
-	mutex          sync.RWMutex
-	ctx            context.Context
-	cancel         context.CancelFunc
+	serverAddr       *net.UDPAddr
+	conn             *net.UDPConn
+	state            ClientState
+	peerInfo         *PeerInfo
+	peerConn         *net.UDPConn
+	lastPeerPong     time.Time
+	mutex            sync.RWMutex
+	ctx              context.Context
+	cancel           context.CancelFunc
 	stateCallbacks   []func(ClientState)
 	peerCallbacks    []func(*PeerInfo)
 	errorCallbacks   []func(error)
@@ -76,7 +78,7 @@ func DefaultClientConfig(serverAddr string) *ClientConfig {
 	}
 }
 
-// NewClient creates a new STUN client
+// NewClient creates a new Node client
 func NewClient(config *ClientConfig) (*Client, error) {
 	if config == nil {
 		return nil, fmt.Errorf("config cannot be nil")
@@ -155,7 +157,6 @@ func (c *Client) Disconnect() error {
 	return nil
 }
 
-
 // ConnectToPeer attempts to establish direct connection to assigned peer using UDP hole punching
 func (c *Client) ConnectToPeer() error {
 	c.mutex.Lock()
@@ -227,7 +228,6 @@ func (c *Client) SendToPeer(data []byte) error {
 	return err
 }
 
-
 // GetState returns current client state
 func (c *Client) GetState() ClientState {
 	c.mutex.RLock()
@@ -249,75 +249,14 @@ func (c *Client) IsPeerCommunicationAvailable() bool {
 	return c.peerInfo != nil && c.peerConn != nil && c.state != StateDisconnected
 }
 
-// OnStateChange registers a callback for state changes
-func (c *Client) OnStateChange(callback func(ClientState)) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	c.stateCallbacks = append(c.stateCallbacks, callback)
-}
-
-// OnPeerAssigned registers a callback for peer assignment
-func (c *Client) OnPeerAssigned(callback func(*PeerInfo)) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	c.peerCallbacks = append(c.peerCallbacks, callback)
-}
-
-// OnError registers a callback for errors
-func (c *Client) OnError(callback func(error)) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	c.errorCallbacks = append(c.errorCallbacks, callback)
-}
-
-// OnMessageReceived registers a callback for received peer messages
-func (c *Client) OnMessageReceived(callback func([]byte)) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	c.messageCallbacks = append(c.messageCallbacks, callback)
-}
-
-// setState updates the client state and notifies callbacks
-func (c *Client) setState(newState ClientState) {
-	oldState := c.state
-	c.state = newState
-
-	if oldState != newState {
-		for _, callback := range c.stateCallbacks {
-			go callback(newState)
-		}
-	}
-}
-
-// notifyPeerAssigned notifies callbacks about peer assignment
-func (c *Client) notifyPeerAssigned(peerInfo *PeerInfo) {
-	for _, callback := range c.peerCallbacks {
-		go callback(peerInfo)
-	}
-}
-
-// notifyError notifies callbacks about errors
-func (c *Client) notifyError(err error) {
-	for _, callback := range c.errorCallbacks {
-		go callback(err)
-	}
-}
-
-// notifyMessageReceived notifies callbacks about received messages
-func (c *Client) notifyMessageReceived(data []byte) {
-	for _, callback := range c.messageCallbacks {
-		go callback(data)
-	}
-}
-
 // register sends registration message to server
 func (c *Client) register() error {
-	msg := NewClientRegisterMessage()
+	msg := api.NewClientRegisterMessage()
 	return c.sendToServer(msg)
 }
 
 // sendToServer sends a message to the STUN server
-func (c *Client) sendToServer(msg *Message) error {
+func (c *Client) sendToServer(msg *api.Message) error {
 	data, err := msg.Serialize()
 	if err != nil {
 		return fmt.Errorf("failed to serialize message: %w", err)
@@ -346,7 +285,7 @@ func (c *Client) sendPeerPing() error {
 		return fmt.Errorf("no peer information available")
 	}
 
-	msg := NewPeerPingMessage()
+	msg := api.NewPeerPingMessage()
 	data, err := msg.Serialize()
 	if err != nil {
 		return fmt.Errorf("failed to serialize peer ping: %w", err)
@@ -375,7 +314,7 @@ func (c *Client) sendPeerPong() error {
 		return fmt.Errorf("no peer information available")
 	}
 
-	msg := NewPeerPongMessage()
+	msg := api.NewPeerPongMessage()
 	data, err := msg.Serialize()
 	if err != nil {
 		return fmt.Errorf("failed to serialize peer pong: %w", err)
@@ -423,7 +362,7 @@ func (c *Client) handleMessages() {
 
 // processServerMessage processes a message from the server
 func (c *Client) processServerMessage(data []byte) {
-	msg, err := DeserializeMessage(data)
+	msg, err := api.DeserializeMessage(data)
 	if err != nil {
 		c.notifyError(fmt.Errorf("failed to deserialize server message: %w", err))
 		return
@@ -440,13 +379,13 @@ func (c *Client) processPeerMessage(data []byte) {
 	}
 
 	// Try to parse as a STUN message first (for ping/pong)
-	if msg, err := DeserializeMessage(data); err == nil {
+	if msg, err := api.DeserializeMessage(data); err == nil {
 		switch msg.Type {
-		case PeerPing:
+		case api.PeerPing:
 			// Respond with pong
 			c.sendPeerPong()
 			return
-		case PeerPong:
+		case api.PeerPong:
 			// Update last pong time
 			c.mutex.Lock()
 			c.lastPeerPong = time.Now()
@@ -462,15 +401,15 @@ func (c *Client) processPeerMessage(data []byte) {
 }
 
 // processMessage processes a message from the server
-func (c *Client) processMessage(msg *Message) {
+func (c *Client) processMessage(msg *api.Message) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
 	switch msg.Type {
-	case WaitingForPeer:
+	case api.WaitingForPeer:
 		c.setState(StateWaiting)
 
-	case PeerAssignment:
+	case api.PeerAssignment:
 		data, err := msg.GetPeerAssignmentData()
 		if err != nil {
 			c.notifyError(fmt.Errorf("failed to parse peer assignment: %w", err))
@@ -491,7 +430,7 @@ func (c *Client) processMessage(msg *Message) {
 		c.setState(StatePaired)
 		c.notifyPeerAssigned(c.peerInfo)
 
-	case ServerError:
+	case api.ServerError:
 		data, err := msg.GetServerErrorData()
 		if err != nil {
 			c.notifyError(fmt.Errorf("failed to parse server error: %w", err))
@@ -526,7 +465,7 @@ func (c *Client) pingRoutine() {
 
 			// Send server pings only when connecting/waiting (stop after peer connection)
 			if state == StateConnecting || state == StateWaiting {
-				msg := NewClientPingMessage()
+				msg := api.NewClientPingMessage()
 				if err := c.sendToServer(msg); err != nil {
 					c.notifyError(fmt.Errorf("failed to send server ping: %w", err))
 				}
@@ -538,7 +477,7 @@ func (c *Client) pingRoutine() {
 				c.mutex.RLock()
 				lastPong := c.lastPeerPong
 				c.mutex.RUnlock()
-				
+
 				if time.Since(lastPong) > 30*time.Second {
 					// Clear peer info and re-register with server
 					c.mutex.Lock()
@@ -547,7 +486,7 @@ func (c *Client) pingRoutine() {
 					c.lastPeerPong = time.Time{}
 					c.setState(StateWaiting)
 					c.mutex.Unlock()
-					
+
 					// Re-register with server since we were removed when paired
 					if err := c.register(); err != nil {
 						c.notifyError(fmt.Errorf("failed to re-register after peer timeout: %w", err))
@@ -556,7 +495,7 @@ func (c *Client) pingRoutine() {
 					}
 					continue
 				}
-				
+
 				if err := c.sendPeerPing(); err != nil {
 					c.notifyError(fmt.Errorf("failed to send peer ping: %w", err))
 				}

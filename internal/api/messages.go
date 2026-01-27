@@ -1,4 +1,4 @@
-package stun
+package api
 
 import (
 	"encoding/json"
@@ -182,6 +182,22 @@ func (m *Message) GetServerErrorData() (*ServerErrorData, error) {
 
 // GetPeerPingData extracts peer ping data from message
 func (m *Message) GetPeerPingData() (*PeerPingData, error) {
+	if m.Type != PeerPing && m.Type != PeerPong {
+		return nil, ErrInvalidMessageType
+	}
+
+	dataBytes, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+
+	var data PeerPingData
+	err = json.Unmarshal(dataBytes, &data)
+	return &data, err
+}
+
+// GetPeerPongData extracts peer pong data from message
+func (m *Message) GetPeerPongData() (*PeerPingData, error) {
 	if m.Type != PeerPing && m.Type != PeerPong {
 		return nil, ErrInvalidMessageType
 	}
