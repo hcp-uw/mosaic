@@ -1,8 +1,8 @@
-Only macOS is supported for now.
+All OS are theoretically supported however as of 01/28/2026 non-MacOS has not been tested yet.
 
 Module 1 is the user experience way to startup and shutdown mosaic.
-Module 2 is the actual code being run (for informational/dev reasons)
-Module 3 is for developer testing mosaic
+Module 2 is for developer testing mosaic
+Module 3 is the actual code being run (for informational/dev reasons)
 
 ## Module 1:
 While in mosaic:
@@ -12,6 +12,31 @@ To shutdown:
 mos shutdown
 
 ## Module 2:
+
+While in mosaic directory
+
+To start run:
+- make build -> builds the executables
+- make install -> moves executables
+- make start -> starts background processes
+
+To end:
+- make stop -> stop daemon
+- make uninstall -> remove executables
+- make clean -> remove temp files
+
+Or even easier, to overall start run:
+- make quickstart
+
+To end run:
+- make shutdown
+
+Developer tools:
+- ./install.sh -d -> extra debugging info including PID
+- make status -> gives the status of the Daemon and Socket
+- make restart -> quickest way to restart mosaic to update your computer with newest changes
+
+## Module 3:
 
 To start mosaic...
 When in the mosaic directory, run:
@@ -37,27 +62,3 @@ Mosaic should now work as needed!
 To kill the background process and clean up run:
 - pkill mosaicd && rm -f /tmp/mosaicd.sock /tmp/mosaicd.pid /tmp/mosaicd.log
 
-## Module 3:
-
-While in mosaic directory
-
-To start run:
-- make build -> builds the executables
-- make install -> moves executables
-- make start -> starts background processes
-
-To end:
-- make stop -> stop daemon
-- make uninstall -> remove executables
-- make clean -> remove temp files
-
-Or even easier, to overall start run:
-- make quickstart
-
-To end run:
-- make shutdown
-
-Developer tools:
-
-- make status -> gives the status of the Daemon and Socket
-- make restart -> quickest way to restart mosaic to update your computer with newest changes

@@ -6,8 +6,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/hcp-uw/mosaic/internal/cli/client"
 	"github.com/hcp-uw/mosaic/internal/cli/handlers/helpers"
@@ -635,45 +639,194 @@ func mapToStruct(data interface{}, v interface{}) error {
 
 // Shutdown stops the mosaic daemon and uninstalls the binaries
 func Shutdown() {
+	goos := runtime.GOOS
 	fmt.Println("Stopping mosaic daemon...")
 
-	// Try to read PID file
-	pidBytes, err := os.ReadFile("/tmp/mosaicd.pid")
-	if err == nil {
-		// Kill by PID
-		var pid int
-		_, err := fmt.Sscanf(string(pidBytes), "%d", &pid)
-		exitOnErr(err, "Error killing by PID")
-		process, err := os.FindProcess(pid)
-		if err == nil {
-			err := process.Signal(syscall.SIGTERM)
-			exitOnErr(err, "Error sending SIGTERM to daemon process")
+	// Platform-specific paths
+	var pidFile, sockFile, logFile string
+	var binDir, cliName, daemonName string
+	var needsSudo bool
+
+	switch goos {
+	case "windows":
+		tempDir := os.Getenv("TEMP")
+		if tempDir == "" {
+			tempDir = os.Getenv("TMP")
 		}
-		os.Remove("/tmp/mosaicd.pid")
-	} else {
-		// Fallback: kill by name
-		err := exec.Command("pkill", "-f", "mosaicd").Run()
-		exitOnErr(err, "Error killing daemon by name")
+		pidFile = filepath.Join(tempDir, "mosaicd.pid")
+		sockFile = filepath.Join(tempDir, "mosaicd")
+		logFile = filepath.Join(tempDir, "mosaicd.log")
+		binDir = filepath.Join(os.Getenv("APPDATA"), "mosaic", "bin")
+		cliName = "mos.exe"
+		daemonName = "mosaicd.exe"
+		needsSudo = false
+	case "darwin":
+		pidFile = "/tmp/mosaicd.pid"
+		sockFile = "/tmp/mosaicd.sock"
+		logFile = "/tmp/mosaicd.log"
+		binDir = "/usr/local/bin"
+		cliName = "mos"
+		daemonName = "mosaicd"
+		needsSudo = true
+	case "linux":
+		pidFile = "/tmp/mosaicd.pid"
+		sockFile = "/tmp/mosaicd.sock"
+		logFile = "/tmp/mosaicd.log"
+		binDir = filepath.Join(os.Getenv("HOME"), ".local", "bin")
+		cliName = "mos"
+		daemonName = "mosaicd"
+		needsSudo = false
+	default:
+		fmt.Printf("Unsupported operating system: %s\n", goos)
+		os.Exit(1)
 	}
 
-	// Cleanup
-	os.Remove("/tmp/mosaicd.sock")
-	fmt.Println("✓ Daemon stopped")
+	// Try to stop the daemon - first by PID file
+	if pidBytes, err := os.ReadFile(pidFile); err == nil {
+		pidStr := strings.TrimSpace(string(pidBytes))
+		if pid, err := strconv.Atoi(pidStr); err == nil {
+			fmt.Printf("Stopping daemon (PID: %d)...\n", pid)
+			killProcess(pid, goos)
+		}
+		os.Remove(pidFile)
+	}
 
-	fmt.Println("")
+	// Fallback: kill by process name
+	if isDaemonRunning(goos) {
+		fmt.Println("Trying to stop daemon by process name...")
+		killByName("mosaicd", goos)
+	}
+
+	// Verify daemon is stopped
+	time.Sleep(500 * time.Millisecond)
+	if isDaemonRunning(goos) {
+		fmt.Println("⚠ Warning: daemon may still be running")
+		fmt.Println("You may need to manually kill the process:")
+		if goos == "windows" {
+			fmt.Println("  taskkill /F /IM mosaicd.exe")
+		} else {
+			fmt.Println("  pkill -9 -f mosaicd")
+		}
+	} else {
+		fmt.Println("✓ Daemon stopped")
+	}
+
+	// Cleanup temporary files
+	os.Remove(sockFile)
+	os.Remove(logFile)
+
+	fmt.Println()
 	fmt.Println("Uninstalling...")
 
 	// Uninstall binaries
-	err = exec.Command("sudo", "rm", "-f", "/usr/local/bin/mos").Run()
-	exitOnErr(err, "Error uninstalling mos binary")
-	err = exec.Command("sudo", "rm", "-f", "/usr/local/bin/mosaicd").Run()
-	exitOnErr(err, "Error uninstalling mosaicd binary")
+	cliPath := filepath.Join(binDir, cliName)
+	daemonPath := filepath.Join(binDir, daemonName)
 
-	// Clean logs
-	os.Remove("/tmp/mosaicd.log")
+	if needsSudo {
+		// macOS requires sudo
+		err := exec.Command("sudo", "rm", "-f", cliPath).Run()
+		if err != nil {
+			fmt.Printf("Warning: failed to remove %s: %v\n", cliPath, err)
+		}
+		err = exec.Command("sudo", "rm", "-f", daemonPath).Run()
+		if err != nil {
+			fmt.Printf("Warning: failed to remove %s: %v\n", daemonPath, err)
+		}
+	} else {
+		// Windows and Linux don't need sudo
+		if err := os.Remove(cliPath); err != nil && !os.IsNotExist(err) {
+			fmt.Printf("Warning: failed to remove %s: %v\n", cliPath, err)
+		}
+		if err := os.Remove(daemonPath); err != nil && !os.IsNotExist(err) {
+			fmt.Printf("Warning: failed to remove %s: %v\n", daemonPath, err)
+		}
+	}
 
 	fmt.Println("✓ Mosaic uninstalled")
 }
+
+// killProcess attempts to kill a process by PID
+func killProcess(pid int, goos string) bool {
+	switch goos {
+	case "windows":
+		cmd := exec.Command("taskkill", "/F", "/PID", strconv.Itoa(pid))
+		return cmd.Run() == nil
+	case "darwin", "linux":
+		process, err := os.FindProcess(pid)
+		if err != nil {
+			return false
+		}
+
+		// Try graceful SIGTERM first
+		if err := process.Signal(syscall.SIGTERM); err != nil {
+			return false
+		}
+
+		// Wait a bit for graceful shutdown
+		time.Sleep(1 * time.Second)
+
+		// Check if still alive, use SIGKILL if needed
+		if err := process.Signal(syscall.Signal(0)); err == nil {
+			// Still alive, force kill
+			err := process.Signal(syscall.SIGKILL)
+			if err != nil {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+// killByName attempts to kill processes by name
+func killByName(name string, goos string) bool {
+	switch goos {
+	case "windows":
+		cmd := exec.Command("taskkill", "/F", "/IM", name+".exe")
+		return cmd.Run() == nil
+	case "darwin", "linux":
+		// Try graceful kill first
+		cmd := exec.Command("pkill", "-TERM", "-f", name)
+		if err := cmd.Run(); err != nil {
+			return false
+		}
+
+		// Wait for graceful shutdown
+		time.Sleep(1 * time.Second)
+
+		// Check if still running, force kill if needed
+		checkCmd := exec.Command("pgrep", "-f", name)
+		if checkCmd.Run() == nil {
+			// Still running, use SIGKILL
+			err := exec.Command("pkill", "-9", "-f", name).Run()
+			exitOnErr(err, "Error killing using SIGKILL")
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+// isDaemonRunning checks if the daemon is still running
+func isDaemonRunning(goos string) bool {
+	switch goos {
+	case "windows":
+		cmd := exec.Command("tasklist")
+		output, err := cmd.Output()
+		if err != nil {
+			return false
+		}
+		return strings.Contains(strings.ToLower(string(output)), "mosaicd.exe")
+	case "darwin", "linux":
+		cmd := exec.Command("pgrep", "-f", "mosaicd")
+		return cmd.Run() == nil
+	default:
+		return false
+	}
+}
+
+// ... (keep the killProcess, killByName, and isDaemonRunning functions the same) ...
 
 // This is the old version of upload folder which I kept because I am proud of my recursive solution heh :)
 // Unfortunately it will eventually have to go but not today!

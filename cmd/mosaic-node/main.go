@@ -1,24 +1,22 @@
 package main
 
 import (
-
 	"fmt"
+	"log"
+	"os"
+
 	//"os"
 
 	//"github.com/hcp-uw/mosaic/internal/cli"
 	"github.com/hcp-uw/mosaic/internal/daemon"
+	"github.com/hcp-uw/mosaic/internal/encoding"
 )
 
 func main() {
-	//if len(os.Args) > 1 {
-	//	cli.Run(os.Args)
-	//	return
-	//}
 	if err := daemon.StartServer(); err != nil {
 		panic(err)
 	}
 	fmt.Println("welcome to mosaic")
-
 
 	file, err := os.ReadFile("output_file.jpg")
 	if err != nil {
@@ -44,6 +42,5 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-
 
 }
