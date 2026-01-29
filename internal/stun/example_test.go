@@ -70,17 +70,17 @@ func Example_usage() {
 	wg.Add(2) // Wait for both clients to be paired
 
 	// Connect clients to server
-	err = client1.Connect()
+	err = client1.ConnectToStun()
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer client1.Disconnect()
+	defer client1.DisconnectFromStun()
 
-	err = client2.Connect()
+	err = client2.ConnectToStun()
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer client2.Disconnect()
+	defer client2.DisconnectFromStun()
 
 	// Wait for pairing with timeout
 	done := make(chan bool)

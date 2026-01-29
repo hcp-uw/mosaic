@@ -56,7 +56,7 @@ func runClient(serverAddr string) {
 
 	// Connect to server
 	fmt.Printf("Connecting to STUN server at %s...\n", serverAddr)
-	if err := client.Connect(); err != nil {
+	if err := client.ConnectToStun(); err != nil {
 		log.Fatalf("Failed to connect: %v", err)
 	}
 
@@ -85,5 +85,5 @@ func runClient(serverAddr string) {
 
 	<-sigChan
 	fmt.Println("\nDisconnecting...")
-	client.Disconnect()
+	client.DisconnectFromStun()
 }

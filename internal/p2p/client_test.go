@@ -37,11 +37,11 @@ func TestClientConnect(t *testing.T) {
 	}
 
 	// Test connect
-	err = client.Connect()
+	err = client.ConnectToStun()
 	if err != nil {
 		t.Fatalf("Failed to connect: %v", err)
 	}
-	defer client.Disconnect()
+	defer client.DisconnectFromStun()
 
 	// Give time for connection to establish
 	time.Sleep(100 * time.Millisecond)
@@ -124,12 +124,12 @@ func TestClientPairingWithServer(t *testing.T) {
 	})
 
 	// Connect clients
-	err = client1.Connect()
+	err = client1.ConnectToStun()
 	if err != nil {
 		t.Fatalf("Failed to connect client 1: %v", err)
 	}
 
-	err = client2.Connect()
+	err = client2.ConnectToStun()
 	if err != nil {
 		t.Fatalf("Failed to connect client 2: %v", err)
 	}
@@ -142,8 +142,8 @@ func TestClientPairingWithServer(t *testing.T) {
 	select {
 	case <-client1Paired:
 	case <-timeout:
-		client1.Disconnect()
-		client2.Disconnect()
+		client1.DisconnectFromStun()
+		client2.DisconnectFromStun()
 		t.Fatal("Timeout waiting for client 1 to be paired")
 	}
 
@@ -151,8 +151,8 @@ func TestClientPairingWithServer(t *testing.T) {
 	select {
 	case <-client2Paired:
 	case <-timeout:
-		client1.Disconnect()
-		client2.Disconnect()
+		client1.DisconnectFromStun()
+		client2.DisconnectFromStun()
 		t.Fatal("Timeout waiting for client 2 to be paired")
 	}
 
@@ -192,8 +192,8 @@ func TestClientPairingWithServer(t *testing.T) {
 	}
 
 	// Clean disconnect after verification
-	client1.Disconnect()
-	client2.Disconnect()
+	client1.DisconnectFromStun()
+	client2.DisconnectFromStun()
 }
 
 func TestClientStateTransitions(t *testing.T) {
@@ -220,7 +220,7 @@ func TestClientStateTransitions(t *testing.T) {
 	})
 
 	// Connect should change state to connecting (then fail due to no server)
-	err = client.Connect()
+	err = client.ConnectToStun()
 	// This will fail but should still change state
 
 	time.Sleep(100 * time.Millisecond)
@@ -231,7 +231,7 @@ func TestClientStateTransitions(t *testing.T) {
 	}
 	mutex.Unlock()
 
-	client.Disconnect()
+	client.DisconnectFromStun()
 }
 
 func TestClientErrorHandling(t *testing.T) {
@@ -271,14 +271,14 @@ func TestClientErrorHandling(t *testing.T) {
 		t.Fatalf("Failed to create client: %v", err)
 	}
 
-	err = client.Connect()
+	err = client.ConnectToStun()
 	if err != nil {
 		t.Fatalf("Failed to connect first time: %v", err)
 	}
-	defer client.Disconnect()
+	defer client.DisconnectFromStun()
 
 	// Try to connect again
-	err = client.Connect()
+	err = client.ConnectToStun()
 	if err == nil {
 		t.Error("Expected error when connecting already connected client")
 	}
