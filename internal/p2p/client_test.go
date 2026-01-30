@@ -293,12 +293,12 @@ func TestClientPeerOperationsWithoutPeer(t *testing.T) {
 	}
 
 	// Test operations without peer connection
-	err = client.ConnectToPeer()
+	err = client.ConnectToPeer(nil)
 	if err == nil {
 		t.Error("Expected error when connecting to peer without assignment")
 	}
 
-	err = client.SendToPeer([]byte("test"))
+	err = client.SendToPeer(client.GetConnectedPeers()[0].ID, []byte("test"))
 	if err == nil {
 		t.Error("Expected error when sending to peer without connection")
 	}
@@ -354,7 +354,8 @@ func TestClientUtilityMethods(t *testing.T) {
 	}
 
 	// Test GetPeerInfo when no peer is assigned
-	peerInfo := client.GetPeerInfo()
+
+	peerInfo := client.GetPeerById(client.GetConnectedPeers()[0].ID)
 	if peerInfo != nil {
 		t.Error("Expected GetPeerInfo to return nil when no peer assigned")
 	}
@@ -377,7 +378,7 @@ func TestClientUtilityMethods(t *testing.T) {
 	client.mutex.Unlock()
 
 	// Test GetPeerInfo when peer is assigned
-	peerInfo = client.GetPeerInfo()
+	peerInfo = client.GetPeerById(client.GetConnectedPeers()[0].ID)
 	if peerInfo == nil {
 		t.Error("Expected GetPeerInfo to return peer info when peer is assigned")
 	} else {
@@ -511,7 +512,7 @@ func TestPeerMessageProcessing(t *testing.T) {
 	// Should not trigger any callbacks - this is just a hole punching packet
 
 	// Test peer ping message processing
-	pingMsg := api.NewPeerPingMessage()
+	pingMsg := api.NewPeerPingMessage(api.NewSignature(client.id))
 	pingData, _ := pingMsg.Serialize()
 
 	// Set up peer connection so sendPeerPong works
@@ -535,7 +536,7 @@ func TestPeerMessageProcessing(t *testing.T) {
 	client.processPeerMessage(pingData)
 
 	// Test peer pong message processing
-	pongMsg := api.NewPeerPongMessage()
+	pongMsg := api.NewPeerPongMessage(api.NewSignature())
 	pongData, _ := pongMsg.Serialize()
 
 	// Process peer pong - should update lastPeerPong time
@@ -600,13 +601,13 @@ func TestEdgeCasesAndErrorScenarios(t *testing.T) {
 		ServerAddress: "localhost:1234",
 	})
 
-	err = client.ConnectToPeer()
+	err = client.ConnectToPeer(nil)
 	if err == nil {
 		t.Error("Expected error when calling ConnectToPeer without peer assignment")
 	}
 
 	// Test SendToPeer without peer connection
-	err = client.SendToPeer([]byte("test"))
+	err = client.SendToPeer(client.GetConnectedPeers()[0].ID, []byte("test"))
 	if err == nil {
 		t.Error("Expected error when calling SendToPeer without peer connection")
 	}

@@ -12,10 +12,11 @@ import (
 
 // Client represents a STUN client
 type Client struct {
+	id               string
 	serverAddr       *net.UDPAddr
 	serverConn       *net.UDPConn
 	state            ClientState
-	peers			 map[string]*PeerInfo
+	peers            map[string]*PeerInfo
 	peerInfo         *PeerInfo
 	peerConn         *net.UDPConn
 	lastPeerPong     time.Time
@@ -60,7 +61,7 @@ func NewClient(config *ClientConfig) (*Client, error) {
 	return &Client{
 		serverAddr:       serverAddr,
 		state:            StateDisconnected,
-		peers: make(map[string]*PeerInfo),
+		peers:            make(map[string]*PeerInfo),
 		ctx:              ctx,
 		cancel:           cancel,
 		stateCallbacks:   make([]func(ClientState), 0),
@@ -84,7 +85,9 @@ func (c *Client) GetConnectedPeers() []*PeerInfo {
 	info := []*PeerInfo{}
 
 	for _, val := range c.peers {
-		info = append(info, val);
+		if val.Conn != nil {
+			info = append(info, val)
+		}
 	}
 
 	return info

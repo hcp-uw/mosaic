@@ -9,11 +9,12 @@ import (
 // PeerInfo holds information about the assigned peer
 type PeerInfo struct {
 	Address *net.UDPAddr
+	Conn    *net.UDPConn
 	ID      string
 }
 
 // SendToPeer sends data to the connected peer
-func (c *Client) SendToPeer(data []byte) error {
+func (c *Client) SendToPeer(peerId string, data []byte) error {
 	c.mutex.RLock()
 	peerConn := c.peerConn
 	peerInfo := c.peerInfo
@@ -37,15 +38,40 @@ func (c *Client) SendToPeer(data []byte) error {
 	return err
 }
 
+func (c *Client) SendToAllPeers(data []byte) error {
+	c.mutex.RLock()
+	allPeers := c.GetConnectedPeers()
+	state := c.state
+	c.mutex.RUnlock()
+
+	if len(allPeers) == 0 {
+		return fmt.Errorf("no peer information available")
+	}
+
+	// Block sending only in truly disconnected state
+	if state == StateDisconnected {
+		return fmt.Errorf("client disconnected")
+	}
+
+	for _, peer := range allPeers {
+		_, err := peer.Conn.WriteToUDP(data, peer.Address)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // IsPeerCommunicationAvailable returns true if peer communication is possible
 func (c *Client) IsPeerCommunicationAvailable() bool {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-	return c.peerInfo != nil && c.peerConn != nil && c.state != StateDisconnected
+
+	return len(c.GetConnectedPeers()) > 0 && c.state != StateDisconnected
 }
 
 // ConnectToPeer attempts to establish direct connection to assigned peer using UDP hole punching
-func (c *Client) ConnectToPeer() error {
+func (c *Client) ConnectToPeer(peer *PeerInfo) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
@@ -59,12 +85,13 @@ func (c *Client) ConnectToPeer() error {
 
 	// Reuse the existing server connection socket for peer communication
 	// This is the key to proper UDP hole punching
-	c.peerConn = c.serverConn
+	c.peers[peer.ID] = peer
+	c.peers[peer.ID].Conn = c.serverConn
 	c.lastPeerPong = time.Now() // Initialize peer connection time
 	c.setState(StateConnectedToPeer)
 
 	// Start UDP hole punching - send initial packet to peer to establish connection
-	go c.establishPeerConnection(c.peerInfo.Address)
+	go c.establishPeerConnection(c.peers[peer.ID].Address)
 
 	return nil
 }

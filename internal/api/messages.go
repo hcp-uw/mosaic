@@ -27,9 +27,19 @@ const (
 
 // Message represents the base message structure
 type Message struct {
+	Sign Signature `json:"sign"`
+
 	Type      MessageType `json:"type"`
 	Timestamp time.Time   `json:"timestamp"`
 	Data      any         `json:"data,omitempty"`
+}
+
+type Signature struct {
+	PubKey string `json:"pub_key"`
+}
+
+func NewSignature(pubKey string) Signature {
+	return Signature{PubKey: pubKey}
 }
 
 // ClientRegisterData represents client registration information (no data needed)
@@ -96,8 +106,9 @@ func NewServerErrorMessage(errorMsg, errorCode string) *Message {
 }
 
 // NewClientPingMessage creates a ping message
-func NewClientPingMessage() *Message {
+func NewClientPingMessage(sign Signature) *Message {
 	return &Message{
+		Sign:      sign,
 		Type:      ClientPing,
 		Timestamp: time.Now(),
 		Data:      ClientRegisterData{},
@@ -105,8 +116,9 @@ func NewClientPingMessage() *Message {
 }
 
 // NewPeerPingMessage creates a peer ping message
-func NewPeerPingMessage() *Message {
+func NewPeerPingMessage(sign Signature) *Message {
 	return &Message{
+		Sign:      sign,
 		Type:      PeerPing,
 		Timestamp: time.Now(),
 		Data: PeerPingData{
@@ -116,8 +128,9 @@ func NewPeerPingMessage() *Message {
 }
 
 // NewPeerPongMessage creates a peer pong response message
-func NewPeerPongMessage() *Message {
+func NewPeerPongMessage(sign Signature) *Message {
 	return &Message{
+		Sign:      sign,
 		Type:      PeerPong,
 		Timestamp: time.Now(),
 		Data: PeerPingData{

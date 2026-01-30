@@ -2,8 +2,8 @@ package p2p
 
 /*
 
-This file is for code pertaining to ensuring the connection between peers stays strong. 
-ping pongs go here and managing that goes with that goes here. Any code that is for purely 
+This file is for code pertaining to ensuring the connection between peers stays strong.
+ping pongs go here and managing that goes with that goes here. Any code that is for purely
 managing the network connection between peers goes here. NOT CODE THAT USES THAT NETWORK!
 
 */
@@ -14,7 +14,6 @@ import (
 
 	"github.com/hcp-uw/mosaic/internal/api"
 )
-
 
 // sendPeerPing sends a ping message to the connected peer
 func (c *Client) sendPeerPing() error {
@@ -31,7 +30,7 @@ func (c *Client) sendPeerPing() error {
 		return fmt.Errorf("no peer information available")
 	}
 
-	msg := api.NewPeerPingMessage()
+	msg := api.NewPeerPingMessage(api.NewSignature(c.id))
 	data, err := msg.Serialize()
 	if err != nil {
 		return fmt.Errorf("failed to serialize peer ping: %w", err)
@@ -60,7 +59,7 @@ func (c *Client) sendPeerPong() error {
 		return fmt.Errorf("no peer information available")
 	}
 
-	msg := api.NewPeerPongMessage()
+	msg := api.NewPeerPongMessage(api.NewSignature(c.id))
 	data, err := msg.Serialize()
 	if err != nil {
 		return fmt.Errorf("failed to serialize peer pong: %w", err)
@@ -95,7 +94,8 @@ func (c *Client) pingRoutine() {
 
 			// Send server pings only when connecting/waiting (stop after peer connection)
 			if state == StateConnecting || state == StateWaiting {
-				msg := api.NewClientPingMessage()
+
+				msg := api.NewClientPingMessage(api.NewSignature(c.id))
 				if err := c.sendToServer(msg); err != nil {
 					c.notifyError(fmt.Errorf("failed to send server ping: %w", err))
 				}
@@ -133,5 +133,3 @@ func (c *Client) pingRoutine() {
 		}
 	}
 }
-
-

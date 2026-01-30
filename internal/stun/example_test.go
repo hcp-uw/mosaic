@@ -119,7 +119,7 @@ func Example_usage() {
 
 	// Send message from client 1 to client 2
 	message := []byte("Hello from client 1!")
-	err = client1.SendToPeer(message)
+	err = client1.SendToPeer(client2.GetConnectedPeers()[0].ID, message)
 	if err != nil {
 		log.Fatal(err)
 	}
