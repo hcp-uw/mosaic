@@ -1,4 +1,4 @@
-package handlers
+package main
 
 import (
 	"bufio"
@@ -8,22 +8,13 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/hcp-uw/mosaic/internal/cli/protocol"
 	"github.com/hcp-uw/mosaic/internal/p2p"
 )
 
-// Joins the network and returns a JoinResponse
-func HandleJoin(req protocol.JoinRequest) protocol.JoinResponse {
-	fmt.Println("Daemon: joining network.")
-	// all the actual logic and stuff goes here
-	// Details goes in the logs (not printed in terminal)
+func main() {
+	serverAddr := "127.0.0.1:3478"
 
-	runClient(req.ServerAddress)
-
-	return protocol.JoinResponse{
-		Success: true,
-		Details: "Network joined successfully.",
-	}
+	runClient(serverAddr)
 }
 
 func runClient(serverAddr string) {
