@@ -1,4 +1,4 @@
-package stun
+package api
 
 import (
 	"encoding/json"
@@ -16,9 +16,10 @@ const (
 	ClientPing     MessageType = "client_ping"
 
 	// Server to Client messages
-	PeerAssignment MessageType = "peer_assignment"
-	ServerError    MessageType = "server_error"
-	WaitingForPeer MessageType = "waiting_for_peer"
+	RegisterSuccess MessageType = "register_success"
+	PeerAssignment  MessageType = "peer_assignment"
+	ServerError     MessageType = "server_error"
+	WaitingForPeer  MessageType = "waiting_for_peer"
 
 	// Peer to Peer messages
 	PeerPing MessageType = "peer_ping"
@@ -27,14 +28,29 @@ const (
 
 // Message represents the base message structure
 type Message struct {
+	Sign Signature `json:"sign"`
+
 	Type      MessageType `json:"type"`
 	Timestamp time.Time   `json:"timestamp"`
 	Data      any         `json:"data,omitempty"`
 }
 
+type Signature struct {
+	PubKey string `json:"pub_key"`
+}
+
+func NewSignature(pubKey string) Signature {
+	return Signature{PubKey: pubKey}
+}
+
 // ClientRegisterData represents client registration information (no data needed)
 type ClientRegisterData struct {
 	// No fields needed - client ID is derived from network address
+}
+
+type RegisterSuccessData struct {
+	Message string `json:"message"`
+	ID      string `json:"id"`
 }
 
 // PeerAssignmentData contains peer connection information
@@ -75,6 +91,17 @@ func NewPeerAssignmentMessage(peerAddr *net.UDPAddr, peerID string) *Message {
 	}
 }
 
+func NewRegisterSuccessMessage(message, id string) *Message {
+	return &Message{
+		Type:      RegisterSuccess,
+		Timestamp: time.Now(),
+		Data: RegisterSuccessData{
+			Message: message,
+			ID:      id,
+		},
+	}
+}
+
 // NewWaitingForPeerMessage creates a waiting message
 func NewWaitingForPeerMessage() *Message {
 	return &Message{
@@ -96,8 +123,9 @@ func NewServerErrorMessage(errorMsg, errorCode string) *Message {
 }
 
 // NewClientPingMessage creates a ping message
-func NewClientPingMessage() *Message {
+func NewClientPingMessage(sign Signature) *Message {
 	return &Message{
+		Sign:      sign,
 		Type:      ClientPing,
 		Timestamp: time.Now(),
 		Data:      ClientRegisterData{},
@@ -105,8 +133,9 @@ func NewClientPingMessage() *Message {
 }
 
 // NewPeerPingMessage creates a peer ping message
-func NewPeerPingMessage() *Message {
+func NewPeerPingMessage(sign Signature) *Message {
 	return &Message{
+		Sign:      sign,
 		Type:      PeerPing,
 		Timestamp: time.Now(),
 		Data: PeerPingData{
@@ -116,8 +145,9 @@ func NewPeerPingMessage() *Message {
 }
 
 // NewPeerPongMessage creates a peer pong response message
-func NewPeerPongMessage() *Message {
+func NewPeerPongMessage(sign Signature) *Message {
 	return &Message{
+		Sign:      sign,
 		Type:      PeerPong,
 		Timestamp: time.Now(),
 		Data: PeerPingData{
@@ -192,6 +222,37 @@ func (m *Message) GetPeerPingData() (*PeerPingData, error) {
 	}
 
 	var data PeerPingData
+	err = json.Unmarshal(dataBytes, &data)
+	return &data, err
+}
+
+// GetPeerPongData extracts peer pong data from message
+func (m *Message) GetPeerPongData() (*PeerPingData, error) {
+	if m.Type != PeerPing && m.Type != PeerPong {
+		return nil, ErrInvalidMessageType
+	}
+
+	dataBytes, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+
+	var data PeerPingData
+	err = json.Unmarshal(dataBytes, &data)
+	return &data, err
+}
+
+func (m *Message) GetRegisterSuccessData() (*RegisterSuccessData, error) {
+	if m.Type != RegisterSuccess {
+		return nil, ErrInvalidMessageType
+	}
+
+	dataBytes, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+
+	var data RegisterSuccessData
 	err = json.Unmarshal(dataBytes, &data)
 	return &data, err
 }

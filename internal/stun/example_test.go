@@ -5,6 +5,8 @@ import (
 	"log"
 	"sync"
 	"time"
+
+	"github.com/hcp-uw/mosaic/internal/p2p"
 )
 
 // Example_usage demonstrates basic usage of STUN server and client
@@ -25,14 +27,14 @@ func Example_usage() {
 	serverAddr := server.conn.LocalAddr().String()
 
 	// Create two clients
-	client1Config := DefaultClientConfig(serverAddr)
-	client1, err := NewClient(client1Config)
+	client1Config := p2p.DefaultClientConfig(serverAddr)
+	client1, err := p2p.NewClient(client1Config)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	client2Config := DefaultClientConfig(serverAddr)
-	client2, err := NewClient(client2Config)
+	client2Config := p2p.DefaultClientConfig(serverAddr)
+	client2, err := p2p.NewClient(client2Config)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -40,27 +42,27 @@ func Example_usage() {
 	var wg sync.WaitGroup
 
 	// Set up client 1 callbacks
-	client1.OnStateChange(func(state ClientState) {
+	client1.OnStateChange(func(state p2p.ClientState) {
 		fmt.Printf("Client 1 state: %s\n", state)
-		if state == StatePaired {
+		if state == p2p.StatePaired {
 			wg.Done()
 		}
 	})
 
-	client1.OnPeerAssigned(func(peerInfo *PeerInfo) {
+	client1.OnPeerAssigned(func(peerInfo *p2p.PeerInfo) {
 		// Don't print for deterministic test output
 		_ = peerInfo
 	})
 
 	// Set up client 2 callbacks
-	client2.OnStateChange(func(state ClientState) {
+	client2.OnStateChange(func(state p2p.ClientState) {
 		fmt.Printf("Client 2 state: %s\n", state)
-		if state == StatePaired {
+		if state == p2p.StatePaired {
 			wg.Done()
 		}
 	})
 
-	client2.OnPeerAssigned(func(peerInfo *PeerInfo) {
+	client2.OnPeerAssigned(func(peerInfo *p2p.PeerInfo) {
 		// Don't print for deterministic test output
 		_ = peerInfo
 	})
@@ -68,17 +70,17 @@ func Example_usage() {
 	wg.Add(2) // Wait for both clients to be paired
 
 	// Connect clients to server
-	err = client1.Connect()
+	err = client1.ConnectToStun()
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer client1.Disconnect()
+	defer client1.DisconnectFromStun()
 
-	err = client2.Connect()
+	err = client2.ConnectToStun()
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer client2.Disconnect()
+	defer client2.DisconnectFromStun()
 
 	// Wait for pairing with timeout
 	done := make(chan bool)
@@ -117,7 +119,7 @@ func Example_usage() {
 
 	// Send message from client 1 to client 2
 	message := []byte("Hello from client 1!")
-	err = client1.SendToPeer(message)
+	err = client1.SendToPeer(client2.GetConnectedPeers()[0].ID, message)
 	if err != nil {
 		log.Fatal(err)
 	}

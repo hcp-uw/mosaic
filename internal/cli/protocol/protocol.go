@@ -47,12 +47,12 @@ type NetworkStatusResponse struct {
 }
 
 type JoinRequest struct {
+	ServerAddress string `json:"ServerAddress"`
 }
 
 type JoinResponse struct {
 	Success bool   `json:"success"`
 	Details string `json:"details"`
-	Peers   int    `json:"peers"`
 }
 
 type NodeStatusRequest struct {

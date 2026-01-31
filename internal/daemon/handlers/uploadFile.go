@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/hcp-uw/mosaic/internal/cli/handlers/helpers"
 	"github.com/hcp-uw/mosaic/internal/cli/protocol"
+	"github.com/hcp-uw/mosaic/internal/daemon/handlers/helpers"
 )
 
 // uploads a file to the network and returns an UploadFileResponse

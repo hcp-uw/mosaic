@@ -1,4 +1,4 @@
-package stun
+package p2p
 
 import (
 	"fmt"
@@ -7,24 +7,27 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/hcp-uw/mosaic/internal/api"
+	"github.com/hcp-uw/mosaic/internal/stun"
 )
 
 func TestClientConnect(t *testing.T) {
 	// Start a test server
-	config := &ServerConfig{
+	config := &stun.ServerConfig{
 		ListenAddress: "127.0.0.1:0",
 		ClientTimeout: 5 * time.Second,
 		EnableLogging: false,
 	}
 
-	server := NewServer(config)
+	server := stun.NewServer(config)
 	err := server.Start(config)
 	if err != nil {
 		t.Fatalf("Failed to start server: %v", err)
 	}
 	defer server.Stop()
 
-	serverAddr := server.conn.LocalAddr().(*net.UDPAddr)
+	serverAddr := server.GetConn().LocalAddr().(*net.UDPAddr)
 
 	// Create client
 	clientConfig := DefaultClientConfig(serverAddr.String())
@@ -34,11 +37,11 @@ func TestClientConnect(t *testing.T) {
 	}
 
 	// Test connect
-	err = client.Connect()
+	err = client.ConnectToStun()
 	if err != nil {
 		t.Fatalf("Failed to connect: %v", err)
 	}
-	defer client.Disconnect()
+	defer client.DisconnectFromStun()
 
 	// Give time for connection to establish
 	time.Sleep(100 * time.Millisecond)
@@ -52,20 +55,20 @@ func TestClientConnect(t *testing.T) {
 
 func TestClientPairingWithServer(t *testing.T) {
 	// Start a test server
-	config := &ServerConfig{
+	config := &stun.ServerConfig{
 		ListenAddress: "127.0.0.1:0",
 		ClientTimeout: 10 * time.Second, // Increased timeout for stability
 		EnableLogging: false,
 	}
 
-	server := NewServer(config)
+	server := stun.NewServer(config)
 	err := server.Start(config)
 	if err != nil {
 		t.Fatalf("Failed to start server: %v", err)
 	}
 	defer server.Stop()
 
-	serverAddr := server.conn.LocalAddr().(*net.UDPAddr)
+	serverAddr := server.GetConn().LocalAddr().(*net.UDPAddr)
 
 	// Create two clients
 	client1Config := DefaultClientConfig(serverAddr.String())
@@ -121,12 +124,12 @@ func TestClientPairingWithServer(t *testing.T) {
 	})
 
 	// Connect clients
-	err = client1.Connect()
+	err = client1.ConnectToStun()
 	if err != nil {
 		t.Fatalf("Failed to connect client 1: %v", err)
 	}
 
-	err = client2.Connect()
+	err = client2.ConnectToStun()
 	if err != nil {
 		t.Fatalf("Failed to connect client 2: %v", err)
 	}
@@ -134,13 +137,13 @@ func TestClientPairingWithServer(t *testing.T) {
 	// Wait for both clients to be paired with timeout
 	timeout := time.After(7 * time.Second)
 	var client1PeerInfo, client2PeerInfo *PeerInfo
-	
+
 	// Wait for client 1 pairing
 	select {
 	case <-client1Paired:
 	case <-timeout:
-		client1.Disconnect()
-		client2.Disconnect()
+		client1.DisconnectFromStun()
+		client2.DisconnectFromStun()
 		t.Fatal("Timeout waiting for client 1 to be paired")
 	}
 
@@ -148,8 +151,8 @@ func TestClientPairingWithServer(t *testing.T) {
 	select {
 	case <-client2Paired:
 	case <-timeout:
-		client1.Disconnect()
-		client2.Disconnect()
+		client1.DisconnectFromStun()
+		client2.DisconnectFromStun()
 		t.Fatal("Timeout waiting for client 2 to be paired")
 	}
 
@@ -189,10 +192,9 @@ func TestClientPairingWithServer(t *testing.T) {
 	}
 
 	// Clean disconnect after verification
-	client1.Disconnect()
-	client2.Disconnect()
+	client1.DisconnectFromStun()
+	client2.DisconnectFromStun()
 }
-
 
 func TestClientStateTransitions(t *testing.T) {
 	client, err := NewClient(&ClientConfig{
@@ -218,7 +220,7 @@ func TestClientStateTransitions(t *testing.T) {
 	})
 
 	// Connect should change state to connecting (then fail due to no server)
-	err = client.Connect()
+	err = client.ConnectToStun()
 	// This will fail but should still change state
 
 	time.Sleep(100 * time.Millisecond)
@@ -229,7 +231,7 @@ func TestClientStateTransitions(t *testing.T) {
 	}
 	mutex.Unlock()
 
-	client.Disconnect()
+	client.DisconnectFromStun()
 }
 
 func TestClientErrorHandling(t *testing.T) {
@@ -249,34 +251,34 @@ func TestClientErrorHandling(t *testing.T) {
 	}
 
 	// Test connecting when already connected
-	config := &ServerConfig{
+	config := &stun.ServerConfig{
 		ListenAddress: "127.0.0.1:0",
 		ClientTimeout: 5 * time.Second,
 		EnableLogging: false,
 	}
 
-	server := NewServer(config)
+	server := stun.NewServer(config)
 	err = server.Start(config)
 	if err != nil {
 		t.Fatalf("Failed to start server: %v", err)
 	}
 	defer server.Stop()
 
-	serverAddr := server.conn.LocalAddr().(*net.UDPAddr)
+	serverAddr := server.GetConn().LocalAddr().(*net.UDPAddr)
 
 	client, err = NewClient(DefaultClientConfig(serverAddr.String()))
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
 
-	err = client.Connect()
+	err = client.ConnectToStun()
 	if err != nil {
 		t.Fatalf("Failed to connect first time: %v", err)
 	}
-	defer client.Disconnect()
+	defer client.DisconnectFromStun()
 
 	// Try to connect again
-	err = client.Connect()
+	err = client.ConnectToStun()
 	if err == nil {
 		t.Error("Expected error when connecting already connected client")
 	}
@@ -291,12 +293,12 @@ func TestClientPeerOperationsWithoutPeer(t *testing.T) {
 	}
 
 	// Test operations without peer connection
-	err = client.ConnectToPeer()
+	err = client.ConnectToPeer(nil)
 	if err == nil {
 		t.Error("Expected error when connecting to peer without assignment")
 	}
 
-	err = client.SendToPeer([]byte("test"))
+	err = client.SendToPeer(client.GetConnectedPeers()[0].ID, []byte("test"))
 	if err == nil {
 		t.Error("Expected error when sending to peer without connection")
 	}
@@ -321,7 +323,7 @@ func TestClientStateString(t *testing.T) {
 	for _, test := range tests {
 		result := test.state.String()
 		if result != test.expected {
-			t.Errorf("Expected %s.String() to return %q, got %q", 
+			t.Errorf("Expected %s.String() to return %q, got %q",
 				test.state, test.expected, result)
 		}
 	}
@@ -329,15 +331,15 @@ func TestClientStateString(t *testing.T) {
 
 func TestDefaultClientConfig(t *testing.T) {
 	config := DefaultClientConfig("localhost:1234")
-	
+
 	if config.ServerAddress != "localhost:1234" {
 		t.Errorf("Expected ServerAddress to be 'localhost:1234', got %q", config.ServerAddress)
 	}
-	
+
 	if config.PingInterval != 10*time.Second {
 		t.Errorf("Expected PingInterval to be 10s, got %v", config.PingInterval)
 	}
-	
+
 	if config.ConnectTimeout != 30*time.Second {
 		t.Errorf("Expected ConnectTimeout to be 30s, got %v", config.ConnectTimeout)
 	}
@@ -352,7 +354,8 @@ func TestClientUtilityMethods(t *testing.T) {
 	}
 
 	// Test GetPeerInfo when no peer is assigned
-	peerInfo := client.GetPeerInfo()
+
+	peerInfo := client.GetPeerById(client.GetConnectedPeers()[0].ID)
 	if peerInfo != nil {
 		t.Error("Expected GetPeerInfo to return nil when no peer assigned")
 	}
@@ -375,7 +378,7 @@ func TestClientUtilityMethods(t *testing.T) {
 	client.mutex.Unlock()
 
 	// Test GetPeerInfo when peer is assigned
-	peerInfo = client.GetPeerInfo()
+	peerInfo = client.GetPeerById(client.GetConnectedPeers()[0].ID)
 	if peerInfo == nil {
 		t.Error("Expected GetPeerInfo to return peer info when peer is assigned")
 	} else {
@@ -509,7 +512,7 @@ func TestPeerMessageProcessing(t *testing.T) {
 	// Should not trigger any callbacks - this is just a hole punching packet
 
 	// Test peer ping message processing
-	pingMsg := NewPeerPingMessage()
+	pingMsg := api.NewPeerPingMessage(api.NewSignature(client.id))
 	pingData, _ := pingMsg.Serialize()
 
 	// Set up peer connection so sendPeerPong works
@@ -533,7 +536,7 @@ func TestPeerMessageProcessing(t *testing.T) {
 	client.processPeerMessage(pingData)
 
 	// Test peer pong message processing
-	pongMsg := NewPeerPongMessage()
+	pongMsg := api.NewPeerPongMessage(api.NewSignature())
 	pongData, _ := pongMsg.Serialize()
 
 	// Process peer pong - should update lastPeerPong time
@@ -598,13 +601,13 @@ func TestEdgeCasesAndErrorScenarios(t *testing.T) {
 		ServerAddress: "localhost:1234",
 	})
 
-	err = client.ConnectToPeer()
+	err = client.ConnectToPeer(nil)
 	if err == nil {
 		t.Error("Expected error when calling ConnectToPeer without peer assignment")
 	}
 
 	// Test SendToPeer without peer connection
-	err = client.SendToPeer([]byte("test"))
+	err = client.SendToPeer(client.GetConnectedPeers()[0].ID, []byte("test"))
 	if err == nil {
 		t.Error("Expected error when calling SendToPeer without peer connection")
 	}
@@ -643,8 +646,8 @@ func TestEdgeCasesAndErrorScenarios(t *testing.T) {
 	// Should trigger error callback but not crash
 
 	// Test unknown message type processing
-	unknownMsg := &Message{
-		Type: MessageType("unknown_type"),
+	unknownMsg := &api.Message{
+		Type: api.MessageType("unknown_type"),
 	}
 	client.processMessage(unknownMsg)
 	// Should trigger error callback but not crash
