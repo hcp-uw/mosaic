@@ -16,18 +16,17 @@ import (
 )
 
 // sendPeerPing sends a ping message to the connected peer
-func (c *Client) sendPeerPing() error {
+func (c *Client) sendPeerPing(id string) error {
 	c.mutex.RLock()
-	peerConn := c.peerConn
-	peerInfo := c.peerInfo
+	peerInfo := c.GetPeerById(id)
 	c.mutex.RUnlock()
 
-	if peerConn == nil {
-		return fmt.Errorf("not connected to peer")
+	if peerInfo == nil {
+		return fmt.Errorf("peer not found")
 	}
 
-	if peerInfo == nil {
-		return fmt.Errorf("no peer information available")
+	if peerInfo.Conn == nil {
+		return fmt.Errorf("not connected to peer")
 	}
 
 	msg := api.NewPeerPingMessage(api.NewSignature(c.id))
@@ -36,7 +35,7 @@ func (c *Client) sendPeerPing() error {
 		return fmt.Errorf("failed to serialize peer ping: %w", err)
 	}
 
-	_, err = peerConn.WriteToUDP(data, peerInfo.Address)
+	_, err = peerInfo.Conn.WriteToUDP(data, peerInfo.Address)
 	if err != nil {
 		return fmt.Errorf("failed to send peer ping: %w", err)
 	}
@@ -45,13 +44,16 @@ func (c *Client) sendPeerPing() error {
 }
 
 // sendPeerPong sends a pong response to the connected peer
-func (c *Client) sendPeerPong() error {
+func (c *Client) sendPeerPong(peerId string) error {
 	c.mutex.RLock()
-	peerConn := c.peerConn
-	peerInfo := c.peerInfo
+	peerInfo := c.GetPeerById(peerId)
 	c.mutex.RUnlock()
 
-	if peerConn == nil {
+	if peerInfo == nil {
+		return fmt.Errorf("peer not found")
+	}
+
+	if peerInfo.Conn == nil {
 		return fmt.Errorf("not connected to peer")
 	}
 
@@ -65,7 +67,7 @@ func (c *Client) sendPeerPong() error {
 		return fmt.Errorf("failed to serialize peer pong: %w", err)
 	}
 
-	_, err = peerConn.WriteToUDP(data, peerInfo.Address)
+	_, err = peerInfo.Conn.WriteToUDP(data, peerInfo.Address)
 	if err != nil {
 		return fmt.Errorf("failed to send peer pong: %w", err)
 	}
@@ -74,7 +76,7 @@ func (c *Client) sendPeerPong() error {
 }
 
 // pingRoutine sends periodic ping messages to keep connection alive
-func (c *Client) pingRoutine() {
+func (c *Client) pingRoutine(id string) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
@@ -85,7 +87,7 @@ func (c *Client) pingRoutine() {
 		case <-ticker.C:
 			c.mutex.RLock()
 			state := c.state
-			peerInfo := c.peerInfo
+			peerInfo := c.GetPeerById(id)
 			c.mutex.RUnlock()
 
 			if state == StateDisconnected {
@@ -104,29 +106,27 @@ func (c *Client) pingRoutine() {
 			// Send peer pings when connected to peer
 			if state == StateConnectedToPeer && peerInfo != nil {
 				// Check for peer timeout (30 seconds without pong)
-				c.mutex.RLock()
-				lastPong := c.lastPeerPong
-				c.mutex.RUnlock()
 
-				if time.Since(lastPong) > 30*time.Second {
+				if time.Since(peerInfo.LastPeerPong) > 30*time.Second {
 					// Clear peer info and re-register with server
 					c.mutex.Lock()
-					c.peerInfo = nil
-					c.peerConn = nil
-					c.lastPeerPong = time.Time{}
-					c.setState(StateWaiting)
+					delete(c.peers, peerInfo.ID)
+					peerInfo = nil
+					if len(c.GetConnectedPeers()) == 0 {
+						c.setState(StateWaiting)
+						if err := c.register(); err != nil {
+							c.notifyError(fmt.Errorf("failed to re-register after peer timeout: %w", err))
+						} else {
+							c.notifyError(fmt.Errorf("peer connection timeout - re-registered with server"))
+						}
+					}
 					c.mutex.Unlock()
 
 					// Re-register with server since we were removed when paired
-					if err := c.register(); err != nil {
-						c.notifyError(fmt.Errorf("failed to re-register after peer timeout: %w", err))
-					} else {
-						c.notifyError(fmt.Errorf("peer connection timeout - re-registered with server"))
-					}
 					continue
 				}
 
-				if err := c.sendPeerPing(); err != nil {
+				if err := c.sendPeerPing(c.id); err != nil {
 					c.notifyError(fmt.Errorf("failed to send peer ping: %w", err))
 				}
 			}

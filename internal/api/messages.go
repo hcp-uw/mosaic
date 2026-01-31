@@ -16,9 +16,10 @@ const (
 	ClientPing     MessageType = "client_ping"
 
 	// Server to Client messages
-	PeerAssignment MessageType = "peer_assignment"
-	ServerError    MessageType = "server_error"
-	WaitingForPeer MessageType = "waiting_for_peer"
+	RegisterSuccess MessageType = "register_success"
+	PeerAssignment  MessageType = "peer_assignment"
+	ServerError     MessageType = "server_error"
+	WaitingForPeer  MessageType = "waiting_for_peer"
 
 	// Peer to Peer messages
 	PeerPing MessageType = "peer_ping"
@@ -45,6 +46,11 @@ func NewSignature(pubKey string) Signature {
 // ClientRegisterData represents client registration information (no data needed)
 type ClientRegisterData struct {
 	// No fields needed - client ID is derived from network address
+}
+
+type RegisterSuccessData struct {
+	Message string `json:"message"`
+	ID      string `json:"id"`
 }
 
 // PeerAssignmentData contains peer connection information
@@ -81,6 +87,17 @@ func NewPeerAssignmentMessage(peerAddr *net.UDPAddr, peerID string) *Message {
 		Data: PeerAssignmentData{
 			PeerAddress: peerAddr.String(),
 			PeerID:      peerID,
+		},
+	}
+}
+
+func NewRegisterSuccessMessage(message, id string) *Message {
+	return &Message{
+		Type:      RegisterSuccess,
+		Timestamp: time.Now(),
+		Data: RegisterSuccessData{
+			Message: message,
+			ID:      id,
 		},
 	}
 }
@@ -221,6 +238,21 @@ func (m *Message) GetPeerPongData() (*PeerPingData, error) {
 	}
 
 	var data PeerPingData
+	err = json.Unmarshal(dataBytes, &data)
+	return &data, err
+}
+
+func (m *Message) GetRegisterSuccessData() (*RegisterSuccessData, error) {
+	if m.Type != RegisterSuccess {
+		return nil, ErrInvalidMessageType
+	}
+
+	dataBytes, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+
+	var data RegisterSuccessData
 	err = json.Unmarshal(dataBytes, &data)
 	return &data, err
 }

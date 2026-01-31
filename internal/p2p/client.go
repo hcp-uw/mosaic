@@ -17,9 +17,6 @@ type Client struct {
 	serverConn       *net.UDPConn
 	state            ClientState
 	peers            map[string]*PeerInfo
-	peerInfo         *PeerInfo
-	peerConn         *net.UDPConn
-	lastPeerPong     time.Time
 	mutex            sync.RWMutex
 	ctx              context.Context
 	cancel           context.CancelFunc
@@ -173,12 +170,15 @@ func (c *Client) processPeerMessage(data []byte) {
 		switch msg.Type {
 		case api.PeerPing:
 			// Respond with pong
-			c.sendPeerPong()
+			c.sendPeerPong(msg.Sign.PubKey)
 			return
 		case api.PeerPong:
 			// Update last pong time
 			c.mutex.Lock()
-			c.lastPeerPong = time.Now()
+			peer := c.GetPeerById(msg.Sign.PubKey)
+			if peer != nil {
+				peer.LastPeerPong = time.Now()
+			}
 			c.mutex.Unlock()
 			return
 		}
@@ -212,13 +212,14 @@ func (c *Client) processMessage(msg *api.Message) {
 			return
 		}
 
-		c.peerInfo = &PeerInfo{
+		peerInfo := &PeerInfo{
 			Address: peerAddr,
 			ID:      data.PeerID,
 		}
+		c.peers[data.PeerID] = peerInfo
 
 		c.setState(StatePaired)
-		c.notifyPeerAssigned(c.peerInfo)
+		c.notifyPeerAssigned(c.peers[data.PeerID])
 
 	case api.ServerError:
 		data, err := msg.GetServerErrorData()
@@ -228,6 +229,15 @@ func (c *Client) processMessage(msg *api.Message) {
 		}
 
 		c.notifyError(fmt.Errorf("server error [%s]: %s", data.ErrorCode, data.ErrorMessage))
+
+	case api.RegisterSuccess:
+		data, err := msg.GetRegisterSuccessData()
+		if err != nil {
+			c.notifyError(fmt.Errorf("failed to parse register success data: %w", err))
+			return
+		}
+
+		c.id = data.ID
 
 	default:
 		c.notifyError(fmt.Errorf("unknown message type: %s", msg.Type))

@@ -37,7 +37,8 @@ func (c *Client) ConnectToStun() error {
 	go c.handleMessages()
 
 	// Start ping routine
-	go c.pingRoutine()
+	// this jawn needs to be more robust
+	go c.pingRoutine("SERVER")
 
 	// Register with server
 	return c.register()
@@ -56,11 +57,9 @@ func (c *Client) DisconnectFromStun() error {
 	}
 
 	// Note: peerConn is the same as serverConn, so don't close it twice
-	c.peerConn = nil
+	c.peers = make(map[string]*PeerInfo)
 
 	c.setState(StateDisconnected)
-	c.peerInfo = nil
 
 	return nil
 }
-

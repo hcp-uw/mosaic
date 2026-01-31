@@ -211,6 +211,8 @@ func (s *Server) handleClientRegister(msg *api.Message, clientAddr *net.UDPAddr,
 		log.Printf("Client %s registered", clientID)
 	}
 
+	s.sendRegistrationSuccess(clientID, clientAddr)
+
 	// Try to pair with waiting client
 	if len(s.waitingQueue) > 0 {
 		waitingClient := s.waitingQueue[0]
@@ -226,6 +228,12 @@ func (s *Server) handleClientRegister(msg *api.Message, clientAddr *net.UDPAddr,
 			log.Printf("Client %s added to waiting queue", clientID)
 		}
 	}
+}
+
+func (s *Server) sendRegistrationSuccess(id string, clientAddr *net.UDPAddr) {
+	// Currently no specific success message defined
+	msg := api.NewRegisterSuccessMessage("Registration successful", id)
+	s.sendMessage(clientAddr, msg)
 }
 
 // handleClientPing handles ping messages

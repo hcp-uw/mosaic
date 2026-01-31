@@ -8,16 +8,16 @@ import (
 
 // PeerInfo holds information about the assigned peer
 type PeerInfo struct {
-	Address *net.UDPAddr
-	Conn    *net.UDPConn
-	ID      string
+	Address      *net.UDPAddr
+	Conn         *net.UDPConn
+	ID           string
+	LastPeerPong time.Time
 }
 
 // SendToPeer sends data to the connected peer
 func (c *Client) SendToPeer(peerId string, data []byte) error {
 	c.mutex.RLock()
-	peerConn := c.peerConn
-	peerInfo := c.peerInfo
+	peerInfo := c.GetPeerById(peerId)
 	state := c.state
 	c.mutex.RUnlock()
 
@@ -25,7 +25,7 @@ func (c *Client) SendToPeer(peerId string, data []byte) error {
 		return fmt.Errorf("no peer information available")
 	}
 
-	if peerConn == nil {
+	if peerInfo.Conn == nil {
 		return fmt.Errorf("not connected to peer")
 	}
 
@@ -34,7 +34,7 @@ func (c *Client) SendToPeer(peerId string, data []byte) error {
 		return fmt.Errorf("client disconnected")
 	}
 
-	_, err := peerConn.WriteToUDP(data, peerInfo.Address)
+	_, err := peerInfo.Conn.WriteToUDP(data, peerInfo.Address)
 	return err
 }
 
@@ -75,7 +75,7 @@ func (c *Client) ConnectToPeer(peer *PeerInfo) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
-	if c.peerInfo == nil {
+	if peer == nil {
 		return fmt.Errorf("no peer assigned")
 	}
 
@@ -87,7 +87,7 @@ func (c *Client) ConnectToPeer(peer *PeerInfo) error {
 	// This is the key to proper UDP hole punching
 	c.peers[peer.ID] = peer
 	c.peers[peer.ID].Conn = c.serverConn
-	c.lastPeerPong = time.Now() // Initialize peer connection time
+	c.peers[peer.ID].LastPeerPong = time.Now() // Initialize peer connection time
 	c.setState(StateConnectedToPeer)
 
 	// Start UDP hole punching - send initial packet to peer to establish connection
@@ -99,7 +99,7 @@ func (c *Client) ConnectToPeer(peer *PeerInfo) error {
 // establishPeerConnection performs UDP hole punching to establish peer connection
 func (c *Client) establishPeerConnection(peerAddr *net.UDPAddr) {
 	c.mutex.RLock()
-	peerConn := c.peerConn
+	peerConn := c.GetPeerById(peerAddr.String()).Conn
 	c.mutex.RUnlock()
 
 	if peerConn == nil {
