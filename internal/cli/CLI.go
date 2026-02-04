@@ -654,7 +654,7 @@ func Shutdown() {
 			tempDir = os.Getenv("TMP")
 		}
 		pidFile = filepath.Join(tempDir, "mosaicd.pid")
-		sockFile = filepath.Join(tempDir, "mosaicd")
+		sockFile = filepath.Join(tempDir, "mosaicd.port")
 		logFile = filepath.Join(tempDir, "mosaicd.log")
 		binDir = filepath.Join(os.Getenv("APPDATA"), "mosaic", "bin")
 		cliName = "mos.exe"
@@ -734,9 +734,16 @@ func Shutdown() {
 		}
 	} else {
 		// Windows and Linux don't need sudo
-		if err := os.Remove(cliPath); err != nil && !os.IsNotExist(err) {
-			fmt.Printf("Warning: failed to remove %s: %v\n", cliPath, err)
+		if goos != "windows" {
+			if err := os.Remove(cliPath); err != nil && !os.IsNotExist(err) {
+        		fmt.Printf("Warning: failed to remove %s: %v\n", cliPath, err)
+    		}
+		} else {
+    		fmt.Println("Note: mos.exe cannot remove itself on Windows")
+    		fmt.Println("You may delete it manually after this command exits:")
+    		fmt.Printf("  %s\n", cliPath)
 		}
+
 		if err := os.Remove(daemonPath); err != nil && !os.IsNotExist(err) {
 			fmt.Printf("Warning: failed to remove %s: %v\n", daemonPath, err)
 		}
@@ -825,71 +832,3 @@ func isDaemonRunning(goos string) bool {
 		return false
 	}
 }
-
-// ... (keep the killProcess, killByName, and isDaemonRunning functions the same) ...
-
-// This is the old version of upload folder which I kept because I am proud of my recursive solution heh :)
-// Unfortunately it will eventually have to go but not today!
-/*
-func uploadFolder() {
-	root := args[3]
-
-	info, err := os.Stat(root)
-	if os.IsNotExist(err) {
-		fmt.Println("Error: folder does not exist at path:", root)
-		os.Exit(1)
-	}
-	exitOnErr(err, "Error reading folder info:")
-
-	if !info.IsDir() {
-		fmt.Println("Error: path points to a file. Use 'mos upload file <path>' instead.")
-		os.Exit(1)
-	}
-
-	fmt.Printf("Starting upload of folder: %s\n", root)
-	err = UploadFolderRecursive(root, false, true)
-	exitOnErr(err, "Error uploading folder:")
-	if root == "." {
-		fmt.Println("Finished uploading current folder.")
-	} else {
-		fmt.Printf("Finished uploading folder: %s\n", root)
-	}
-	storage := helpers.AvailableStorage()
-	fmt.Printf("Storage remaining: %d GB\n", storage)
-}
-func UploadFolderRecursive(path string, showSubFiles bool, isRoot bool) error {
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return err
-	}
-
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), ".") {
-			continue
-		}
-		fullPath := filepath.Join(path, entry.Name())
-
-		if entry.IsDir() {
-			if isRoot || showSubFiles {
-				fmt.Println("Uploading folder:", entry.Name())
-			}
-			//fmt.Println("Uploading folder:", entry.Name())
-			err := UploadFolderRecursive(fullPath, showSubFiles, false)
-			if err != nil {
-				return err
-			}
-		} else {
-			// replace with: uploadErr := uploadFile(fullPath)
-			_, uploadErr := client.SendRequest("uploadFile", protocol.UploadRequest{
-				Path: fullPath,
-			})
-			exitOnErr(uploadErr, "Error uploading file: "+fullPath)
-			if isRoot || showSubFiles {
-				fmt.Println("Uploading file:", entry.Name())
-			}
-		}
-	}
-
-	return nil
-}
-*/

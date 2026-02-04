@@ -5,24 +5,49 @@ import (
 	"fmt"
 	"net"
 	"os"
-
+	"runtime"
 	"github.com/hcp-uw/mosaic/internal/cli/protocol"
 	"github.com/hcp-uw/mosaic/internal/cli/shared"
 	"github.com/hcp-uw/mosaic/internal/daemon/handlers"
 )
 
 func StartServer() error {
-	// remove old socket if present
-	if _, err := os.Stat(shared.SocketPath); err == nil {
-		os.Remove(shared.SocketPath)
+	var ln net.Listener
+	var err error
+
+	if runtime.GOOS == "windows" {
+		// Use TCP on Windows
+		ln, err = net.Listen("tcp", "127.0.0.1:0") // 0 = random available port
+		if err != nil {
+			return fmt.Errorf("listen error: %w", err)
+		}
+
+		// Save the port to a file so clients can find it
+		addr := ln.Addr().(*net.TCPAddr)
+		portFile := shared.GetPortFile()
+		if err := os.WriteFile(portFile, []byte(fmt.Sprintf("%d", addr.Port)), 0644); err != nil {
+			ln.Close()
+			return fmt.Errorf("failed to write port file: %w", err)
+		}
+
+		fmt.Printf("Daemon listening on TCP port %d\n", addr.Port)
+	} else {
+		// Use Unix socket on macOS/Linux
+		// Remove old socket if present
+		if _, err := os.Stat(shared.SocketPath); err == nil {
+			os.Remove(shared.SocketPath)
+		}
+
+		ln, err = net.Listen("unix", shared.SocketPath)
+		if err != nil {
+			return fmt.Errorf("listen error: %w", err)
+		}
+
+		fmt.Println("Daemon listening at", shared.SocketPath)
 	}
 
-	ln, err := net.Listen("unix", shared.SocketPath)
-	if err != nil {
-		return fmt.Errorf("listen error: %w", err)
-	}
+	defer ln.Close()
 
-	fmt.Println("Daemon listening at", shared.SocketPath)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
