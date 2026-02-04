@@ -166,6 +166,15 @@ function Stop-Daemon {
     }
 }
 
+function Cleanup-BuildArtifacts {
+    if (Test-Path "bin") {
+        Write-Output ""
+        Write-Output "Cleaning up local build artifacts..."
+        Remove-Item "bin" -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+
 # Build binaries
 function Build-Binaries {
     param([string]$GoPath)
@@ -430,6 +439,7 @@ function Install-Mosaic {
     try {
         Build-Binaries -GoPath $goPath
         Install-Binaries
+        Cleanup-BuildArtifacts
         
         # Start daemon
         if (Start-Daemon) {
