@@ -177,8 +177,10 @@ All coordination messages must include:
 
 Nodes enforce:
 
-```if message.term < highest_term_seen:
-reject message```
+```
+if message.term < highest_term_seen:
+reject message
+```
 
 
 If a node receives a message with a higher term:
