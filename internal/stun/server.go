@@ -32,7 +32,10 @@ type Server struct {
 	cancel       context.CancelFunc
 	done         chan bool
 
-	leaderInfo *ClientInfo
+	currentLeaderID          string
+	currentTerm              uint
+	leaseExpirationTimeStamp time.Time
+	leaseID                  uint
 }
 
 // ServerConfig holds server configuration
