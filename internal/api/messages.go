@@ -16,10 +16,11 @@ const (
 	ClientPing     MessageType = "client_ping"
 
 	// Server to Client messages
-	RegisterSuccess MessageType = "register_success"
-	PeerAssignment  MessageType = "peer_assignment"
-	ServerError     MessageType = "server_error"
-	WaitingForPeer  MessageType = "waiting_for_peer"
+	RegisterSuccess  MessageType = "register_success"
+	PeerAssignment   MessageType = "peer_assignment"
+	ServerError      MessageType = "server_error"
+	WaitingForPeer   MessageType = "waiting_for_peer"
+	AssignedAsLeader MessageType = "assigned_as_leader"
 
 	// Peer to Peer messages
 	PeerPing MessageType = "peer_ping"
@@ -53,6 +54,12 @@ type RegisterSuccessData struct {
 	ID      string `json:"id"`
 }
 
+// Doesnt need to contain anything
+// This message is sent to the first node to connect to the server tell them that they are
+// the leader and must maintain a connection to the server
+type ServerAssignedLeaderData struct {
+}
+
 // PeerAssignmentData contains peer connection information
 type PeerAssignmentData struct {
 	PeerAddress string `json:"peer_address"`
@@ -68,6 +75,14 @@ type ServerErrorData struct {
 // PeerPingData contains peer ping information
 type PeerPingData struct {
 	Timestamp time.Time `json:"timestamp"`
+}
+
+func NewServerAssignedLeaderMessage() *Message {
+	return &Message{
+		Type:      AssignedAsLeader,
+		Timestamp: time.Now(),
+		Data:      ServerAssignedLeaderData{},
+	}
 }
 
 // NewClientRegisterMessage creates a client registration message

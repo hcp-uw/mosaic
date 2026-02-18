@@ -18,6 +18,8 @@ type ClientInfo struct {
 	LastPing     time.Time
 	Connected    time.Time
 	PairedWithID string
+
+	Leader bool
 }
 
 // Server represents a STUN server
@@ -29,6 +31,8 @@ type Server struct {
 	ctx          context.Context
 	cancel       context.CancelFunc
 	done         chan bool
+
+	leaderInfo *ClientInfo
 }
 
 // ServerConfig holds server configuration
@@ -64,6 +68,8 @@ func NewServer(config *ServerConfig) *Server {
 		ctx:          ctx,
 		cancel:       cancel,
 		done:         make(chan bool),
+
+		leaderInfo: nil,
 	}
 }
 
@@ -213,6 +219,18 @@ func (s *Server) handleClientRegister(msg *api.Message, clientAddr *net.UDPAddr,
 
 	s.sendRegistrationSuccess(clientID, clientAddr)
 
+	if s.leaderInfo == nil {
+		s.sendLeaderAssignment(clientAddr)
+
+		// TODO: Need to perform a check to see if leader is accepted
+		s.clients[clientID].Leader = true
+		s.leaderInfo = clientInfo
+
+	} else {
+		s.pairClients()
+
+	}
+
 	// Try to pair with waiting client
 	if len(s.waitingQueue) > 0 {
 		waitingClient := s.waitingQueue[0]
@@ -278,6 +296,11 @@ func (s *Server) pairClients(client1, client2 *ClientInfo, enableLogging bool) {
 	if enableLogging {
 		log.Printf("Removed paired clients %s and %s from server memory", client1.ID, client2.ID)
 	}
+}
+
+func (s *Server) sendLeaderAssignment(clientAddr *net.UDPAddr) {
+	msg := api.NewServerAssignedLeaderMessage()
+	s.sendMessage(clientAddr, msg)
 }
 
 // sendPeerAssignment sends peer information to a client
