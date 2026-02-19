@@ -38,6 +38,8 @@ func runClient(serverAddr string) {
 		if err := client.ConnectToPeer(peer); err != nil {
 			fmt.Printf("[Error] Failed to connect to peer: %v\n", err)
 		}
+
+		fmt.Printf("[Peer Connected] ID: %s, Addres: %s\n", peer.ID, peer.Address)
 	})
 
 	client.OnError(func(err error) {
