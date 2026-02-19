@@ -26,7 +26,7 @@ const (
 	// To be sent to the joining node contianing a list of all nodes in the network
 	CurrentMembers MessageType = "current_members"
 	// To be sent to the nodes in the network notifying them of the new node that is joining 
-	NewJoiner MessageType = "new_joiner"
+	NewPeerJoiner MessageType = "new_joiner"
 
 	// Peer to Peer messages
 	PeerPing MessageType = "peer_ping"
@@ -67,6 +67,15 @@ type RegisterSuccessData struct {
 type ServerAssignedLeaderData struct {
 }
 
+// Dictionary of nodeID's and there respective UDPAddr
+type CurrentMembersData struct {
+	Members map[string]string `json:"members"`
+}
+
+type NewPeerJoinerData struct {
+	JoinerAddress string `json:"joiner_address"`
+	JoinerID string `json:"joiner_id"`
+}
 
 // just for testing rn -sending text messages between terminals
 type PeerTextMessageData struct {
@@ -101,6 +110,41 @@ func NewPeerTextMessage(message, senderID string) *Message {
 			Message: message,
 		},
 	}
+}
+
+func NewNewPeerJoinerMessage(senderID, joinerID, joinerAddr string) *Message {
+	return &Message{
+		Type: NewPeerJoiner,
+		Timestamp: time.Now(),
+		Sign: NewSignature(senderID),
+		Data: NewPeerJoinerData{
+			JoinerAddress: joinerAddr,
+			JoinerID: joinerID,
+		},
+	}
+}
+
+func NewCurrentMembersMessage(members map[string]*net.UDPAddr, senderID string) *Message {
+	stringMembers := make(map[string]string)
+
+    // 2. Iterate and convert each UDPAddr to a string
+    for id, addr := range members {
+        if addr != nil {
+            stringMembers[id] = addr.String()
+        }
+    }
+
+	return &Message{
+		Type: CurrentMembers,
+		Timestamp: time.Now(),
+		Sign: Signature{
+			PubKey: senderID,
+		},
+		Data: CurrentMembersData{
+			Members: stringMembers,
+		},
+	}
+
 }
 
 func NewServerAssignedLeaderMessage() *Message {
@@ -217,6 +261,36 @@ func (m *Message) GetClientRegisterData() (*ClientRegisterData, error) {
 
 	// No data validation needed since ClientRegisterData is empty
 	return &ClientRegisterData{}, nil
+}
+
+func (m *Message) GetCurrentMembersData() (*CurrentMembersData, error) {
+	if m.Type != CurrentMembers {
+		return nil, ErrInvalidMessageType
+	}
+
+	dataBytes, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+
+	var data CurrentMembersData
+	err = json.Unmarshal(dataBytes, &data)
+	return &data, err
+}
+
+func (m *Message) GetNewPeerJoinerData() (*NewPeerJoinerData, error) {
+	if m.Type != NewPeerJoiner {
+		return nil, ErrInvalidMessageType
+	}
+
+	dataBytes, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+
+	var data NewPeerJoinerData
+	err = json.Unmarshal(dataBytes, &data)
+	return &data, err
 }
 
 func (m *Message) GetPeerTextMessageData() (*PeerTextMessageData, error) {
