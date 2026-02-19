@@ -75,6 +75,12 @@ func (c *Client) GetState() ClientState {
 	return c.state
 }
 
+func (c *Client) GetID() string {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	return c.id
+}
+
 func (c *Client) GetConnectedPeers() []*PeerInfo {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
@@ -181,13 +187,17 @@ func (c *Client) processPeerMessage(data []byte) {
 			}
 			c.mutex.Unlock()
 			return
+		case api.PeerTextMessage:
+			data, err := msg.GetPeerTextMessageData()
+			if err != nil {
+				c.notifyError(fmt.Errorf("Failed to read PeerTxtMessageData"))
+			}
+		    c.notifyMessageReceived([]byte(data.Message))
 		}
+
 		// If it's another type of STUN message, don't add to channel
 		return
 	}
-
-	// Notify message received callbacks
-	c.notifyMessageReceived(data)
 }
 
 // processMessage processes a message from the server
@@ -199,6 +209,14 @@ func (c *Client) processMessage(msg *api.Message) {
 	case api.WaitingForPeer:
 		c.setState(StateWaiting)
 
+	case api.AssignedAsLeader:
+		_, err := msg.GetAssignedAsLeaderData()
+		if err != nil {
+			c.notifyError(fmt.Errorf("Failed to parse assigned as leader: %w", err))
+			return
+		}
+		c.setState(StateLeader)
+		
 	case api.PeerAssignment:
 		data, err := msg.GetPeerAssignmentData()
 		if err != nil {
@@ -218,7 +236,13 @@ func (c *Client) processMessage(msg *api.Message) {
 		}
 		c.peers[data.PeerID] = peerInfo
 
-		c.setState(StatePaired)
+		if c.state == StateLeader {
+			
+
+		} else {
+			c.setState(StatePaired)
+		}
+
 		c.notifyPeerAssigned(c.peers[data.PeerID])
 
 	case api.ServerError:

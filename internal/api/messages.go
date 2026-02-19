@@ -22,9 +22,16 @@ const (
 	WaitingForPeer   MessageType = "waiting_for_peer"
 	AssignedAsLeader MessageType = "assigned_as_leader"
 
+	// Leader to Peer message 
+	// To be sent to the joining node contianing a list of all nodes in the network
+	CurrentMembers MessageType = "current_members"
+	// To be sent to the nodes in the network notifying them of the new node that is joining 
+	NewJoiner MessageType = "new_joiner"
+
 	// Peer to Peer messages
 	PeerPing MessageType = "peer_ping"
 	PeerPong MessageType = "peer_pong"
+	PeerTextMessage MessageType = "peer_text_message"
 )
 
 // Message represents the base message structure
@@ -60,6 +67,12 @@ type RegisterSuccessData struct {
 type ServerAssignedLeaderData struct {
 }
 
+
+// just for testing rn -sending text messages between terminals
+type PeerTextMessageData struct {
+	Message string `json:"message"`
+}
+
 // PeerAssignmentData contains peer connection information
 type PeerAssignmentData struct {
 	PeerAddress string `json:"peer_address"`
@@ -75,6 +88,19 @@ type ServerErrorData struct {
 // PeerPingData contains peer ping information
 type PeerPingData struct {
 	Timestamp time.Time `json:"timestamp"`
+}
+
+func NewPeerTextMessage(message, senderID string) *Message {
+	return &Message{
+		Type: PeerTextMessage,
+		Timestamp: time.Now(),
+		Sign: Signature{
+			PubKey: senderID,
+		},
+		Data: PeerTextMessageData {
+			Message: message,
+		},
+	}
 }
 
 func NewServerAssignedLeaderMessage() *Message {
@@ -191,6 +217,40 @@ func (m *Message) GetClientRegisterData() (*ClientRegisterData, error) {
 
 	// No data validation needed since ClientRegisterData is empty
 	return &ClientRegisterData{}, nil
+}
+
+func (m *Message) GetPeerTextMessageData() (*PeerTextMessageData, error) {
+	if m.Type != PeerTextMessage {
+		return nil, ErrInvalidMessageType
+	}
+
+	dataBytes, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+
+	var data PeerTextMessageData
+	err = json.Unmarshal(dataBytes, &data)
+	return &data, err
+}
+
+func (m *Message) GetAssignedAsLeaderData() (*ServerAssignedLeaderData, error) {
+	if m.Type != AssignedAsLeader {
+		return nil, ErrInvalidMessageType
+	}
+
+	dataBytes, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+
+	var data ServerAssignedLeaderData
+	err = json.Unmarshal(dataBytes, &data)
+	if err != nil {
+		return nil, err
+	}
+
+	return &data, err
 }
 
 // GetPeerAssignmentData extracts peer assignment data from message
