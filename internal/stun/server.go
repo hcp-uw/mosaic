@@ -18,6 +18,8 @@ type ClientInfo struct {
 	LastPing     time.Time
 	Connected    time.Time
 	PairedWithID string
+
+	Leader bool
 }
 
 // Server represents a STUN server
@@ -29,6 +31,11 @@ type Server struct {
 	ctx          context.Context
 	cancel       context.CancelFunc
 	done         chan bool
+
+	currentLeaderID          string
+	currentTerm              uint
+	leaseExpirationTimeStamp *time.Time
+	leaseID                  uint
 }
 
 // ServerConfig holds server configuration
@@ -64,6 +71,11 @@ func NewServer(config *ServerConfig) *Server {
 		ctx:          ctx,
 		cancel:       cancel,
 		done:         make(chan bool),
+
+		currentLeaderID:          "",
+		currentTerm:              0,
+		leaseExpirationTimeStamp: nil,
+		leaseID:                  0,
 	}
 }
 
@@ -213,20 +225,15 @@ func (s *Server) handleClientRegister(msg *api.Message, clientAddr *net.UDPAddr,
 
 	s.sendRegistrationSuccess(clientID, clientAddr)
 
-	// Try to pair with waiting client
-	if len(s.waitingQueue) > 0 {
-		waitingClient := s.waitingQueue[0]
-		s.waitingQueue = s.waitingQueue[1:]
+	if s.currentLeaderID == "" {
+		s.sendLeaderAssignment(clientAddr)
 
-		s.pairClients(waitingClient, clientInfo, enableLogging)
+		// TODO: Need to perform a check to see if leader is accepted
+		s.clients[clientID].Leader = true
+		s.currentLeaderID = clientID
+
 	} else {
-		// Add to waiting queue
-		s.waitingQueue = append(s.waitingQueue, clientInfo)
-		s.sendWaitingMessage(clientAddr)
-
-		if enableLogging {
-			log.Printf("Client %s added to waiting queue", clientID)
-		}
+		s.pairClients(clientInfo, true)
 	}
 }
 
@@ -262,22 +269,26 @@ func (s *Server) handleClientPing(msg *api.Message, clientAddr *net.UDPAddr, ena
 }
 
 // pairClients pairs two clients together
-func (s *Server) pairClients(client1, client2 *ClientInfo, enableLogging bool) {
+func (s *Server) pairClients(client *ClientInfo, enableLogging bool) {
 	// Send peer info to both clients
-	s.sendPeerAssignment(client1.Address, client2.Address, client2.ID)
-	s.sendPeerAssignment(client2.Address, client1.Address, client1.ID)
+	s.sendPeerAssignment(s.clients[s.currentLeaderID].Address, client.Address, client.ID)
+	s.sendPeerAssignment(client.Address, s.clients[s.currentLeaderID].Address, s.currentLeaderID)
 
 	if enableLogging {
-		log.Printf("Paired clients %s and %s", client1.ID, client2.ID)
+		log.Printf("Paired clients %s to leader %s", client.ID, s.currentLeaderID)
 	}
 
 	// Remove both clients from server memory since they no longer need the server
-	delete(s.clients, client1.ID)
-	delete(s.clients, client2.ID)
+	delete(s.clients, client.ID)
 
 	if enableLogging {
-		log.Printf("Removed paired clients %s and %s from server memory", client1.ID, client2.ID)
+		log.Printf("Removed paired client %s from server memory", client.ID)
 	}
+}
+
+func (s *Server) sendLeaderAssignment(clientAddr *net.UDPAddr) {
+	msg := api.NewServerAssignedLeaderMessage()
+	s.sendMessage(clientAddr, msg)
 }
 
 // sendPeerAssignment sends peer information to a client

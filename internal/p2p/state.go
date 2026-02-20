@@ -9,6 +9,7 @@ const (
 	StateWaiting
 	StatePaired
 	StateConnectedToPeer
+	StateLeader
 )
 
 // String returns string representation of ClientState
@@ -24,6 +25,8 @@ func (s ClientState) String() string {
 		return "Paired"
 	case StateConnectedToPeer:
 		return "ConnectedToPeer"
+	case StateLeader:
+		return "Leader"
 	default:
 		return "Unknown"
 	}

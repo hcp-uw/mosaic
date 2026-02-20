@@ -16,14 +16,22 @@ const (
 	ClientPing     MessageType = "client_ping"
 
 	// Server to Client messages
-	RegisterSuccess MessageType = "register_success"
-	PeerAssignment  MessageType = "peer_assignment"
-	ServerError     MessageType = "server_error"
-	WaitingForPeer  MessageType = "waiting_for_peer"
+	RegisterSuccess  MessageType = "register_success"
+	PeerAssignment   MessageType = "peer_assignment"
+	ServerError      MessageType = "server_error"
+	WaitingForPeer   MessageType = "waiting_for_peer"
+	AssignedAsLeader MessageType = "assigned_as_leader"
+
+	// Leader to Peer message 
+	// To be sent to the joining node contianing a list of all nodes in the network
+	CurrentMembers MessageType = "current_members"
+	// To be sent to the nodes in the network notifying them of the new node that is joining 
+	NewPeerJoiner MessageType = "new_joiner"
 
 	// Peer to Peer messages
 	PeerPing MessageType = "peer_ping"
 	PeerPong MessageType = "peer_pong"
+	PeerTextMessage MessageType = "peer_text_message"
 )
 
 // Message represents the base message structure
@@ -53,6 +61,27 @@ type RegisterSuccessData struct {
 	ID      string `json:"id"`
 }
 
+// Doesnt need to contain anything
+// This message is sent to the first node to connect to the server tell them that they are
+// the leader and must maintain a connection to the server
+type ServerAssignedLeaderData struct {
+}
+
+// Dictionary of nodeID's and there respective UDPAddr
+type CurrentMembersData struct {
+	Members map[string]string `json:"members"`
+}
+
+type NewPeerJoinerData struct {
+	JoinerAddress string `json:"joiner_address"`
+	JoinerID string `json:"joiner_id"`
+}
+
+// just for testing rn -sending text messages between terminals
+type PeerTextMessageData struct {
+	Message string `json:"message"`
+}
+
 // PeerAssignmentData contains peer connection information
 type PeerAssignmentData struct {
 	PeerAddress string `json:"peer_address"`
@@ -68,6 +97,62 @@ type ServerErrorData struct {
 // PeerPingData contains peer ping information
 type PeerPingData struct {
 	Timestamp time.Time `json:"timestamp"`
+}
+
+func NewPeerTextMessage(message, senderID string) *Message {
+	return &Message{
+		Type: PeerTextMessage,
+		Timestamp: time.Now(),
+		Sign: Signature{
+			PubKey: senderID,
+		},
+		Data: PeerTextMessageData {
+			Message: message,
+		},
+	}
+}
+
+func NewNewPeerJoinerMessage(senderID, joinerID, joinerAddr string) *Message {
+	return &Message{
+		Type: NewPeerJoiner,
+		Timestamp: time.Now(),
+		Sign: NewSignature(senderID),
+		Data: NewPeerJoinerData{
+			JoinerAddress: joinerAddr,
+			JoinerID: joinerID,
+		},
+	}
+}
+
+func NewCurrentMembersMessage(members map[string]*net.UDPAddr, senderID string) *Message {
+	stringMembers := make(map[string]string)
+
+    // 2. Iterate and convert each UDPAddr to a string
+    for id, addr := range members {
+        if addr != nil {
+            stringMembers[id] = addr.String()
+        }
+    }
+
+	return &Message{
+		Type: CurrentMembers,
+		Timestamp: time.Now(),
+		Sign: Signature{
+			PubKey: senderID,
+		},
+		Data: CurrentMembersData{
+			Members: stringMembers,
+		},
+	}
+
+}
+
+func NewServerAssignedLeaderMessage() *Message {
+	return &Message{
+		Type:      AssignedAsLeader,
+		Timestamp: time.Now(),
+		Data:      ServerAssignedLeaderData{},
+	}
 }
 
 // NewClientRegisterMessage creates a client registration message
@@ -176,6 +261,70 @@ func (m *Message) GetClientRegisterData() (*ClientRegisterData, error) {
 
 	// No data validation needed since ClientRegisterData is empty
 	return &ClientRegisterData{}, nil
+}
+
+func (m *Message) GetCurrentMembersData() (*CurrentMembersData, error) {
+	if m.Type != CurrentMembers {
+		return nil, ErrInvalidMessageType
+	}
+
+	dataBytes, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+
+	var data CurrentMembersData
+	err = json.Unmarshal(dataBytes, &data)
+	return &data, err
+}
+
+func (m *Message) GetNewPeerJoinerData() (*NewPeerJoinerData, error) {
+	if m.Type != NewPeerJoiner {
+		return nil, ErrInvalidMessageType
+	}
+
+	dataBytes, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+
+	var data NewPeerJoinerData
+	err = json.Unmarshal(dataBytes, &data)
+	return &data, err
+}
+
+func (m *Message) GetPeerTextMessageData() (*PeerTextMessageData, error) {
+	if m.Type != PeerTextMessage {
+		return nil, ErrInvalidMessageType
+	}
+
+	dataBytes, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+
+	var data PeerTextMessageData
+	err = json.Unmarshal(dataBytes, &data)
+	return &data, err
+}
+
+func (m *Message) GetAssignedAsLeaderData() (*ServerAssignedLeaderData, error) {
+	if m.Type != AssignedAsLeader {
+		return nil, ErrInvalidMessageType
+	}
+
+	dataBytes, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+
+	var data ServerAssignedLeaderData
+	err = json.Unmarshal(dataBytes, &data)
+	if err != nil {
+		return nil, err
+	}
+
+	return &data, err
 }
 
 // GetPeerAssignmentData extracts peer assignment data from message

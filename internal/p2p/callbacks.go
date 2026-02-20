@@ -30,8 +30,9 @@ func (c *Client) OnMessageReceived(callback func([]byte)) {
 
 // setState updates the client state and notifies callbacks
 func (c *Client) setState(newState ClientState) {
-	oldState := c.state
-	c.state = newState
+
+    oldState := c.state
+    c.state = newState
 
 	if oldState != newState {
 		for _, callback := range c.stateCallbacks {

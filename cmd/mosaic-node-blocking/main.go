@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/hcp-uw/mosaic/internal/api"
 	"github.com/hcp-uw/mosaic/internal/p2p"
 )
 
@@ -37,6 +38,8 @@ func runClient(serverAddr string) {
 		if err := client.ConnectToPeer(peer); err != nil {
 			fmt.Printf("[Error] Failed to connect to peer: %v\n", err)
 		}
+
+		fmt.Printf("[Peer Connected] ID: %s, Addres: %s\n", peer.ID, peer.Address)
 	})
 
 	client.OnError(func(err error) {
@@ -67,7 +70,10 @@ func runClient(serverAddr string) {
 		for scanner.Scan() {
 			text := scanner.Text()
 			if client.IsPeerCommunicationAvailable() {
-				if err := client.SendToAllPeers([]byte(text)); err != nil {
+
+				message := api.NewPeerTextMessage(text, client.GetID())
+
+				if err := client.SendToAllPeers(message); err != nil {
 					fmt.Printf("[Error] Failed to send message: %v\n", err)
 				}
 			} else {

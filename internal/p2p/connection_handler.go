@@ -95,7 +95,7 @@ func (c *Client) pingRoutine(id string) {
 			}
 
 			// Send server pings only when connecting/waiting (stop after peer connection)
-			if state == StateConnecting || state == StateWaiting {
+			if state == StateConnecting || state == StateWaiting || state == StateLeader {
 
 				msg := api.NewClientPingMessage(api.NewSignature(c.id))
 				if err := c.sendToServer(msg); err != nil {

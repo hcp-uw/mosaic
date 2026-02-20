@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net"
 	"time"
+
+	"github.com/hcp-uw/mosaic/internal/api"
 )
 
 // PeerInfo holds information about the assigned peer
@@ -15,7 +17,7 @@ type PeerInfo struct {
 }
 
 // SendToPeer sends data to the connected peer
-func (c *Client) SendToPeer(peerId string, data []byte) error {
+func (c *Client) SendToPeer(peerId string, message *api.Message) error {
 	c.mutex.RLock()
 	peerInfo := c.GetPeerById(peerId)
 	state := c.state
@@ -34,11 +36,16 @@ func (c *Client) SendToPeer(peerId string, data []byte) error {
 		return fmt.Errorf("client disconnected")
 	}
 
-	_, err := peerInfo.Conn.WriteToUDP(data, peerInfo.Address)
+	data, err := message.Serialize()
+	if err != nil {
+		return err
+	}
+
+	_, err = peerInfo.Conn.WriteToUDP(data, peerInfo.Address)
 	return err
 }
 
-func (c *Client) SendToAllPeers(data []byte) error {
+func (c *Client) SendToAllPeers(message *api.Message) error {
 	c.mutex.RLock()
 	allPeers := c.GetConnectedPeers()
 	state := c.state
@@ -51,6 +58,11 @@ func (c *Client) SendToAllPeers(data []byte) error {
 	// Block sending only in truly disconnected state
 	if state == StateDisconnected {
 		return fmt.Errorf("client disconnected")
+	}
+
+	data, err := message.Serialize()
+	if err != nil {
+		return err
 	}
 
 	for _, peer := range allPeers {
@@ -88,7 +100,9 @@ func (c *Client) ConnectToPeer(peer *PeerInfo) error {
 	c.peers[peer.ID] = peer
 	c.peers[peer.ID].Conn = c.serverConn
 	c.peers[peer.ID].LastPeerPong = time.Now() // Initialize peer connection time
-	c.setState(StateConnectedToPeer)
+	if c.state != StateLeader {
+		c.setState(StateConnectedToPeer)
+	}
 
 	// Start UDP hole punching - send initial packet to peer to establish connection
 	go c.establishPeerConnection(c.peers[peer.ID].Address)

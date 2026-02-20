@@ -75,6 +75,12 @@ func (c *Client) GetState() ClientState {
 	return c.state
 }
 
+func (c *Client) GetID() string {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	return c.id
+}
+
 func (c *Client) GetConnectedPeers() []*PeerInfo {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
@@ -175,29 +181,86 @@ func (c *Client) processPeerMessage(data []byte) {
 		case api.PeerPong:
 			// Update last pong time
 			c.mutex.Lock()
-			peer := c.GetPeerById(msg.Sign.PubKey)
-			if peer != nil {
+			if peer, ok := c.peers[msg.Sign.PubKey]; ok {
 				peer.LastPeerPong = time.Now()
 			}
 			c.mutex.Unlock()
 			return
+		case api.PeerTextMessage:
+			data, err := msg.GetPeerTextMessageData()
+			if err != nil {
+				c.notifyError(fmt.Errorf("Failed to read PeerTxtMessageData"))
+			}
+			c.notifyMessageReceived([]byte(data.Message))
+
+		case api.NewPeerJoiner:
+			data, err := msg.GetNewPeerJoinerData()
+			if err != nil {
+				c.notifyError(fmt.Errorf("Failed to parse new joiner data %w", err))
+				return
+			}
+
+			peerAddr, err := net.ResolveUDPAddr("udp", data.JoinerAddress)
+			if err != nil {
+				c.notifyError(fmt.Errorf("failed to resolve peer address: %w", err))
+				return
+			}
+			peerInfo := &PeerInfo{
+				Address: peerAddr,
+				ID:      data.JoinerID,
+			}
+
+			c.mutex.Lock()
+			c.peers[data.JoinerAddress] = peerInfo
+			c.mutex.Unlock()
+
+			c.notifyPeerAssigned(peerInfo)
+		case api.CurrentMembers:
+			data, err := msg.GetCurrentMembersData()
+			if err != nil {
+				c.notifyError(fmt.Errorf("failed to parse peer assignment: %w", err))
+				return
+			}
+
+			for id, addr := range data.Members {
+				peerAddr, err := net.ResolveUDPAddr("udp", addr)
+				if err != nil {
+					c.notifyError(fmt.Errorf("failed to resolve peer address: %w", err))
+					return
+				}
+				peerInfo := &PeerInfo{
+					Address: peerAddr,
+					ID:      id,
+				}
+
+				c.mutex.Lock()
+				c.peers[id] = peerInfo
+				c.mutex.Unlock()
+
+				c.notifyPeerAssigned(peerInfo)
+
+			}
+
 		}
+
 		// If it's another type of STUN message, don't add to channel
 		return
 	}
-
-	// Notify message received callbacks
-	c.notifyMessageReceived(data)
 }
 
 // processMessage processes a message from the server
 func (c *Client) processMessage(msg *api.Message) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
 	switch msg.Type {
 	case api.WaitingForPeer:
 		c.setState(StateWaiting)
+
+	case api.AssignedAsLeader:
+		_, err := msg.GetAssignedAsLeaderData()
+		if err != nil {
+			c.notifyError(fmt.Errorf("Failed to parse assigned as leader: %w", err))
+			return
+		}
+		c.setState(StateLeader)
 
 	case api.PeerAssignment:
 		data, err := msg.GetPeerAssignmentData()
@@ -216,10 +279,21 @@ func (c *Client) processMessage(msg *api.Message) {
 			Address: peerAddr,
 			ID:      data.PeerID,
 		}
-		c.peers[data.PeerID] = peerInfo
 
-		c.setState(StatePaired)
-		c.notifyPeerAssigned(c.peers[data.PeerID])
+		c.mutex.Lock()
+		c.peers[data.PeerID] = peerInfo
+		state := c.state
+		c.mutex.Unlock()
+
+		if state != StateLeader {
+			c.setState(StatePaired)
+		}
+
+		c.notifyPeerAssigned(peerInfo)
+
+		if state == StateLeader {
+			c.leaderHandleJoiner(c.peers[data.PeerID])
+		}
 
 	case api.ServerError:
 		data, err := msg.GetServerErrorData()
@@ -237,7 +311,9 @@ func (c *Client) processMessage(msg *api.Message) {
 			return
 		}
 
+		c.mutex.Lock()
 		c.id = data.ID
+		c.mutex.Unlock()
 
 	default:
 		c.notifyError(fmt.Errorf("unknown message type: %s", msg.Type))
