@@ -267,7 +267,7 @@ func joinNetwork(serverAddr string) {
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
-	message := fmt.Sprintf("\nJoined network successfully.\n- Connected to %d peers.\n")
+	message := fmt.Sprintf("\nJoined network successfully.\n- Connected to %d peers.\n", 0)
 	fmt.Println(message)
 }
 

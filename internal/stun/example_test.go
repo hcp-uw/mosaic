@@ -6,55 +6,44 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hcp-uw/mosaic/internal/api"
 	"github.com/hcp-uw/mosaic/internal/p2p"
 )
 
-// Example_usage demonstrates basic usage of STUN server and client
+// Example_usage demonstrates basic usage of STUN server and client.
 func Example_usage() {
-	// Start STUN server
 	serverConfig := DefaultServerConfig()
 	serverConfig.ListenAddress = "127.0.0.1:0"
-	serverConfig.EnableLogging = false // Disable for cleaner example output
+	serverConfig.EnableLogging = false
 
 	server := NewServer(serverConfig)
-	err := server.Start(serverConfig)
-	if err != nil {
+	if err := server.Start(serverConfig); err != nil {
 		log.Fatal(err)
 	}
 	defer server.Stop()
 
-	// Get the actual server address
 	serverAddr := server.conn.LocalAddr().String()
 
-	// Create two clients
-	client1Config := p2p.DefaultClientConfig(serverAddr)
-	client1, err := p2p.NewClient(client1Config)
+	client1, err := p2p.NewClient(p2p.DefaultClientConfig(serverAddr))
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	client2Config := p2p.DefaultClientConfig(serverAddr)
-	client2, err := p2p.NewClient(client2Config)
+	client2, err := p2p.NewClient(p2p.DefaultClientConfig(serverAddr))
 	if err != nil {
 		log.Fatal(err)
 	}
+	defer client1.DisconnectFromStun()
+	defer client2.DisconnectFromStun()
 
 	var wg sync.WaitGroup
+	var client1Peer, client2Peer *p2p.PeerInfo
 
-	// Set up client 1 callbacks
 	client1.OnStateChange(func(state p2p.ClientState) {
 		fmt.Printf("Client 1 state: %s\n", state)
-		if state == p2p.StatePaired {
+		if state == p2p.StateLeader {
 			wg.Done()
 		}
 	})
-
-	client1.OnPeerAssigned(func(peerInfo *p2p.PeerInfo) {
-		// Don't print for deterministic test output
-		_ = peerInfo
-	})
-
-	// Set up client 2 callbacks
 	client2.OnStateChange(func(state p2p.ClientState) {
 		fmt.Printf("Client 2 state: %s\n", state)
 		if state == p2p.StatePaired {
@@ -62,27 +51,22 @@ func Example_usage() {
 		}
 	})
 
+	client1.OnPeerAssigned(func(peerInfo *p2p.PeerInfo) {
+		client1Peer = peerInfo
+	})
 	client2.OnPeerAssigned(func(peerInfo *p2p.PeerInfo) {
-		// Don't print for deterministic test output
-		_ = peerInfo
+		client2Peer = peerInfo
 	})
 
-	wg.Add(2) // Wait for both clients to be paired
+	wg.Add(2)
 
-	// Connect clients to server
-	err = client1.ConnectToStun()
-	if err != nil {
+	if err := client1.ConnectToStun(); err != nil {
 		log.Fatal(err)
 	}
-	defer client1.DisconnectFromStun()
-
-	err = client2.ConnectToStun()
-	if err != nil {
+	if err := client2.ConnectToStun(); err != nil {
 		log.Fatal(err)
 	}
-	defer client2.DisconnectFromStun()
 
-	// Wait for pairing with timeout
 	done := make(chan bool)
 	go func() {
 		wg.Wait()
@@ -97,34 +81,25 @@ func Example_usage() {
 		return
 	}
 
-	// Now clients can connect directly to each other
-	err = client1.ConnectToPeer()
-	if err != nil {
+	if err := client1.ConnectToPeer(client1Peer); err != nil {
+		log.Fatal(err)
+	}
+	if err := client2.ConnectToPeer(client2Peer); err != nil {
 		log.Fatal(err)
 	}
 
-	err = client2.ConnectToPeer()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// Wait for hole punching to complete
 	time.Sleep(1 * time.Second)
 
-	// Set up message received callback for client 2
 	received := make(chan string, 1)
 	client2.OnMessageReceived(func(data []byte) {
 		received <- string(data)
 	})
 
-	// Send message from client 1 to client 2
-	message := []byte("Hello from client 1!")
-	err = client1.SendToPeer(client2.GetConnectedPeers()[0].ID, message)
-	if err != nil {
+	message := api.NewPeerTextMessage("Hello from client 1!", client1.GetID())
+	if err := client1.SendToPeer(client2Peer.ID, message); err != nil {
 		log.Fatal(err)
 	}
 
-	// Wait for message to be received
 	select {
 	case receivedMessage := <-received:
 		fmt.Printf("Client 2 received: %s\n", receivedMessage)
