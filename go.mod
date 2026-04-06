@@ -2,7 +2,10 @@ module github.com/hcp-uw/mosaic
 
 go 1.25.1
 
-require github.com/klauspost/reedsolomon v1.12.5
+require (
+	github.com/klauspost/reedsolomon v1.12.5
+	google.golang.org/protobuf v1.36.11
+)
 
 require (
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect

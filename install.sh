@@ -163,6 +163,101 @@ stop_daemon() {
     fi
 }
 
+# ─── FUSE dependency installation ───────────────────────────────────────────
+
+# macOS: requires macFUSE (kernel extension).
+# brew is the easiest path; without it we print manual instructions.
+install_fuse_macos() {
+    if [ -d "/Library/Filesystems/macfuse.fs" ]; then
+        echo -e "${GREEN}✓ macFUSE already installed${NC}"
+        return 0
+    fi
+
+    echo "macFUSE is required for the Mosaic filesystem (Finder integration)."
+    echo ""
+
+    if command -v brew &>/dev/null; then
+        echo "Installing macFUSE via Homebrew..."
+        brew install --cask macfuse
+    else
+        echo -e "${RED}✗ Homebrew not found.${NC}"
+        echo "Please install macFUSE manually:"
+        echo "  1. Install Homebrew: https://brew.sh"
+        echo "  2. Run: brew install --cask macfuse"
+        echo "  3. Re-run this script."
+        exit 1
+    fi
+
+    echo ""
+    echo -e "${YELLOW}⚠ macFUSE requires a one-time kernel extension approval:${NC}"
+    echo "  1. Open System Settings → Privacy & Security"
+    echo "  2. Scroll down and click 'Allow' next to the macFUSE entry"
+    echo "  3. Reboot your Mac"
+    echo "  4. Re-run ./install.sh"
+    echo ""
+    read -r -p "Have you already approved the extension and rebooted? [y/N] " yn
+    case "$yn" in
+        [Yy]*) return 0 ;;
+        *)
+            echo "Please approve the extension, reboot, then run ./install.sh again."
+            exit 0
+            ;;
+    esac
+}
+
+# Linux: needs the fuse / libfuse-dev packages.
+install_fuse_linux() {
+    if command -v fusermount &>/dev/null || command -v fusermount3 &>/dev/null; then
+        echo -e "${GREEN}✓ FUSE already installed${NC}"
+        return 0
+    fi
+
+    echo "Installing FUSE..."
+    if command -v apt-get &>/dev/null; then
+        sudo apt-get install -y fuse libfuse-dev
+    elif command -v dnf &>/dev/null; then
+        sudo dnf install -y fuse fuse-devel
+    elif command -v yum &>/dev/null; then
+        sudo yum install -y fuse fuse-devel
+    elif command -v pacman &>/dev/null; then
+        sudo pacman -S --noconfirm fuse2
+    else
+        echo -e "${RED}✗ Could not detect a package manager.${NC}"
+        echo "Please install FUSE manually (packages: fuse, libfuse-dev or fuse-devel)."
+        exit 1
+    fi
+    echo -e "${GREEN}✓ FUSE installed${NC}"
+}
+
+# Windows: needs WinFsp.
+install_fuse_windows() {
+    if [ -d "C:/Program Files (x86)/WinFsp" ] || [ -d "C:/Program Files/WinFsp" ]; then
+        echo "✓ WinFsp already installed"
+        return 0
+    fi
+
+    echo "Installing WinFsp (required for Mosaic filesystem)..."
+    if command -v winget &>/dev/null; then
+        winget install WinFsp.WinFsp
+    else
+        echo "winget not found. Please install WinFsp manually from the WinFsp releases page."
+        exit 1
+    fi
+    echo "✓ WinFsp installed"
+}
+
+install_fuse_deps() {
+    echo ""
+    echo "Checking FUSE dependencies..."
+    case $OS in
+        macOS)   install_fuse_macos   ;;
+        Linux)   install_fuse_linux   ;;
+        Windows) install_fuse_windows ;;
+    esac
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+
 # Build binaries
 build_binaries() {
     echo "Building binaries for $OS..."
@@ -364,7 +459,10 @@ main() {
     
     # Stop any existing daemon
     stop_daemon || true
-    
+
+    # Install OS-level FUSE library (macFUSE / libfuse / WinFsp)
+    install_fuse_deps
+
     # Build and install
     build_binaries
     install_binaries

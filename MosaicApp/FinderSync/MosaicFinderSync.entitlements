@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Required for Finder Sync extensions -->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<!-- Needed to call localhost:7777 (the Go daemon HTTP API) -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+</dict>
+</plist>
