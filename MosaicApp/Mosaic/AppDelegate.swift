@@ -1,13 +1,48 @@
 import Cocoa
 
+class MosaicDocumentController: NSDocumentController {
+    override func openDocument(withContentsOf url: URL,
+                               display displayDocument: Bool,
+                               completionHandler: @escaping (NSDocument?, Bool, Error?) -> Void) {
+        NSLog("🔴 [Mosaic] MosaicDocumentController.openDocument: %@", url.path)
+        let marker = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Mosaic/DEBUG_opendoc_\(Date().timeIntervalSince1970).txt")
+        try? url.path.write(to: marker, atomically: true, encoding: .utf8)
+        guard url.pathExtension.lowercased() == "mosaic" else {
+            super.openDocument(withContentsOf: url, display: displayDocument, completionHandler: completionHandler)
+            return
+        }
+        completionHandler(nil, false, nil)
+        (NSApp.delegate as? AppDelegate)?.handleOpen(path: url.path)
+    }
+}
+
 @main
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var daemonTask: Process?
 
+    // This runs before ANYTHING else in the app lifecycle.
+    override init() {
+        super.init()
+        NSLog("🔴 [Mosaic] AppDelegate.init() called — binary is new code")
+        let marker = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Mosaic/DEBUG_init_\(Date().timeIntervalSince1970).txt")
+        try? "AppDelegate init ran".write(to: marker, atomically: true, encoding: .utf8)
+    }
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        NSLog("🔴 [Mosaic] applicationWillFinishLaunching")
+        _ = MosaicDocumentController()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // No dock icon — LSUIElement = YES in Info.plist.
-        // Show a minimal status bar item so users can see Mosaic is running.
+        NSLog("🔴 [Mosaic] applicationDidFinishLaunching")
+
+        let marker2 = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Mosaic/DEBUG_launched_\(Date().timeIntervalSince1970).txt")
+        try? "app launched".write(to: marker2, atomically: true, encoding: .utf8)
+
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = statusItem?.button {
             button.image = NSImage(systemSymbolName: "externaldrive.connected.to.line.below",
@@ -27,35 +62,47 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         daemonTask?.terminate()
     }
 
-    // Called when the user double-clicks a .mosaic stub file in Finder.
-    func application(_ application: NSApplication, open urls: [URL]) {
-        for url in urls {
-            // Strip .mosaic to get the real filename, e.g. "notes.md.mosaic" → "notes.md"
-            let filename = url.deletingPathExtension().lastPathComponent
-            let realURL = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Mosaic")
-                .appendingPathComponent(filename)
+    func handleOpen(path: String) {
+        NSLog("🔴 [Mosaic] handleOpen: %@", path)
+        let url = URL(fileURLWithPath: path)
+        let filename = url.deletingPathExtension().lastPathComponent
+        let realURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Mosaic")
+            .appendingPathComponent(filename)
 
-            // If already cached on disk, open immediately with its default app.
-            if FileManager.default.fileExists(atPath: realURL.path) {
-                NSWorkspace.shared.open(realURL)
-                continue
-            }
+        if FileManager.default.fileExists(atPath: realURL.path) {
+            NSLog("🔴 [Mosaic] cached, opening: %@", realURL.path)
+            openFile(realURL)
+            return
+        }
 
-            // Otherwise fetch from the network first, then open.
-            DaemonClient.shared.fetch(filename) { success in
-                DispatchQueue.main.async {
-                    if FileManager.default.fileExists(atPath: realURL.path) {
-                        // NSWorkspace picks the default app based on the file extension
-                        // (.md → Xcode/Typora, .txt → TextEdit, etc.)
-                        NSWorkspace.shared.open(realURL)
-                    } else {
-                        let alert = NSAlert()
-                        alert.messageText = "Could not fetch \(filename)"
-                        alert.informativeText = "The daemon could not retrieve this file from the network."
-                        alert.runModal()
-                    }
+        NSLog("🔴 [Mosaic] not cached, fetching: %@", filename)
+        DaemonClient.shared.fetch(filename) { success in
+            NSLog("🔴 [Mosaic] fetch returned success=%d", success ? 1 : 0)
+            DispatchQueue.main.async {
+                if FileManager.default.fileExists(atPath: realURL.path) {
+                    NSLog("🔴 [Mosaic] file exists after fetch, opening")
+                    self.openFile(realURL)
+                } else {
+                    NSLog("🔴 [Mosaic] file missing after fetch")
+                    let alert = NSAlert()
+                    alert.messageText = "Could not fetch \(filename)"
+                    alert.informativeText = "The daemon could not retrieve this file from the network."
+                    alert.runModal()
                 }
+            }
+        }
+    }
+
+    private func openFile(_ url: URL) {
+        NSLog("🔴 [Mosaic] opening: %@", url.path)
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true
+        NSWorkspace.shared.open(url, configuration: config) { _, error in
+            if let error {
+                NSLog("🔴 [Mosaic] open failed: %@", error.localizedDescription)
+            } else {
+                NSLog("🔴 [Mosaic] open succeeded")
             }
         }
     }
@@ -64,8 +111,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.terminate(nil)
     }
 
-    /// Launches the Go daemon if it isn't already running.
-    /// Looks for mosaic-node in the app bundle first, then /usr/local/bin.
     private func launchDaemon() {
         let candidates: [String] = [
             Bundle.main.bundlePath + "/Contents/MacOS/mosaic-node",
@@ -76,7 +121,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             showError("mosaic-node not found. Please install Mosaic.")
             return
         }
-
         let task = Process()
         task.executableURL = URL(fileURLWithPath: execPath)
         do {
