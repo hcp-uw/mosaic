@@ -17,9 +17,15 @@ func UploadFile(req protocol.UploadFileRequest) protocol.UploadFileResponse {
 
 	filename := removePath(req.Path)
 
+	// Get the original file's size before writing the stub.
+	originalSize := 0
+	if info, err := os.Stat(req.Path); err == nil {
+		originalSize = int(info.Size())
+	}
+
 	// Write a stub file to ~/Mosaic/ so Finder shows the file with a badge.
 	mosaicDir := filepath.Join(os.Getenv("HOME"), "Mosaic")
-	if err := filesystem.WriteStub(mosaicDir, filename, 0, helpers.GetNodeID()); err != nil {
+	if err := filesystem.WriteStub(mosaicDir, filename, originalSize, helpers.GetNodeID()); err != nil {
 		fmt.Println("Warning: could not write stub for", filename, "-", err)
 	}
 

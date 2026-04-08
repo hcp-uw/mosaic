@@ -33,6 +33,16 @@ func WriteStub(mosaicDir, filename string, size, nodeID int) error {
 	return os.WriteFile(filepath.Join(mosaicDir, filename+".mosaic"), data, 0644)
 }
 
+// ReadStub reads and parses the stub metadata for a given filename.
+func ReadStub(mosaicDir, filename string) (StubMeta, error) {
+	data, err := os.ReadFile(filepath.Join(mosaicDir, filename+".mosaic"))
+	if err != nil {
+		return StubMeta{}, err
+	}
+	var meta StubMeta
+	return meta, json.Unmarshal(data, &meta)
+}
+
 // RemoveStub deletes the .mosaic stub for a given filename.
 func RemoveStub(mosaicDir, filename string) error {
 	err := os.Remove(filepath.Join(mosaicDir, filename+".mosaic"))

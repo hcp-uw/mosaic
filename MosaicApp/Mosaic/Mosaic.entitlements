@@ -5,7 +5,6 @@
 	<!-- Required for App Store / notarization -->
 	<key>com.apple.security.app-sandbox</key>
 	<false/>
-	<!-- Needed to talk to the Go daemon over localhost:7777 -->
 	<key>com.apple.security.network.client</key>
 	<true/>
 </dict>

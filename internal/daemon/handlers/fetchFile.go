@@ -14,6 +14,7 @@ import (
 func FetchFileBytes(filename string) ([]byte, error) {
 	var testing bool = true
 
+	// this works for videos as well, but is just a placeholder until we implement real shard collection and reconstruction logic.
 	if testing {
 		fileID := "1OdJSC5rt1dirWtAFr-o6aa5LIRonZQ8c"
 		resp, err := http.Get("https://drive.google.com/uc?export=download&id=" + fileID + "&confirm=t")

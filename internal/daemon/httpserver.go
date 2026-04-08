@@ -101,9 +101,10 @@ func handleFileByName(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPost && sub == "fetch":
 		resp := handlers.DownloadFile(protocol.DownloadFileRequest{FilePath: name})
 		if resp.Success {
-			// If no stub exists yet (file was uploaded by a peer, not this node),
-			// create one before marking it cached.
-			if !filesystem.IsCached(mosaicDir, name) {
+			// If no stub exists yet (file came from a peer, not uploaded by this node),
+			// create a minimal one. Use IsCached by checking file existence, not the cached flag.
+			stubPath := filepath.Join(mosaicDir, name+".mosaic")
+			if _, err := os.Stat(stubPath); os.IsNotExist(err) {
 				_ = filesystem.WriteStub(mosaicDir, name, 0, 0)
 			}
 			filesystem.MarkCached(mosaicDir, name)

@@ -8,12 +8,13 @@
 
 /* Begin PBXBuildFile section */
 		0000000000000000000000E1 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0000000000000000000000D1 /* AppDelegate.swift */; };
-		0000000000000000000000E7 /* DaemonClient.swift in Sources (Mosaic) */ = {isa = PBXBuildFile; fileRef = 0000000000000000000000DA /* DaemonClient.swift */; };
 		0000000000000000000000E2 /* FinderSync.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0000000000000000000000D4 /* FinderSync.swift */; };
 		0000000000000000000000E3 /* DaemonClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0000000000000000000000D5 /* DaemonClient.swift */; };
 		0000000000000000000000E4 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 0000000000000000000000D8 /* Assets.xcassets */; };
 		0000000000000000000000E5 /* MosaicFinderSync.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 0000000000000000000000C2 /* MosaicFinderSync.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		0000000000000000000000E6 /* FinderSync.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 0000000000000000000000D9 /* FinderSync.framework */; };
+		0000000000000000000000E7 /* DaemonClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0000000000000000000000DA /* DaemonClient.swift */; };
+		E136980C2F86E7500085E499 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = E136980B2F86E7500085E499 /* main.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -53,6 +54,7 @@
 		0000000000000000000000D8 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		0000000000000000000000D9 /* FinderSync.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = FinderSync.framework; path = System/Library/Frameworks/FinderSync.framework; sourceTree = SDKROOT; };
 		0000000000000000000000DA /* DaemonClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonClient.swift; sourceTree = "<group>"; };
+		E136980B2F86E7500085E499 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -77,6 +79,7 @@
 		000000000000000000000010 /* MosaicApp */ = {
 			isa = PBXGroup;
 			children = (
+				E136980B2F86E7500085E499 /* main.swift */,
 				000000000000000000000011 /* Mosaic */,
 				000000000000000000000012 /* FinderSync */,
 				000000000000000000000014 /* Frameworks */,
@@ -217,7 +220,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				0000000000000000000000E1 /* AppDelegate.swift in Sources */,
-				0000000000000000000000E7 /* DaemonClient.swift in Sources (Mosaic) */,
+				0000000000000000000000E7 /* DaemonClient.swift in Sources */,
+				E136980C2F86E7500085E499 /* main.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
