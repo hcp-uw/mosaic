@@ -10,8 +10,6 @@ import (
 // Deletes all user data and returns a EmptyStorageResponse
 func EmptyStorage(req protocol.EmptyStorageRequest) protocol.EmptyStorageResponse {
 	fmt.Println("Daemon: deleting all storage.")
-	// all the actual logic and stuff goes here
-	// Details goes in the logs (not printed in terminal)
 	return protocol.EmptyStorageResponse{
 		Success:          true,
 		Details:          "Storage deleted successfully.",

@@ -101,13 +101,21 @@ func handleFileByName(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPost && sub == "fetch":
 		resp := handlers.DownloadFile(protocol.DownloadFileRequest{FilePath: name})
 		if resp.Success {
-			// If no stub exists yet (file came from a peer, not uploaded by this node),
-			// create a minimal one. Use IsCached by checking file existence, not the cached flag.
 			stubPath := filepath.Join(mosaicDir, name+".mosaic")
-			if _, err := os.Stat(stubPath); os.IsNotExist(err) {
-				_ = filesystem.WriteStub(mosaicDir, name, 0, 0)
+
+			// If no manifest entry exists (file came from a peer), add a minimal one.
+			if !filesystem.IsInManifest(mosaicDir, name) {
+				_ = filesystem.AddToManifest(mosaicDir, name, 0, 0)
 			}
-			filesystem.MarkCached(mosaicDir, name)
+
+			// Delete the stub — the real file now lives alongside it.
+			// Suppress the watcher so it doesn't interpret this as a user-initiated delete.
+			if GlobalWatcher != nil {
+				GlobalWatcher.SuppressNext(stubPath)
+			}
+			_ = os.Remove(stubPath)
+
+			filesystem.MarkCachedInManifest(mosaicDir, name)
 		}
 		writeJSON(w, http.StatusOK, resp)
 

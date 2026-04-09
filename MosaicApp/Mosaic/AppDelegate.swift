@@ -18,6 +18,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var daemonTask: Process?
     private var dirWatcher: DispatchSourceFileSystemObject?
 
+    // Persisted preference: whether double-clicking a stub also opens the file.
+    private var openAfterFetch: Bool {
+        get { UserDefaults.standard.object(forKey: "openAfterFetch") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "openAfterFetch") }
+    }
+
     func applicationWillFinishLaunching(_ notification: Notification) {
         _ = MosaicDocumentController()
     }
@@ -51,7 +57,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             queue: .main
         )
         source.setEventHandler { [weak self] in
-            self?.buildMenu()
+            // Debounce: wait 200ms so rapid changes (stub delete + real file write) settle.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                self?.buildMenu()
+            }
         }
         source.setCancelHandler {
             close(fd)
@@ -63,47 +72,73 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Status bar menu
 
     private func buildMenu() {
-        // Read stubs directly from disk — no daemon required.
         let mosaicDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Mosaic")
-        let stubs = (try? FileManager.default.contentsOfDirectory(
-            at: mosaicDir, includingPropertiesForKeys: nil))?.filter {
-                $0.pathExtension == "mosaic"
-            } ?? []
+
+        // Read the manifest — the authoritative list of network files.
+        let manifestURL = mosaicDir.appendingPathComponent(".mosaic-manifest.json")
+        let manifest: [String: ManifestEntry]
+        if let data = try? Data(contentsOf: manifestURL),
+           let decoded = try? JSONDecoder().decode([String: ManifestEntry].self, from: data) {
+            manifest = decoded
+        } else {
+            manifest = [:]
+        }
 
         let menu = NSMenu()
         menu.addItem(withTitle: "Mosaic", action: nil, keyEquivalent: "")
         menu.addItem(.separator())
 
-        if stubs.isEmpty {
+        // Global preference: open files after fetching.
+        let openAfterFetchItem = NSMenuItem(
+            title: "Open files after fetching",
+            action: #selector(toggleOpenAfterFetch),
+            keyEquivalent: ""
+        )
+        openAfterFetchItem.target = self
+        openAfterFetchItem.state = openAfterFetch ? .on : .off
+        menu.addItem(openAfterFetchItem)
+        menu.addItem(.separator())
+
+        if manifest.isEmpty {
             menu.addItem(withTitle: "No files on network", action: nil, keyEquivalent: "")
         } else {
-            for stub in stubs.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
-                let filename = stub.deletingPathExtension().lastPathComponent
+            for entry in manifest.values.sorted(by: { $0.name < $1.name }) {
+                let filename = entry.name
                 let item = NSMenuItem(title: filename, action: nil, keyEquivalent: "")
                 let sub = NSMenu()
 
-                // Read metadata from stub JSON
-                if let data = try? Data(contentsOf: stub),
-                   let meta = try? JSONDecoder().decode(StubMeta.self, from: data) {
-                    let realFileExists = FileManager.default.fileExists(
-                        atPath: mosaicDir.appendingPathComponent(filename).path)
-                    let cached = realFileExists ? "Yes" : "No"
-                    sub.addItem(withTitle: "Size: \(Self.formatBytes(meta.size))", action: nil, keyEquivalent: "")
-                    sub.addItem(withTitle: "Added: \(meta.dateAdded)", action: nil, keyEquivalent: "")
-                    sub.addItem(withTitle: "Cached locally: \(cached)", action: nil, keyEquivalent: "")
-                    sub.addItem(.separator())
+                let realFileExists = FileManager.default.fileExists(
+                    atPath: mosaicDir.appendingPathComponent(filename).path)
+                let cached = realFileExists ? "Yes" : "No"
+                sub.addItem(withTitle: "Size: \(Self.formatBytes(entry.size))", action: nil, keyEquivalent: "")
+                sub.addItem(withTitle: "Added: \(entry.dateAdded)", action: nil, keyEquivalent: "")
+                sub.addItem(withTitle: "Cached locally: \(cached)", action: nil, keyEquivalent: "")
+                sub.addItem(.separator())
+
+                if realFileExists {
+                    // File is cached — just open it.
+                    let openItem = NSMenuItem(title: "Open", action: #selector(openFileFromMenu(_:)), keyEquivalent: "")
+                    openItem.representedObject = filename
+                    openItem.target = self
+                    sub.addItem(openItem)
+
+                    let refetchItem = NSMenuItem(title: "Re-fetch", action: #selector(cacheFileFromMenu(_:)), keyEquivalent: "")
+                    refetchItem.representedObject = filename
+                    refetchItem.target = self
+                    sub.addItem(refetchItem)
+                } else {
+                    // File is remote-only — offer cache-only or cache-and-open.
+                    let cacheItem = NSMenuItem(title: "Cache", action: #selector(cacheFileFromMenu(_:)), keyEquivalent: "")
+                    cacheItem.representedObject = filename
+                    cacheItem.target = self
+                    sub.addItem(cacheItem)
+
+                    let cacheOpenItem = NSMenuItem(title: "Cache & Open", action: #selector(cacheAndOpenFileFromMenu(_:)), keyEquivalent: "")
+                    cacheOpenItem.representedObject = filename
+                    cacheOpenItem.target = self
+                    sub.addItem(cacheOpenItem)
                 }
-
-                let openItem = NSMenuItem(title: "Open", action: #selector(openFileFromMenu(_:)), keyEquivalent: "")
-                openItem.representedObject = filename
-                openItem.target = self
-                sub.addItem(openItem)
-
-                let refetchItem = NSMenuItem(title: "Re-fetch", action: #selector(refetchFromMenu(_:)), keyEquivalent: "")
-                refetchItem.representedObject = filename
-                refetchItem.target = self
-                sub.addItem(refetchItem)
 
                 item.submenu = sub
                 menu.addItem(item)
@@ -116,8 +151,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem?.menu = menu
     }
 
-    // Mirrors the Go StubMeta struct for decoding stub JSON in Swift.
-    private struct StubMeta: Decodable {
+    // Mirrors the Go ManifestEntry struct for decoding the manifest JSON in Swift.
+    private struct ManifestEntry: Decodable {
         let name: String
         let size: Int
         let nodeID: Int
@@ -125,19 +160,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let cached: Bool
     }
 
+    // MARK: - Menu actions
+
+    @objc private func toggleOpenAfterFetch() {
+        openAfterFetch.toggle()
+        buildMenu()
+    }
+
     @objc private func openFileFromMenu(_ sender: NSMenuItem) {
         guard let filename = sender.representedObject as? String else { return }
         let realURL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Mosaic")
             .appendingPathComponent(filename)
-        if FileManager.default.fileExists(atPath: realURL.path) {
-            openFile(realURL)
-        } else {
-            fetchAndOpen(filename: filename, realURL: realURL)
-        }
+        openFile(realURL)
     }
 
-    @objc private func refetchFromMenu(_ sender: NSMenuItem) {
+    // Cache only — no open.
+    @objc private func cacheFileFromMenu(_ sender: NSMenuItem) {
+        guard let filename = sender.representedObject as? String else { return }
+        DaemonClient.shared.fetch(filename) { _ in }
+    }
+
+    // Cache and open.
+    @objc private func cacheAndOpenFileFromMenu(_ sender: NSMenuItem) {
         guard let filename = sender.representedObject as? String else { return }
         let realURL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Mosaic")
@@ -156,8 +201,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         if FileManager.default.fileExists(atPath: realURL.path) {
             openFile(realURL)
-        } else {
+        } else if openAfterFetch {
             fetchAndOpen(filename: filename, realURL: realURL)
+        } else {
+            DaemonClient.shared.fetch(filename) { _ in }
         }
     }
 

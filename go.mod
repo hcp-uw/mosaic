@@ -8,6 +8,7 @@ require (
 )
 
 require (
+	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	google.golang.org/protobuf v1.36.10
 	golang.org/x/sys v0.37.0 // indirect

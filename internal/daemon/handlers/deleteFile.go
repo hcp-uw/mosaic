@@ -13,14 +13,24 @@ import (
 // Deletes a file from the network and returns an DeleteFileResponse
 func DeleteFile(req protocol.DeleteFileRequest) protocol.DeleteFileResponse {
 	fmt.Println("Daemon: handling delete for", req.FilePath)
-	// all the actual logic and stuff goes here
 
 	filename := removePath(req.FilePath)
 
-	// Remove the stub from ~/Mosaic/ so Finder stops showing this file.
 	mosaicDir := filepath.Join(os.Getenv("HOME"), "Mosaic")
+	// Remove the stub (if it exists — cached files won't have one).
 	if err := filesystem.RemoveStub(mosaicDir, filename); err != nil {
 		fmt.Println("Warning: could not remove stub for", filename, "-", err)
+	}
+	// Remove the real cached file (if it exists).
+	realPath := filepath.Join(mosaicDir, filename)
+	if _, err := os.Stat(realPath); err == nil {
+		if err := os.Remove(realPath); err != nil {
+			fmt.Println("Warning: could not remove cached file", filename, "-", err)
+		}
+	}
+	// Remove from manifest.
+	if err := filesystem.RemoveFromManifest(mosaicDir, filename); err != nil {
+		fmt.Println("Warning: could not update manifest for", filename, "-", err)
 	}
 
 	return protocol.DeleteFileResponse{

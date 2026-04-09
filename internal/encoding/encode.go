@@ -58,24 +58,31 @@ func (e *Encoder) EncodeFile(relativeFilePath string) error {
 		}
 
 		e.encoder.Encode(splitFile)
+
+		var writeErr error
+		var mu sync.Mutex
 		var shardWriters sync.WaitGroup
 		for i := range len(shardFiles) {
 			shardWriters.Add(1)
 			go func(i int) {
 				defer shardWriters.Done()
 				if _, err := shardFiles[i].Write(splitFile[i]); err != nil {
-					panic(err)
+					mu.Lock()
+					writeErr = err
+					mu.Unlock()
 				}
 			}(i)
 		}
-
 		shardWriters.Wait()
+		if writeErr != nil {
+			return writeErr
+		}
+
 		if lastBitReadIndex < len(readBuffer) {
 			break
 		}
-
 	}
 
-	fmt.Printf("files encoded shards found: %s", shardOutDir)
+	fmt.Printf("encoded %s → %s\n", relativeFilePath, shardOutDir)
 	return nil
 }

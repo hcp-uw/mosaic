@@ -16,8 +16,6 @@ import (
 // Joins the network and returns a JoinResponse
 func HandleJoin(req protocol.JoinRequest) protocol.JoinResponse {
 	fmt.Println("Daemon: joining network.")
-	// all the actual logic and stuff goes here
-	// Details goes in the logs (not printed in terminal)
 
 	runClient(req.ServerAddress)
 

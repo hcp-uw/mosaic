@@ -29,6 +29,11 @@ func main() {
 		}()
 	}
 
+	// Watch ~/Mosaic/ and map filesystem events to network operations.
+	if _, err := daemon.StartDirWatcher(mountPoint); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not start dir watcher: %v\n", err)
+	}
+
 	// HTTP API for the Finder Sync extension and other UI bridges.
 	go func() {
 		if err := daemon.StartHTTPServer(); err != nil {
@@ -39,6 +44,7 @@ func main() {
 	// Unix socket server (blocks until daemon exits).
 	if err := daemon.StartServer(); err != nil {
 		filesystem.StopMount(mountPoint)
-		panic(err)
+		fmt.Fprintf(os.Stderr, "Daemon error: %v\n", err)
+		os.Exit(1)
 	}
 }

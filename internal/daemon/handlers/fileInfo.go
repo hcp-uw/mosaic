@@ -17,13 +17,22 @@ func GetFileInfo(req protocol.FileInfoRequest) protocol.FileInfoResponse {
 	filename := removePath(req.FilePath)
 	mosaicDir := filepath.Join(os.Getenv("HOME"), "Mosaic")
 
-	// Read size and metadata from the stub written at upload time.
-	stub, err := filesystem.ReadStub(mosaicDir, filename)
+	// Read metadata from the manifest (authoritative) with fallback to stub.
 	size := 0
 	dateAdded := ""
+	entries, err := filesystem.ReadManifest(mosaicDir)
 	if err == nil {
-		size = stub.Size
-		dateAdded = stub.DateAdded
+		if entry, ok := entries[filename]; ok {
+			size = entry.Size
+			dateAdded = entry.DateAdded
+		}
+	} else {
+		// Fallback: read from stub (e.g. manifest doesn't exist yet).
+		stub, serr := filesystem.ReadStub(mosaicDir, filename)
+		if serr == nil {
+			size = stub.Size
+			dateAdded = stub.DateAdded
+		}
 	}
 
 	return protocol.FileInfoResponse{

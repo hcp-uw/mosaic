@@ -10,8 +10,6 @@ import (
 // Gets account status and returns a StatusAccountResponse
 func StatusAccount(req protocol.StatusAccountRequest) protocol.StatusAccountResponse {
 	fmt.Println("Daemon: getting account status.")
-	// all the actual logic and stuff goes here
-	// Details goes in the logs (not printed in terminal)
 	return protocol.StatusAccountResponse{
 		Success:          true,
 		Details:          "Network joined successfully.",
