@@ -94,8 +94,25 @@ func handleFileByName(w http.ResponseWriter, r *http.Request) {
 		})
 
 	case r.Method == http.MethodDelete && sub == "":
-		// DeleteFile handler already calls RemoveStub internally.
 		resp := handlers.DeleteFile(protocol.DeleteFileRequest{FilePath: name})
+		writeJSON(w, http.StatusOK, resp)
+
+	case r.Method == http.MethodPost && sub == "rename":
+		var body struct {
+			NewName string `json:"newName"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.NewName == "" {
+			http.Error(w, "missing newName", http.StatusBadRequest)
+			return
+		}
+		// Suppress watcher events for both old and new paths — daemon is doing this rename.
+		if GlobalWatcher != nil {
+			GlobalWatcher.SuppressNext(filepath.Join(mosaicDir, name))
+			GlobalWatcher.SuppressNext(filepath.Join(mosaicDir, name+".mosaic"))
+			GlobalWatcher.SuppressNext(filepath.Join(mosaicDir, body.NewName))
+			GlobalWatcher.SuppressNext(filepath.Join(mosaicDir, body.NewName+".mosaic"))
+		}
+		resp := handlers.RenameFile(protocol.RenameFileRequest{FilePath: name, NewName: body.NewName})
 		writeJSON(w, http.StatusOK, resp)
 
 	case r.Method == http.MethodPost && sub == "fetch":

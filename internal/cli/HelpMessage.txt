@@ -19,13 +19,13 @@ Storage Management:
   empty storage                      Delete all stored data from the network.
 
 File Operations:
-  list file                          List all files stored on the network.
-  upload (file/folder) <path>        Upload a file or folder to the connected network.
-  download (file/folder) <path>      Download a file from the network.
-  info (file/folder) <path>          Display information about a specific file on the network.
-  delete (file/folder) <path>>       Delete a specific file from the network.
+  list file                              List all files stored on the network.
+  upload (file/folder) <path>            Upload a file or folder to the connected network.
+  download (file/folder) <path>          Download a file from the network.
+  info (file/folder) <path>             Display information about a specific file on the network.
+  delete (file/folder) <path>           Delete a specific file from the network.
+  rename file <oldname> <newname>       Rename a file on the network.
 
 Other:
   version                            Display current MOS client version.
   help                               Show a list of usable commands for MOS
-

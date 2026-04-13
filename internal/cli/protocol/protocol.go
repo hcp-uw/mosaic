@@ -242,3 +242,16 @@ type VersionResponse struct {
 	Details string `json:"details"`
 	Version string `json:"version"`
 }
+
+type RenameFileRequest struct {
+	FilePath string `json:"filePath"`
+	NewName  string `json:"newName"`
+}
+
+type RenameFileResponse struct {
+	Success     bool   `json:"success"`
+	Details     string `json:"details"`
+	FileName    string `json:"fileName"`
+	Username    string `json:"username"`
+	CurrentNode int    `json:"currentNode"`
+}

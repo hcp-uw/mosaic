@@ -228,6 +228,19 @@ func Run(Args []string) {
 			fmt.Println("Unknown argument:", args[2])
 			os.Exit(1)
 		}
+	case "rename":
+		if len(args) != 5 || args[2] != "file" {
+			fmt.Println("Usage:")
+			fmt.Println("- mos rename file <oldname> <newname>    Rename a file on the network.")
+			os.Exit(1)
+		}
+		if args[4] == "-" || args[4] == "--" {
+			fmt.Println("Error: invalid new name. Do not use -> syntax.")
+			fmt.Println("Usage:")
+			fmt.Println("- mos rename file <oldname> <newname>    Rename a file on the network.")
+			os.Exit(1)
+		}
+		renameFile()
 	case "delete":
 		if len(args) != 4 {
 			fmt.Println("Usage:")
@@ -562,6 +575,30 @@ func deleteFolder() {
 	fmt.Println(message)
 }
 
+// Renames a file on the network
+func renameFile() {
+	oldName := args[3]
+	newName := args[4]
+	resp, err := client.SendRequest("renameFile", protocol.RenameFileRequest{FilePath: oldName, NewName: newName})
+	if err != nil {
+		fmt.Println("Error: could not reach daemon. Is mosaic-node running?")
+		fmt.Println("Start it with: mosaic-node &")
+		fmt.Println("Details:", err)
+		os.Exit(1)
+	}
+
+	var cmdResp protocol.RenameFileResponse
+	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
+		fmt.Println("Error parsing response:", err)
+		os.Exit(1)
+	}
+	if !cmdResp.Success {
+		fmt.Println("Error:", cmdResp.Details)
+		os.Exit(1)
+	}
+	fmt.Printf("\nRenamed '%s' to '%s' successfully.\n", oldName, cmdResp.FileName)
+}
+
 // Gets info about a file from the network
 func fileInfo() {
 	filePath := args[3]
@@ -623,7 +660,12 @@ func help() {
 // ExitOnErr prints the message and error and exits if err is not nil
 func exitOnErr(err error, msg string) {
 	if err != nil {
-		fmt.Println(msg, err)
+		if strings.Contains(err.Error(), "failed to connect to daemon") {
+			fmt.Println("Error: could not reach daemon. Is mosaic-node running?")
+			fmt.Println("Start it with: mosaic-node &")
+		} else {
+			fmt.Println(msg, err)
+		}
 		os.Exit(1)
 	}
 }
@@ -679,6 +721,15 @@ func Shutdown() {
 	default:
 		fmt.Printf("Unsupported operating system: %s\n", goos)
 		os.Exit(1)
+	}
+
+	// Stop the Swift menu bar app (macOS only)
+	if goos == "darwin" {
+		fmt.Println("Stopping Mosaic app...")
+		stopAppCmd := exec.Command("pkill", "-x", "Mosaic")
+		stopAppCmd.Run()
+		exec.Command("pkill", "-x", "MosaicFinderSync").Run()
+		fmt.Println("✓ Mosaic app stopped")
 	}
 
 	// Try to stop the daemon - first by PID file

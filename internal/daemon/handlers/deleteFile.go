@@ -10,6 +10,7 @@ import (
 	filesystem "github.com/hcp-uw/mosaic/internal/fileSystem"
 )
 
+
 // Deletes a file from the network and returns an DeleteFileResponse
 func DeleteFile(req protocol.DeleteFileRequest) protocol.DeleteFileResponse {
 	fmt.Println("Daemon: handling delete for", req.FilePath)
@@ -31,6 +32,16 @@ func DeleteFile(req protocol.DeleteFileRequest) protocol.DeleteFileResponse {
 	// Remove from manifest.
 	if err := filesystem.RemoveFromManifest(mosaicDir, filename); err != nil {
 		fmt.Println("Warning: could not update manifest for", filename, "-", err)
+	}
+
+	// Update the network manifest.
+	if key, err := filesystem.LoadOrCreateNetworkKey(networkKeyPath()); err == nil {
+		if nm, err := filesystem.ReadNetworkManifest(mosaicDir, key); err == nil {
+			nm = filesystem.RemoveFileFromNetwork(nm, helpers.GetAccountID(), filename)
+			if werr := filesystem.WriteNetworkManifest(mosaicDir, key, nm); werr != nil {
+				fmt.Println("Warning: could not update network manifest for", filename, "-", werr)
+			}
+		}
 	}
 
 	return protocol.DeleteFileResponse{

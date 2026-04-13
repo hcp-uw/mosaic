@@ -68,6 +68,74 @@ is_daemon_running() {
     fi
 }
 
+# Check if the Swift menu bar app is running
+is_app_running() {
+    pgrep -x "Mosaic" > /dev/null 2>&1
+}
+
+# Stop the Swift menu bar app if it's running
+stop_app() {
+    if is_app_running; then
+        echo "Stopping Mosaic app..."
+        pkill -x "Mosaic" 2>/dev/null || true
+        pkill -x "MosaicFinderSync" 2>/dev/null || true
+        sleep 1
+        if is_app_running; then
+            pkill -9 -x "Mosaic" 2>/dev/null || true
+            sleep 1
+        fi
+        echo -e "${GREEN}✓ Mosaic app stopped${NC}"
+    fi
+}
+
+# Launch the Swift menu bar app.
+# Uses the bundle ID so macOS finds it wherever it's registered — the same
+# mechanism that auto-launches it when a .mosaic file is double-clicked.
+# Falls back to searching known paths, then warns and continues if not found.
+start_app() {
+    if [ "$OS" != "macOS" ]; then
+        return 0
+    fi
+
+    echo ""
+    echo "Starting Mosaic app..."
+
+    # Try bundle ID first — works as long as the app has been run at least once.
+    if open -b "com.mosaic.Mosaic" 2>/dev/null; then
+        sleep 2
+        if is_app_running; then
+            echo -e "${GREEN}✓ Mosaic app started${NC}"
+            return 0
+        fi
+    fi
+
+    # Fall back to known paths.
+    local script_dir
+    script_dir="$(cd "$(dirname "$0")" && pwd)"
+    local candidates=(
+        "/Applications/Mosaic.app"
+        "${HOME}/Applications/Mosaic.app"
+        "${script_dir}/MosaicApp/build/Release/Mosaic.app"
+        "${script_dir}/MosaicApp/DerivedData/Build/Products/Release/Mosaic.app"
+    )
+
+    for candidate in "${candidates[@]}"; do
+        if [ -d "$candidate" ]; then
+            open "$candidate" 2>/dev/null
+            sleep 2
+            if is_app_running; then
+                echo -e "${GREEN}✓ Mosaic app started from ${candidate}${NC}"
+                return 0
+            fi
+        fi
+    done
+
+    echo -e "${YELLOW}⚠ Mosaic.app not found — running without the menu bar app.${NC}"
+    echo "  Build and run the app in Xcode at least once to register it:"
+    echo "  open MosaicApp/Mosaic.xcodeproj"
+    echo "  The CLI and daemon will work normally without it."
+}
+
 # Stop daemon (robust version)
 stop_daemon() {
     echo ""
@@ -330,10 +398,11 @@ print_success() {
     echo "Installed to: ${BIN_DIR}"
     echo ""
     echo "Usage:"
-    echo "  mos help       - View all mosaic commands"
-    echo "  mos shutdown   - Stop daemon and cleanup"
+    echo "  mos help            - View all mosaic commands"
+    echo "  mos shutdown        - Stop daemon and cleanup"
+    echo "  ./install.sh --stop - Stop daemon and menu bar app"
     echo ""
-    
+
     echo "Logs: ${LOG_FILE}"
     echo ""
 }
@@ -354,22 +423,26 @@ main() {
         exit 1
     fi
     
-    # Stop any existing daemon
+    # Stop any existing processes
+    stop_app
     stop_daemon || true
 
     # Build and install
     build_binaries
     install_binaries
-    
+
     # Start daemon
-    if start_daemon; then
-        print_success
-    else
+    if ! start_daemon; then
         echo ""
         echo -e "${RED}Installation completed but daemon failed to start${NC}"
         show_debug_info
         exit 1
     fi
+
+    # Start the Swift app (best-effort — warns but doesn't fail)
+    start_app
+
+    print_success
 }
 
 # Handle command line arguments
@@ -379,6 +452,7 @@ if [ "$1" = "--debug" ] || [ "$1" = "-d" ]; then
     exit 0
 elif [ "$1" = "--stop" ] || [ "$1" = "-s" ]; then
     set_platform_vars
+    stop_app
     stop_daemon
     exit $?
 elif [ "$1" = "--help" ] || [ "$1" = "-h" ]; then

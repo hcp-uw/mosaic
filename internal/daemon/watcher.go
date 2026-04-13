@@ -216,11 +216,23 @@ func (w *DirWatcher) onCreate(newLogicalName string) {
 
 	// Case 3: no disappeared entry yet — park this CREATE briefly.
 	// If a RENAME arrives within 500ms claiming a manifest file, this is the new name.
+	// Otherwise treat it as a drag-and-drop upload after the window expires.
 	fmt.Printf("[watcher] CREATE parked — %s waiting 500ms for late RENAME\n", newLogicalName)
 	rc := &recentCreate{logicalName: newLogicalName}
 	rc.timer = time.AfterFunc(500*time.Millisecond, func() {
 		w.recentCreates.Delete(newLogicalName)
-		fmt.Printf("[watcher] parked CREATE expired — %s is a copy or untracked file\n", newLogicalName)
+
+		// Skip .mosaic stubs — those are written by the daemon itself.
+		if strings.HasSuffix(newLogicalName, ".mosaic") {
+			return
+		}
+
+		// If the file is still not in the manifest, it was dragged in by the user.
+		if !filesystem.IsInManifest(w.mosaicDir, newLogicalName) {
+			filePath := filepath.Join(w.mosaicDir, newLogicalName)
+			fmt.Printf("[watcher] drag-and-drop detected — ingesting %s\n", newLogicalName)
+			handlers.IngestLocalFile(filePath)
+		}
 	})
 	w.recentCreates.Store(newLogicalName, rc)
 }
@@ -253,21 +265,22 @@ func (w *DirWatcher) restoreEntry(entry filesystem.ManifestEntry) {
 	// TODO: trigger real network restore here.
 }
 
-// renameOnNetwork updates local state and triggers a network rename.
+// renameOnNetwork delegates to the RenameFile handler, which handles all local
+// state (stub, real file, manifest) and will propagate to the network.
 func (w *DirWatcher) renameOnNetwork(oldEntry filesystem.ManifestEntry, newName string) {
 	oldName := oldEntry.Name
 
-	// Rename the stub if the file was remote-only (stub still exists under old name).
-	oldStub := filepath.Join(w.mosaicDir, oldName+".mosaic")
-	newStub := filepath.Join(w.mosaicDir, newName+".mosaic")
-	if _, err := os.Stat(oldStub); err == nil {
-		fmt.Printf("[watcher] renaming stub: %s → %s\n", oldStub, newStub)
-		w.SuppressNext(oldStub)
-		w.SuppressNext(newStub)
-		os.Rename(oldStub, newStub)
-	}
+	// Suppress the filesystem events that the handler will generate so the
+	// watcher doesn't re-interpret them as user actions.
+	w.SuppressNext(filepath.Join(w.mosaicDir, oldName))
+	w.SuppressNext(filepath.Join(w.mosaicDir, oldName+".mosaic"))
+	w.SuppressNext(filepath.Join(w.mosaicDir, newName))
+	w.SuppressNext(filepath.Join(w.mosaicDir, newName+".mosaic"))
 
-	filesystem.RenameInManifest(w.mosaicDir, oldName, newName)
-	fmt.Printf("[watcher] manifest updated: %s → %s\n", oldName, newName)
-	// TODO: trigger real network rename here.
+	resp := handlers.RenameFile(protocol.RenameFileRequest{FilePath: oldName, NewName: newName})
+	if resp.Success {
+		fmt.Printf("[watcher] rename complete: %s → %s\n", oldName, newName)
+	} else {
+		fmt.Printf("[watcher] rename failed: %s\n", resp.Details)
+	}
 }

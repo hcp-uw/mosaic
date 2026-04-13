@@ -59,4 +59,16 @@ class DaemonClient {
             completion((resp as? HTTPURLResponse)?.statusCode == 200)
         }.resume()
     }
+
+    // MARK: - Rename
+
+    func rename(_ filename: String, to newName: String, completion: @escaping (Bool) -> Void) {
+        var req = URLRequest(url: base.appendingPathComponent("files/\(filename)/rename"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["newName": newName])
+        URLSession.shared.dataTask(with: req) { _, resp, _ in
+            completion((resp as? HTTPURLResponse)?.statusCode == 200)
+        }.resume()
+    }
 }

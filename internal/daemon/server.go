@@ -99,6 +99,9 @@ func handleConn(conn net.Conn) {
 	case "deleteFolder":
 		var deleteFolderReq protocol.DeleteFolderRequest
 		handleWith(enc, req.Data, &deleteFolderReq, handlers.DeleteFolder, "Delete folder request failed.")
+	case "renameFile":
+		var renameReq protocol.RenameFileRequest
+		handleWith(enc, req.Data, &renameReq, handlers.RenameFile, "Rename file request failed.")
 	case "fileInfo":
 		var fileInfoReq protocol.FileInfoRequest
 		handleWith(enc, req.Data, &fileInfoReq, handlers.GetFileInfo, "File info request failed.")
