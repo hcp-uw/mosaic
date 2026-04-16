@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -238,21 +237,19 @@ func (w *DirWatcher) onCreate(newLogicalName string) {
 }
 
 // deleteFromNetwork commits a delete to the network after the timer fires.
+// handlers.DeleteFile handles all cleanup: stub, real file, local manifest,
+// network manifest update, and P2P broadcast.
 func (w *DirWatcher) deleteFromNetwork(entry filesystem.ManifestEntry) {
 	logicalName := entry.Name
 
+	// Suppress any watcher events the handler will generate (stub removal, etc.)
+	// so we don't re-interpret them as user actions.
+	w.SuppressNext(filepath.Join(w.mosaicDir, logicalName))
+	w.SuppressNext(filepath.Join(w.mosaicDir, logicalName+".mosaic"))
+
 	// TODO: trigger real network shard deletion here.
 	handlers.DeleteFile(protocol.DeleteFileRequest{FilePath: logicalName})
-	filesystem.RemoveFromManifest(w.mosaicDir, logicalName)
 	fmt.Printf("[watcher] deleted %s from network and manifest\n", logicalName)
-
-	// Clean up the stub if it still exists (e.g. remote-only file was moved out).
-	stubPath := filepath.Join(w.mosaicDir, logicalName+".mosaic")
-	if _, err := os.Stat(stubPath); err == nil {
-		fmt.Printf("[watcher] removing leftover stub: %s\n", stubPath)
-		w.SuppressNext(stubPath)
-		os.Remove(stubPath)
-	}
 }
 
 // restoreEntry re-adds a manifest entry after a Ctrl+Z undo.

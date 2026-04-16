@@ -10,21 +10,24 @@ import (
 // StubMeta is the JSON content written inside a .mosaic stub file.
 // Finder shows the stub; the extension reads this to decide the badge color.
 type StubMeta struct {
-	Name      string `json:"name"`
-	Size      int    `json:"size"`
-	NodeID    int    `json:"nodeID"`
-	DateAdded string `json:"dateAdded"`
-	Cached    bool   `json:"cached"`
+	Name        string `json:"name"`
+	Size        int    `json:"size"`
+	NodeID      int    `json:"nodeID"`
+	DateAdded   string `json:"dateAdded"`
+	Cached      bool   `json:"cached"`
+	ContentHash string `json:"contentHash"` // SHA-256 hex; empty for legacy stubs
 }
 
 // WriteStub creates a <filename>.mosaic stub file in the Mosaic directory.
-func WriteStub(mosaicDir, filename string, size, nodeID int) error {
+// Pass an empty string for contentHash if it is not yet known.
+func WriteStub(mosaicDir, filename string, size, nodeID int, contentHash string) error {
 	meta := StubMeta{
-		Name:      filename,
-		Size:      size,
-		NodeID:    nodeID,
-		DateAdded: time.Now().Format("01-02-2006"),
-		Cached:    false,
+		Name:        filename,
+		Size:        size,
+		NodeID:      nodeID,
+		DateAdded:   time.Now().Format("01-02-2006"),
+		Cached:      false,
+		ContentHash: contentHash,
 	}
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {

@@ -122,7 +122,7 @@ func handleFileByName(w http.ResponseWriter, r *http.Request) {
 
 			// If no manifest entry exists (file came from a peer), add a minimal one.
 			if !filesystem.IsInManifest(mosaicDir, name) {
-				_ = filesystem.AddToManifest(mosaicDir, name, 0, 0)
+				_ = filesystem.AddToManifest(mosaicDir, name, 0, 0, "")
 			}
 
 			// Delete the stub — the real file now lives alongside it.

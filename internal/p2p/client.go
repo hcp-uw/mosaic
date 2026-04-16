@@ -171,15 +171,13 @@ func (c *Client) processPeerMessage(data []byte) {
 		return // Ignore punch packets
 	}
 
-	// Try to parse as a STUN message first (for ping/pong)
+	// Try to parse as a structured message first.
 	if msg, err := api.DeserializeMessage(data); err == nil {
 		switch msg.Type {
 		case api.PeerPing:
-			// Respond with pong
 			c.sendPeerPong(msg.Sign.PubKey)
 			return
 		case api.PeerPong:
-			// Update last pong time
 			c.mutex.Lock()
 			if peer, ok := c.peers[msg.Sign.PubKey]; ok {
 				peer.LastPeerPong = time.Now()
@@ -238,12 +236,15 @@ func (c *Client) processPeerMessage(data []byte) {
 				c.mutex.Unlock()
 
 				c.notifyPeerAssigned(peerInfo)
-
 			}
 
+		case api.ManifestSync:
+			// Route manifest sync messages to the application callback layer.
+			c.notifyMessageReceived(data)
+			return
 		}
 
-		// If it's another type of STUN message, don't add to channel
+		// Unknown structured message — drop silently.
 		return
 	}
 }

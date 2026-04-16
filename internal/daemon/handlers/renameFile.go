@@ -55,13 +55,19 @@ func RenameFile(req protocol.RenameFileRequest) protocol.RenameFileResponse {
 		}
 	}
 
-	// Update the network manifest.
-	if key, err := filesystem.LoadOrCreateNetworkKey(networkKeyPath()); err == nil {
-		if nm, err := filesystem.ReadNetworkManifest(mosaicDir, key); err == nil {
-			nm = filesystem.RenameFileInNetwork(nm, helpers.GetAccountID(), oldName, newName)
-			if werr := filesystem.WriteNetworkManifest(mosaicDir, key, nm); werr != nil {
-				fmt.Println("Warning: could not update network manifest for", oldName, "-", werr)
+	// Update the network manifest: decrypt own section, mutate, encrypt+sign, write, broadcast.
+	if aesKey, err := filesystem.LoadOrCreateNetworkKey(networkKeyPath()); err == nil {
+		if kp, kerr := filesystem.LoadOrCreateUserKey(userKeyPath()); kerr == nil {
+			if nm, err := filesystem.ReadAndDecryptNetworkManifest(mosaicDir, aesKey, helpers.GetAccountID(), kp.Private); err == nil {
+				nm = filesystem.RenameFileInNetwork(nm, helpers.GetAccountID(), oldName, newName)
+				if werr := filesystem.EncryptSignAndWriteNetworkManifest(mosaicDir, aesKey, nm, helpers.GetAccountID(), kp); werr != nil {
+					fmt.Println("Warning: could not update network manifest for", oldName, "-", werr)
+				} else {
+					BroadcastNetworkManifest(nm)
+				}
 			}
+		} else {
+			fmt.Println("Warning: could not load user key:", kerr)
 		}
 	}
 

@@ -22,16 +22,17 @@ const (
 	WaitingForPeer   MessageType = "waiting_for_peer"
 	AssignedAsLeader MessageType = "assigned_as_leader"
 
-	// Leader to Peer message 
+	// Leader to Peer message
 	// To be sent to the joining node contianing a list of all nodes in the network
 	CurrentMembers MessageType = "current_members"
-	// To be sent to the nodes in the network notifying them of the new node that is joining 
+	// To be sent to the nodes in the network notifying them of the new node that is joining
 	NewPeerJoiner MessageType = "new_joiner"
 
 	// Peer to Peer messages
-	PeerPing MessageType = "peer_ping"
-	PeerPong MessageType = "peer_pong"
+	PeerPing        MessageType = "peer_ping"
+	PeerPong        MessageType = "peer_pong"
 	PeerTextMessage MessageType = "peer_text_message"
+	ManifestSync    MessageType = "manifest_sync"
 )
 
 // Message represents the base message structure
@@ -74,7 +75,7 @@ type CurrentMembersData struct {
 
 type NewPeerJoinerData struct {
 	JoinerAddress string `json:"joiner_address"`
-	JoinerID string `json:"joiner_id"`
+	JoinerID      string `json:"joiner_id"`
 }
 
 // just for testing rn -sending text messages between terminals
@@ -101,12 +102,12 @@ type PeerPingData struct {
 
 func NewPeerTextMessage(message, senderID string) *Message {
 	return &Message{
-		Type: PeerTextMessage,
+		Type:      PeerTextMessage,
 		Timestamp: time.Now(),
 		Sign: Signature{
 			PubKey: senderID,
 		},
-		Data: PeerTextMessageData {
+		Data: PeerTextMessageData{
 			Message: message,
 		},
 	}
@@ -114,12 +115,12 @@ func NewPeerTextMessage(message, senderID string) *Message {
 
 func NewNewPeerJoinerMessage(senderID, joinerID, joinerAddr string) *Message {
 	return &Message{
-		Type: NewPeerJoiner,
+		Type:      NewPeerJoiner,
 		Timestamp: time.Now(),
-		Sign: NewSignature(senderID),
+		Sign:      NewSignature(senderID),
 		Data: NewPeerJoinerData{
 			JoinerAddress: joinerAddr,
-			JoinerID: joinerID,
+			JoinerID:      joinerID,
 		},
 	}
 }
@@ -127,15 +128,15 @@ func NewNewPeerJoinerMessage(senderID, joinerID, joinerAddr string) *Message {
 func NewCurrentMembersMessage(members map[string]*net.UDPAddr, senderID string) *Message {
 	stringMembers := make(map[string]string)
 
-    // 2. Iterate and convert each UDPAddr to a string
-    for id, addr := range members {
-        if addr != nil {
-            stringMembers[id] = addr.String()
-        }
-    }
+	// 2. Iterate and convert each UDPAddr to a string
+	for id, addr := range members {
+		if addr != nil {
+			stringMembers[id] = addr.String()
+		}
+	}
 
 	return &Message{
-		Type: CurrentMembers,
+		Type:      CurrentMembers,
 		Timestamp: time.Now(),
 		Sign: Signature{
 			PubKey: senderID,
@@ -402,6 +403,37 @@ func (m *Message) GetRegisterSuccessData() (*RegisterSuccessData, error) {
 	}
 
 	var data RegisterSuccessData
+	err = json.Unmarshal(dataBytes, &data)
+	return &data, err
+}
+
+// ManifestSyncData carries the full serialized network manifest (JSON, not
+// encrypted — each UserNetworkEntry's Files section is already ECIES-encrypted
+// and the outer envelope is just the manifest index). Transit security comes
+// from the per-entry ECDSA signatures; a tampered payload is rejected on merge.
+type ManifestSyncData struct {
+	ManifestJSON []byte `json:"manifestJSON"`
+}
+
+// NewManifestSyncMessage creates a manifest sync message for P2P broadcast.
+func NewManifestSyncMessage(manifestJSON []byte) *Message {
+	return &Message{
+		Type:      ManifestSync,
+		Timestamp: time.Now(),
+		Data:      ManifestSyncData{ManifestJSON: manifestJSON},
+	}
+}
+
+// GetManifestSyncData extracts manifest sync data from a message.
+func (m *Message) GetManifestSyncData() (*ManifestSyncData, error) {
+	if m.Type != ManifestSync {
+		return nil, ErrInvalidMessageType
+	}
+	dataBytes, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var data ManifestSyncData
 	err = json.Unmarshal(dataBytes, &data)
 	return &data, err
 }

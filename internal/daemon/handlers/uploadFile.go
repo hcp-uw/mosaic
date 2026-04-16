@@ -15,6 +15,10 @@ func networkKeyPath() string {
 	return filepath.Join(os.Getenv("HOME"), ".mosaic-network.key")
 }
 
+func userKeyPath() string {
+	return filepath.Join(os.Getenv("HOME"), ".mosaic-user.key")
+}
+
 // UploadFile uploads a file to the network.
 // If the file is already cached locally (e.g. a re-upload), it re-fetches
 // from the network to update the local copy.
@@ -44,24 +48,33 @@ func uploadFile(path string, keepLocal bool) protocol.UploadFileResponse {
 
 	// TODO: distribute file shards to peers here.
 
-	// Update the manifest entry with the latest size.
-	if err := filesystem.AddToManifest(mosaicDir, filename, originalSize, nodeID); err != nil {
+	contentHash, _ := sha256File(path)
+
+	// Update the manifest entry with the latest size and content hash.
+	if err := filesystem.AddToManifest(mosaicDir, filename, originalSize, nodeID, contentHash); err != nil {
 		fmt.Println("Warning: could not update manifest for", filename, "-", err)
 	}
 
-	// Update the network manifest.
-	if key, err := filesystem.LoadOrCreateNetworkKey(networkKeyPath()); err == nil {
-		if nm, err := filesystem.ReadNetworkManifest(mosaicDir, key); err == nil {
-			entry := filesystem.NetworkFileEntry{
-				Name:          filename,
-				Size:          originalSize,
-				PrimaryNodeID: nodeID,
-				DateAdded:     time.Now().Format("01-02-2006"),
+	// Update the network manifest: decrypt own section, mutate, encrypt+sign, write, broadcast.
+	if aesKey, err := filesystem.LoadOrCreateNetworkKey(networkKeyPath()); err == nil {
+		if kp, kerr := filesystem.LoadOrCreateUserKey(userKeyPath()); kerr == nil {
+			if nm, err := filesystem.ReadAndDecryptNetworkManifest(mosaicDir, aesKey, helpers.GetAccountID(), kp.Private); err == nil {
+				entry := filesystem.NetworkFileEntry{
+					Name:          filename,
+					Size:          originalSize,
+					PrimaryNodeID: nodeID,
+					DateAdded:     time.Now().Format("01-02-2006"),
+					ContentHash:   contentHash,
+				}
+				nm = filesystem.AddFileToNetwork(nm, helpers.GetAccountID(), helpers.GetUsername(), entry)
+				if werr := filesystem.EncryptSignAndWriteNetworkManifest(mosaicDir, aesKey, nm, helpers.GetAccountID(), kp); werr != nil {
+					fmt.Println("Warning: could not update network manifest for", filename, "-", werr)
+				} else {
+					BroadcastNetworkManifest(nm)
+				}
 			}
-			nm = filesystem.AddFileToNetwork(nm, helpers.GetAccountID(), helpers.GetUsername(), entry)
-			if werr := filesystem.WriteNetworkManifest(mosaicDir, key, nm); werr != nil {
-				fmt.Println("Warning: could not update network manifest for", filename, "-", werr)
-			}
+		} else {
+			fmt.Println("Warning: could not load user key:", kerr)
 		}
 	}
 
@@ -87,7 +100,7 @@ func uploadFile(path string, keepLocal bool) protocol.UploadFileResponse {
 
 	default:
 		// File not cached — write a stub so Finder shows the remote-only placeholder.
-		if err := filesystem.WriteStub(mosaicDir, filename, originalSize, nodeID); err != nil {
+		if err := filesystem.WriteStub(mosaicDir, filename, originalSize, nodeID, contentHash); err != nil {
 			fmt.Println("Warning: could not write stub for", filename, "-", err)
 		}
 	}

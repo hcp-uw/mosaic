@@ -1,0 +1,6 @@
+Mosaic auth server listening on port 8081
+Database: /Users/robertkoller/codingprojects/mosaic/mosaic/AuthServer/mosaic-auth.db
+[register] username=rkoller accountID=000000001
+[register] username=koller accountID=000000002
+[login] username=koller accountID=000000002 node-1
+[login] username=koller accountID=000000002 node-1
