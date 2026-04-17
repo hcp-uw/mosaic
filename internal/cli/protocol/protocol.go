@@ -67,15 +67,40 @@ type NodeStatusResponse struct {
 	StorageShare int    `json:"storageShare"`
 }
 
+type CreateAccountRequest struct {
+	Username string `json:"username"`
+	LoginKey string `json:"loginKey"`
+}
+
+type CreateAccountResponse struct {
+	Success   bool   `json:"success"`
+	Details   string `json:"details"`
+	AccountID string `json:"accountID"`
+	Username  string `json:"username"`
+}
+
+type LoginStatusRequest struct{}
+
+type LoginStatusResponse struct {
+	LoggedIn   bool   `json:"loggedIn"`
+	Username   string `json:"username"`
+	AccountID  int    `json:"accountID"`
+	NodeNumber int    `json:"nodeNumber"`
+	PublicKey  string `json:"publicKey"`
+	ExpiresAt  string `json:"expiresAt"`
+}
+
 type LoginKeyRequest struct {
-	Key string `json:"key"`
+	Key      string `json:"key"`
+	Username string `json:"username"`
 }
 
 type LoginKeyResponse struct {
-	Success     bool   `json:"success"`
-	Details     string `json:"details"`
-	CurrentNode int    `json:"currentNode"`
-	Username    string `json:"username"`
+	Success        bool   `json:"success"`
+	Details        string `json:"details"`
+	CurrentNode    int    `json:"currentNode"`
+	Username       string `json:"username"`
+	AlreadyLoggedIn bool  `json:"alreadyLoggedIn"`
 }
 
 type SetStorageRequest struct {

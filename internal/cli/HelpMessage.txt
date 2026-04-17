@@ -1,7 +1,9 @@
 Mosaic Command Line Interface — Distributed Storage Network
 
-Core Commands:
-  login key <key>                    Log in to your MOS account.
+Account:
+  create account <username> <key>    Create a new Mosaic account.
+  login key <username> <key>         Log in to your Mosaic account.
+  login status                       Show current login status, node, and session info.
   logout account                     Log out of the current account.
 
 Network Management:
@@ -15,17 +17,17 @@ Node & Account Management:
   status account                     View overall account status and all connected nodes.
 
 Storage Management:
-  set storage <amount>               Set the total storage to share with a network.
+  set storage <amount>               Set the total storage to share with the network.
   empty storage                      Delete all stored data from the network.
 
 File Operations:
-  list file                              List all files stored on the network.
-  upload (file/folder) <path>            Upload a file or folder to the connected network.
-  download (file/folder) <path>          Download a file from the network.
-  info (file/folder) <path>             Display information about a specific file on the network.
-  delete (file/folder) <path>           Delete a specific file from the network.
-  rename file <oldname> <newname>       Rename a file on the network.
+  list file                          List all files stored on the network.
+  upload (file/folder) <path>        Upload a file or folder to the network.
+  download (file/folder) <path>      Download a file or folder from the network.
+  info (file/folder) <path>          Display information about a specific file or folder.
+  delete (file/folder) <path>        Delete a file or folder from the network.
+  rename file <oldname> <newname>    Rename a file on the network.
 
 Other:
   version                            Display current MOS client version.
-  help                               Show a list of usable commands for MOS
+  help                               Show this help message.

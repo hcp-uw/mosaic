@@ -60,6 +60,12 @@ func handleConn(conn net.Conn) {
 	case "statusAccount":
 		var accountReq protocol.StatusAccountRequest
 		handleWith(enc, req.Data, &accountReq, handlers.StatusAccount, "Status account request failed.")
+	case "createAccount":
+		var createReq protocol.CreateAccountRequest
+		handleWith(enc, req.Data, &createReq, handlers.CreateAccount, "Create account request failed.")
+	case "loginStatus":
+		var statusReq protocol.LoginStatusRequest
+		handleWith(enc, req.Data, &statusReq, handlers.LoginStatus, "Login status request failed.")
 	case "loginKey":
 		var loginReq protocol.LoginKeyRequest
 		handleWith(enc, req.Data, &loginReq, handlers.LoginKey, "Login request failed.")

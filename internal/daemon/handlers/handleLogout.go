@@ -10,9 +10,16 @@ import (
 // Logs out of the account and returns a LogoutResponse
 func HandleLogout(req protocol.LogoutRequest) protocol.LogoutResponse {
 	fmt.Println("Daemon: logging out.")
+
+	username := helpers.GetUsername()
+
+	// Clear all local auth state.
+	_ = helpers.ClearSession()
+	_ = helpers.ClearLoginKey()
+
 	return protocol.LogoutResponse{
 		Success:  true,
 		Details:  "Logged out successfully.",
-		Username: helpers.GetUsername(),
+		Username: username,
 	}
 }

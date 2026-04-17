@@ -1,7 +1,11 @@
 package helpers
 
-// Returns the user's accountID (which they dont know)
+// GetAccountID returns the authenticated user's account ID from the local
+// session. Returns 0 if the user is not logged in.
 func GetAccountID() int {
-	// all the actual logic and stuff goes here
-	return 12304938
+	s, err := LoadSession()
+	if err != nil {
+		return 0
+	}
+	return s.AccountID
 }

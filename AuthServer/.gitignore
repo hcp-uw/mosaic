@@ -1,0 +1,4 @@
+mosaic-auth
+mosaic-auth.db
+.mosaic-auth-secret
+auth.log

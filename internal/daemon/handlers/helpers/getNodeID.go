@@ -1,7 +1,11 @@
 package helpers
 
-// Returns the user's current node ID
+// GetNodeID returns the authenticated user's node number (1, 2, 3...) from
+// the local session. Returns 0 if the user is not logged in.
 func GetNodeID() int {
-	// all the actual logic and stuff goes here
-	return 10
+	s, err := LoadSession()
+	if err != nil {
+		return 0
+	}
+	return s.NodeNumber
 }

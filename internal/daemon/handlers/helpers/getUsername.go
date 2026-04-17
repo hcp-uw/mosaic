@@ -1,7 +1,11 @@
 package helpers
 
-// Returns a user's username
+// GetUsername returns the authenticated user's username from the local session.
+// Returns an empty string if the user is not logged in.
 func GetUsername() string {
-	// all the actual logic and stuff goes here
-	return "GavJoons"
+	s, err := LoadSession()
+	if err != nil {
+		return ""
+	}
+	return s.Username
 }
