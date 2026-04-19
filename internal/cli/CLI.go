@@ -50,16 +50,16 @@ func Run(Args []string) {
 			fmt.Println()
 			fmt.Println("Usage:")
 			fmt.Println("- mos login status                  Show current login status.")
-			fmt.Println("- mos login key <username> <key>    Login with a username and key.")
+			fmt.Println("- mos login account <username> <key>    Login with a username and key.")
 			os.Exit(1)
 		}
 		switch args[2] {
 		case "status":
 			loginStatus()
-		case "key":
+		case "account":
 			if len(args) != 5 {
 				fmt.Println()
-				fmt.Println("Usage: mos login key <username> <key>")
+				fmt.Println("Usage: mos login account <username> <key>")
 				os.Exit(1)
 			}
 			loginWithKey()
@@ -410,6 +410,9 @@ func loginWithKey() {
 
 // Logs out of the current account
 func logoutAccount() {
+	// Read username before the daemon clears the session.
+	username := helpers.GetUsername()
+
 	resp, err := client.SendRequest("logout", protocol.LogoutRequest{AccountID: helpers.GetAccountID()})
 	exitOnErr(err, "Error logging out.")
 
@@ -417,7 +420,10 @@ func logoutAccount() {
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
-	message := fmt.Sprintf("\nLogged out successfully.\n- Username: %s\n", cmdResp.Username)
+	if username == "" {
+		username = cmdResp.Username
+	}
+	message := fmt.Sprintf("\nLogged out successfully.\n- Username: %s\n", username)
 	fmt.Println(message)
 }
 

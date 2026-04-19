@@ -2,7 +2,7 @@ Mosaic Command Line Interface — Distributed Storage Network
 
 Account:
   create account <username> <key>    Create a new Mosaic account.
-  login key <username> <key>         Log in to your Mosaic account.
+  login account <username> <key>     Log in to your Mosaic account.
   login status                       Show current login status, node, and session info.
   logout account                     Log out of the current account.
 

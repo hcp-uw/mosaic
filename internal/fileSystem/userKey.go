@@ -36,7 +36,7 @@ type UserKeyPair struct {
 // overwritten — this is intentional: re-logging-in refreshes the derived key.
 func DeriveUserKeyFromLoginKey(loginKey string, keyPath string) (UserKeyPair, error) {
 	if loginKey == "" {
-		return UserKeyPair{}, fmt.Errorf("login key is empty: user must log in first (mos login key <key>)")
+		return UserKeyPair{}, fmt.Errorf("login key is empty: user must log in first (mos login account <username> <key>)")
 	}
 
 	// HKDF: extract + expand from the login key.
@@ -80,7 +80,7 @@ func LoadOrCreateUserKey(keyPath string) (UserKeyPair, error) {
 
 	if os.IsNotExist(err) {
 		return UserKeyPair{}, fmt.Errorf(
-			"no user key found — run 'mos login key <key>' to derive your keypair",
+			"no user key found — run 'mos login account <username> <key>' to derive your keypair",
 		)
 	}
 

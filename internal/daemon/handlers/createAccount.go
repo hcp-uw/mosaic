@@ -68,7 +68,7 @@ func CreateAccount(req protocol.CreateAccountRequest) protocol.CreateAccountResp
 
 	return protocol.CreateAccountResponse{
 		Success:   true,
-		Details:   fmt.Sprintf("Account created. You can now log in with: mos login key %s <your-key>", req.Username),
+		Details:   fmt.Sprintf("Account created. You can now log in with: mos login account %s <your-key>", req.Username),
 		AccountID: serverResp.AccountID,
 		Username:  req.Username,
 	}

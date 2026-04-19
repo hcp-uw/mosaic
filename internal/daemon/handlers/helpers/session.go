@@ -62,7 +62,7 @@ func SaveSession(s Session) error {
 func LoadSession() (Session, error) {
 	data, err := os.ReadFile(sessionPath())
 	if os.IsNotExist(err) {
-		return Session{}, fmt.Errorf("not logged in — run 'mos login key <key>'")
+		return Session{}, fmt.Errorf("not logged in — run 'mos login account <username> <key>'")
 	}
 	if err != nil {
 		return Session{}, fmt.Errorf("could not read session: %w", err)
@@ -77,7 +77,7 @@ func LoadSession() (Session, error) {
 		exp, err := time.Parse(time.RFC3339, s.ExpiresAt)
 		if err == nil && time.Now().After(exp) {
 			_ = ClearSession()
-			return Session{}, fmt.Errorf("session expired — run 'mos login key <key>'")
+			return Session{}, fmt.Errorf("session expired — run 'mos login account <username> <key>'")
 		}
 	}
 
