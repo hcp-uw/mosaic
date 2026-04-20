@@ -9,6 +9,7 @@ import (
 	"github.com/hcp-uw/mosaic/internal/cli/protocol"
 	"github.com/hcp-uw/mosaic/internal/daemon/handlers/helpers"
 	filesystem "github.com/hcp-uw/mosaic/internal/fileSystem"
+	"github.com/hcp-uw/mosaic/internal/transfer"
 )
 
 func networkKeyPath() string {
@@ -71,6 +72,7 @@ func uploadFile(path string, keepLocal bool) protocol.UploadFileResponse {
 					fmt.Println("Warning: could not update network manifest for", filename, "-", werr)
 				} else {
 					BroadcastNetworkManifest(nm)
+					go transfer.UploadFile(path, GetP2PClient())
 				}
 			}
 		} else {

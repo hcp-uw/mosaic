@@ -16,6 +16,13 @@ var (
 	p2pClientMu sync.RWMutex
 )
 
+// GetP2PClient returns the active P2P client, or nil if not connected.
+func GetP2PClient() *p2p.Client {
+	p2pClientMu.RLock()
+	defer p2pClientMu.RUnlock()
+	return p2pClient
+}
+
 // SetP2PClient stores the active P2P client so handlers can broadcast manifest
 // changes without needing the client passed through every call chain.
 func SetP2PClient(c *p2p.Client) {

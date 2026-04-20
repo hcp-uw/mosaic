@@ -531,10 +531,13 @@ func uploadFile() {
 		os.Exit(1)
 	}
 
+	absPath, err := filepath.Abs(filePath)
+	exitOnErr(err, "Error resolving path:")
+
 	fileSize := fileInfo.Size() / 1024
 	fmt.Printf("Uploading file: %s (%d KB)\n", fileInfo.Name(), fileSize)
 	resp, uploadErr := client.SendRequest("uploadFile", protocol.UploadFileRequest{
-		Path: filePath,
+		Path: absPath,
 	})
 	exitOnErr(uploadErr, "Error uploading file.")
 

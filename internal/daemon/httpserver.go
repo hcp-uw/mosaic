@@ -13,7 +13,12 @@ import (
 	filesystem "github.com/hcp-uw/mosaic/internal/fileSystem"
 )
 
-const HTTPPort = ":7777"
+func httpPort() string {
+	if p := os.Getenv("MOSAIC_HTTP_PORT"); p != "" {
+		return ":" + p
+	}
+	return ":7777"
+}
 
 // FileWithStatus extends file info with a sync-status field for the Finder badge.
 type FileWithStatus struct {
@@ -36,8 +41,9 @@ func StartHTTPServer() error {
 	mux.HandleFunc("/files", handleFiles)
 	mux.HandleFunc("/files/", handleFileByName)
 
-	fmt.Println("HTTP API listening on", HTTPPort)
-	return http.ListenAndServe(HTTPPort, mux)
+	port := httpPort()
+	fmt.Println("HTTP API listening on", port)
+	return http.ListenAndServe(port, mux)
 }
 
 // GET /files
