@@ -2,6 +2,10 @@ package transfer
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/hkdf"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -61,6 +65,62 @@ func ShardsDir() string {
 	return filepath.Join(os.Getenv("HOME"), "Mosaic", ".shards")
 }
 
+// shardEncryptionKey derives a 32-byte AES-256 key from the user's login key
+// using HKDF-SHA256. Same login key on every device → same derived shard key,
+// so all nodes in the network can encrypt and decrypt each other's shards.
+func shardEncryptionKey() ([32]byte, error) {
+	var key [32]byte
+	data, err := os.ReadFile(filepath.Join(os.Getenv("HOME"), ".mosaic-login.key"))
+	if err != nil {
+		return key, fmt.Errorf("not logged in — run 'mos login account <username> <key>'")
+	}
+	loginKey := strings.TrimSpace(string(data))
+	if loginKey == "" {
+		return key, fmt.Errorf("login key is empty")
+	}
+	derived, err := hkdf.Key(sha256.New, []byte(loginKey), nil, "mosaic-shard-key", 32)
+	if err != nil {
+		return key, fmt.Errorf("key derivation failed: %w", err)
+	}
+	copy(key[:], derived)
+	return key, nil
+}
+
+// encryptChunk encrypts plaintext with AES-256-GCM using the shared network key.
+// Output: [12-byte nonce] || [GCM ciphertext+tag].
+func encryptChunk(key [32]byte, plaintext []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, err
+	}
+	return gcm.Seal(nonce, nonce, plaintext, nil), nil
+}
+
+// decryptChunk decrypts data produced by encryptChunk.
+func decryptChunk(key [32]byte, data []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) < gcm.NonceSize() {
+		return nil, fmt.Errorf("ciphertext too short")
+	}
+	nonce, ct := data[:gcm.NonceSize()], data[gcm.NonceSize():]
+	return gcm.Open(nil, nonce, ct, nil)
+}
+
 // Init starts the send rate-limiter goroutine (20 K tokens/sec).
 // Safe to call multiple times; only the first call takes effect.
 func Init(ctx context.Context) {
@@ -109,6 +169,12 @@ func UploadFile(path string, client *p2p.Client) {
 	}
 	fileHash := hex.EncodeToString(hasher.Sum(nil))
 	fileSize := int(fileSize64)
+
+	netKey, err := shardEncryptionKey()
+	if err != nil {
+		fmt.Printf("[Transfer] Cannot load network key: %v\n", err)
+		return
+	}
 
 	fmt.Printf("[Transfer] Uploading %s  hash=%s…  size=%d bytes\n", filename, fileHash[:12], fileSize)
 
@@ -198,8 +264,15 @@ func UploadFile(path string, client *p2p.Client) {
 			for {
 				n, err := io.ReadFull(sf, buf)
 				if n > 0 {
-					chunk := make([]byte, n)
-					copy(chunk, buf[:n])
+					plain := make([]byte, n)
+					copy(plain, buf[:n])
+					encrypted, eerr := encryptChunk(netKey, plain)
+					if eerr != nil {
+						sendErrMu.Lock()
+						sendErr = fmt.Errorf("encrypt failed shard %d chunk %d: %w", shardIdx, chunkIndex, eerr)
+						sendErrMu.Unlock()
+						return
+					}
 					msg := api.NewShardChunkMessage(sign, api.ShardChunkData{
 						FileHash:        fileHash,
 						FileName:        filename, // full name with extension
@@ -209,7 +282,7 @@ func UploadFile(path string, client *p2p.Client) {
 						TotalChunks:     totalChunks,
 						TotalDataShards: DataShards,
 						TotalShards:     TotalShards,
-						Data:            chunk,
+						Data:            encrypted,
 					})
 					<-sendLimiter // token bucket rate cap
 					if werr := client.SendToAllPeers(msg); werr != nil {
@@ -269,8 +342,19 @@ func HandleShardChunk(msg *api.Message) {
 	}
 	assemblyMu.Unlock()
 
+	netKey, err := shardEncryptionKey()
+	if err != nil {
+		fmt.Printf("[Transfer] Cannot load network key: %v\n", err)
+		return
+	}
+	plain, err := decryptChunk(netKey, d.Data)
+	if err != nil {
+		fmt.Printf("[Transfer] Cannot decrypt shard %d chunk %d: %v\n", d.ShardIndex, d.ChunkIndex, err)
+		return
+	}
+
 	asm.mu.Lock()
-	asm.chunks[d.ChunkIndex] = d.Data
+	asm.chunks[d.ChunkIndex] = plain
 	received := len(asm.chunks)
 	total := asm.totalChunks
 	asm.mu.Unlock()
