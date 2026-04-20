@@ -125,18 +125,21 @@ func (c *Client) sendToServer(msg *api.Message) error {
 func (c *Client) handleMessages() {
 	buffer := make([]byte, 65507)
 
-	for {
-		select {
-		case <-c.ctx.Done():
-			return
-		default:
+	// When the context is cancelled, nudge the blocked ReadFromUDP by setting a
+	// deadline of now. This avoids calling SetReadDeadline on every iteration
+	// (a syscall per packet that was limiting throughput to ~42K packets/sec).
+	go func() {
+		<-c.ctx.Done()
+		if c.serverConn != nil {
+			c.serverConn.SetReadDeadline(time.Now())
 		}
+	}()
 
-		c.serverConn.SetReadDeadline(time.Now().Add(1 * time.Second))
+	for {
 		n, fromAddr, err := c.serverConn.ReadFromUDP(buffer)
 		if err != nil {
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				continue
+			if c.ctx.Err() != nil {
+				return // context cancelled — expected shutdown
 			}
 			c.notifyError(fmt.Errorf("failed to read from connection: %w", err))
 			continue

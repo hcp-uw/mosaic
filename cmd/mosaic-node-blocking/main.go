@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -30,6 +31,7 @@ const (
 
 // shardAssembly buffers incoming chunks for one shard until all arrive.
 type shardAssembly struct {
+	mu              sync.Mutex // per-shard lock; avoids global lock contention
 	chunks          map[int][]byte
 	totalChunks     int
 	fileName        string
@@ -41,10 +43,40 @@ type shardAssembly struct {
 }
 
 var (
-	assemblyMu   sync.Mutex
-	assemblies   = make(map[string]*shardAssembly) // key: "fileHash:shardIndex"
+	assemblyMu    sync.Mutex
+	assemblies    = make(map[string]*shardAssembly) // key: "fileHash:shardIndex"
 	reconstructed sync.Map                          // fileHash → true; prevents duplicate reconstruction
+
+	// sendLimiter is a shared token-bucket across all shard goroutines.
+	// Tokens refill at ~20,000/sec — well below the receiver's ~42K/sec drain
+	// capacity, so the socket buffer never fills and packets are never dropped.
+	sendLimiter = make(chan struct{}, 200)
 )
+
+// startSendLimiter refills sendLimiter at 20,000 tokens/sec (200 every 10ms).
+// Must be called once before any uploadFile goroutines start.
+func startSendLimiter(ctx context.Context) {
+	for i := 0; i < 200; i++ {
+		sendLimiter <- struct{}{}
+	}
+	go func() {
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				for i := 0; i < 200; i++ {
+					select {
+					case sendLimiter <- struct{}{}:
+					default: // already full — skip
+					}
+				}
+			}
+		}
+	}()
+}
 
 func main() {
 	serverAddr := "127.0.0.1:3478"
@@ -97,6 +129,10 @@ func runClient(serverAddr string) {
 	fmt.Println("Commands:")
 	fmt.Println("  upload <filepath>   — encode into 10 shards and stream to peer")
 	fmt.Println("Press Ctrl+C to disconnect.")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	startSendLimiter(ctx)
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -201,9 +237,8 @@ func uploadFile(path string, client *p2p.Client) {
 	var wg sync.WaitGroup
 	var sendErr error
 	var sendErrMu sync.Mutex
-	// Send one shard at a time — concurrent sending causes tail chunks to
-	// overlap with the next shard's burst, overflowing the UDP receive buffer.
-	sem := make(chan struct{}, 1)
+	// Send all shards in parallel — per-shard receiver mutex prevents assembly contention.
+	sem := make(chan struct{}, 1) // sequential — one shard at a time eliminates burst overlap
 
 	for i := 0; i < totalShards; i++ {
 		wg.Add(1)
@@ -251,9 +286,7 @@ func uploadFile(path string, client *p2p.Client) {
 						TotalShards:     totalShards,
 						Data:            chunk,
 					})
-					// Throttle to ~1000 chunks/sec — gives the receiver time to drain
-					// its goroutine pool and write to the assembly map without dropping.
-					time.Sleep(time.Millisecond)
+					<-sendLimiter // token bucket — caps total send rate at ~60K packets/sec
 					if werr := client.SendToAllPeers(msg); werr != nil {
 						sendErrMu.Lock()
 						sendErr = fmt.Errorf("send failed shard %d chunk %d: %w", shardIdx, chunkIndex, werr)
@@ -295,6 +328,7 @@ func handleShardChunk(msg *api.Message) {
 
 	key := fmt.Sprintf("%s:%d", d.FileHash, d.ShardIndex)
 
+	// Brief global lock — just to get or create the assembly entry.
 	assemblyMu.Lock()
 	asm, ok := assemblies[key]
 	if !ok {
@@ -310,10 +344,14 @@ func handleShardChunk(msg *api.Message) {
 		}
 		assemblies[key] = asm
 	}
+	assemblyMu.Unlock()
+
+	// Per-shard lock — chunks for different shards don't block each other.
+	asm.mu.Lock()
 	asm.chunks[d.ChunkIndex] = d.Data
 	received := len(asm.chunks)
 	total := asm.totalChunks
-	assemblyMu.Unlock()
+	asm.mu.Unlock()
 
 	if received%100 == 0 || received == total {
 		fmt.Printf("[Recv] Shard %d: %d/%d chunks\n", d.ShardIndex, received, total)
