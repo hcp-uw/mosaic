@@ -30,6 +30,10 @@ func (c *Client) ConnectToStun() error {
 		return fmt.Errorf("failed to create UDP socket: %w", err)
 	}
 
+	// Increase receive buffer to 8MB to handle high-throughput shard transfers
+	// without dropping packets when multiple shards arrive concurrently.
+	conn.SetReadBuffer(8 * 1024 * 1024)
+
 	c.serverConn = conn
 	c.setState(StateConnecting)
 

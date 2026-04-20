@@ -123,7 +123,7 @@ func (c *Client) sendToServer(msg *api.Message) error {
 
 // handleMessages processes incoming messages and routes them between server and peer
 func (c *Client) handleMessages() {
-	buffer := make([]byte, 1024)
+	buffer := make([]byte, 65507)
 
 	for {
 		select {
@@ -142,13 +142,16 @@ func (c *Client) handleMessages() {
 			continue
 		}
 
+		// Copy bytes before dispatch — buffer is reused on the next ReadFromUDP
+		// and callbacks fire in separate goroutines, so without a copy they race.
+		msg := make([]byte, n)
+		copy(msg, buffer[:n])
+
 		// Route message based on sender address
 		if fromAddr.String() == c.serverAddr.String() {
-			// Message from server - process as server message
-			c.processServerMessage(buffer[:n])
+			c.processServerMessage(msg)
 		} else {
-			// Message from peer - route to peer message channel
-			c.processPeerMessage(buffer[:n])
+			c.processPeerMessage(msg)
 		}
 	}
 }
@@ -240,6 +243,9 @@ func (c *Client) processPeerMessage(data []byte) {
 
 		case api.ManifestSync:
 			// Route manifest sync messages to the application callback layer.
+			c.notifyMessageReceived(data)
+			return
+		case api.ShardPush, api.ShardRequest, api.ShardResponse, api.ShardChunk:
 			c.notifyMessageReceived(data)
 			return
 		}

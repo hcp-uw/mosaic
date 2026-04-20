@@ -33,6 +33,10 @@ const (
 	PeerPong        MessageType = "peer_pong"
 	PeerTextMessage MessageType = "peer_text_message"
 	ManifestSync    MessageType = "manifest_sync"
+	ShardPush       MessageType = "shard_push"
+	ShardRequest    MessageType = "shard_request"
+	ShardResponse   MessageType = "shard_response"
+	ShardChunk      MessageType = "shard_chunk"
 )
 
 // Message represents the base message structure
@@ -436,6 +440,133 @@ func (m *Message) GetManifestSyncData() (*ManifestSyncData, error) {
 	var data ManifestSyncData
 	err = json.Unmarshal(dataBytes, &data)
 	return &data, err
+}
+
+// ShardPushData carries a single Reed-Solomon shard from an uploading peer.
+type ShardPushData struct {
+	FileHash        string `json:"fileHash"`        // hex SHA-256 of original file
+	FileName        string `json:"fileName"`        // base name without extension
+	FileSize        int    `json:"fileSize"`        // original file size in bytes (needed by DecodeShards)
+	ShardIndex      int    `json:"shardIndex"`      // 0-based index of this shard
+	TotalDataShards int    `json:"totalDataShards"` // minimum shards needed to reconstruct
+	TotalShards     int    `json:"totalShards"`     // data + parity
+	Data            []byte `json:"data"`            // raw shard bytes
+}
+
+// ShardRequestData asks a peer to send a specific shard.
+type ShardRequestData struct {
+	FileHash   string `json:"fileHash"`
+	ShardIndex int    `json:"shardIndex"`
+}
+
+// ShardResponseData is the reply to a ShardRequest.
+type ShardResponseData struct {
+	FileHash   string `json:"fileHash"`
+	ShardIndex int    `json:"shardIndex"`
+	Found      bool   `json:"found"`
+	Data       []byte `json:"data,omitempty"`
+}
+
+func NewShardPushMessage(sign Signature, d ShardPushData) *Message {
+	return &Message{
+		Sign:      sign,
+		Type:      ShardPush,
+		Timestamp: time.Now(),
+		Data:      d,
+	}
+}
+
+func NewShardRequestMessage(sign Signature, d ShardRequestData) *Message {
+	return &Message{
+		Sign:      sign,
+		Type:      ShardRequest,
+		Timestamp: time.Now(),
+		Data:      d,
+	}
+}
+
+func NewShardResponseMessage(sign Signature, d ShardResponseData) *Message {
+	return &Message{
+		Sign:      sign,
+		Type:      ShardResponse,
+		Timestamp: time.Now(),
+		Data:      d,
+	}
+}
+
+func (m *Message) GetShardPushData() (*ShardPushData, error) {
+	if m.Type != ShardPush {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d ShardPushData
+	err = json.Unmarshal(b, &d)
+	return &d, err
+}
+
+func (m *Message) GetShardRequestData() (*ShardRequestData, error) {
+	if m.Type != ShardRequest {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d ShardRequestData
+	err = json.Unmarshal(b, &d)
+	return &d, err
+}
+
+func (m *Message) GetShardResponseData() (*ShardResponseData, error) {
+	if m.Type != ShardResponse {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d ShardResponseData
+	err = json.Unmarshal(b, &d)
+	return &d, err
+}
+
+// ShardChunkData carries one 32KB slice of a Reed-Solomon shard for large-file transfer.
+// Shards are split into chunks because a full shard (e.g. 100MB) far exceeds the UDP max.
+type ShardChunkData struct {
+	FileHash        string `json:"fileHash"`
+	FileName        string `json:"fileName"`        // base name, no extension
+	FileSize        int    `json:"fileSize"`        // original file size in bytes
+	ShardIndex      int    `json:"shardIndex"`      // 0-based shard number
+	ChunkIndex      int    `json:"chunkIndex"`      // 0-based chunk within this shard
+	TotalChunks     int    `json:"totalChunks"`     // total chunks for this shard
+	TotalDataShards int    `json:"totalDataShards"` // data shards needed to reconstruct
+	TotalShards     int    `json:"totalShards"`     // data + parity
+	Data            []byte `json:"data"`            // ≤32KB raw bytes
+}
+
+func NewShardChunkMessage(sign Signature, d ShardChunkData) *Message {
+	return &Message{
+		Sign:      sign,
+		Type:      ShardChunk,
+		Timestamp: time.Now(),
+		Data:      d,
+	}
+}
+
+func (m *Message) GetShardChunkData() (*ShardChunkData, error) {
+	if m.Type != ShardChunk {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d ShardChunkData
+	err = json.Unmarshal(b, &d)
+	return &d, err
 }
 
 // Error types

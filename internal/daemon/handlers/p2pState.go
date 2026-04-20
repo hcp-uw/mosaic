@@ -42,13 +42,8 @@ func BroadcastNetworkManifest(m filesystem.NetworkManifest) {
 	}
 
 	msg := api.NewManifestSyncMessage(data)
-	msgBytes, err := msg.Serialize()
-	if err != nil {
-		fmt.Println("BroadcastNetworkManifest: could not serialize message:", err)
-		return
-	}
 
-	if err := c.SendToAllPeers(msgBytes); err != nil {
+	if err := c.SendToAllPeers(msg); err != nil {
 		fmt.Println("BroadcastNetworkManifest: send error:", err)
 	}
 }
