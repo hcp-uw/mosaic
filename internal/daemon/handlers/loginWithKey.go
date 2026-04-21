@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"math/big"
-	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -53,7 +52,7 @@ func getServerPublicKey() (*ecdsa.PublicKey, error) {
 	}
 	cachedServerPubKeyMu.RUnlock()
 
-	resp, err := http.Get(authServerURL() + "/auth/pubkey/server")
+	resp, err := authHTTPClient.Get(authServerURL() + "/auth/pubkey/server")
 	if err != nil {
 		return nil, fmt.Errorf("could not reach auth server: %w", err)
 	}
@@ -246,7 +245,7 @@ func callAuthLogin(username, loginKey, pubKeyHex string, nodeNumber int) (string
 		NodeNumber: nodeNumber,
 	})
 
-	resp, err := http.Post(authServerURL()+"/auth/login", "application/json", bytes.NewReader(body))
+	resp, err := authHTTPClient.Post(authServerURL()+"/auth/login", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("could not reach auth server: %w", err)
 	}

@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/hcp-uw/mosaic/internal/cli/protocol"
 )
+
+var authHTTPClient = &http.Client{Timeout: 8 * time.Second}
 
 type registerRequest struct {
 	Username string `json:"username"`
@@ -40,7 +43,7 @@ func CreateAccount(req protocol.CreateAccountRequest) protocol.CreateAccountResp
 		LoginKey: req.LoginKey,
 	})
 
-	resp, err := http.Post(authServerURL()+"/auth/register", "application/json", bytes.NewReader(body))
+	resp, err := authHTTPClient.Post(authServerURL()+"/auth/register", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return protocol.CreateAccountResponse{
 			Success: false,

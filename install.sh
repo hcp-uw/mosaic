@@ -235,15 +235,23 @@ stop_daemon() {
 build_binaries() {
     echo "Building binaries for $OS..."
     mkdir -p bin
-    
+
+    # When running as root (sudo), Go may not be in PATH.
+    # Run the build as the real user so their PATH and Go installation are used.
+    local build_cmd
     if [ "$OS" = "Windows" ]; then
-        GOOS=windows GOARCH=amd64 go build -o "bin/${CLI_BIN}" ./cmd/mosaic-cli
-        GOOS=windows GOARCH=amd64 go build -o "bin/${DAEMON_BIN}" ./cmd/mosaic-node
+        build_cmd="GOOS=windows GOARCH=amd64 go build -o bin/${CLI_BIN} ./cmd/mosaic-cli && GOOS=windows GOARCH=amd64 go build -o bin/${DAEMON_BIN} ./cmd/mosaic-node"
     else
-        go build -o "bin/${CLI_BIN}" ./cmd/mosaic-cli
-        go build -o "bin/${DAEMON_BIN}" ./cmd/mosaic-node
+        build_cmd="go build -o bin/${CLI_BIN} ./cmd/mosaic-cli && go build -o bin/${DAEMON_BIN} ./cmd/mosaic-node"
     fi
-    
+
+    if [ -n "$SUDO_USER" ]; then
+        chown "$SUDO_USER" bin
+        su "$SUDO_USER" -c "cd $(pwd) && $build_cmd"
+    else
+        eval "$build_cmd"
+    fi
+
     echo -e "${GREEN}✓ Build complete!${NC}"
 }
 
@@ -295,18 +303,28 @@ start_daemon() {
         return 0
     fi
     
-    # Ensure clean state
-    rm -f "${PID_FILE}" "${SOCK_FILE}"
-    
-    # Start the daemon
+    # Ensure clean state — remove files that may be owned by root from a previous sudo run.
+    rm -f "${PID_FILE}" "${SOCK_FILE}" "${LOG_FILE}"
+
+    # Start the daemon as the real user (not root), even if install.sh was run with sudo.
     if [ "$OS" = "Windows" ]; then
         # Windows background process
         nohup "${BIN_DIR}/${DAEMON_BIN}" > "${LOG_FILE}" 2>&1 &
         echo $! > "${PID_FILE}"
     else
-        "${BIN_DIR}/${DAEMON_BIN}" > "${LOG_FILE}" 2>&1 &
-        local daemon_pid=$!
-        echo $daemon_pid > "${PID_FILE}"
+        if [ -n "$SUDO_USER" ]; then
+            # install.sh was run with sudo — drop back to the real user for the daemon.
+            # Touch the log file as root first so su can write to it, then hand ownership over.
+            touch "${LOG_FILE}"
+            chown "$SUDO_USER" "${LOG_FILE}"
+            local daemon_pid
+            daemon_pid=$(su "$SUDO_USER" -c "${BIN_DIR}/${DAEMON_BIN} >> ${LOG_FILE} 2>&1 & echo \$!")
+            echo "$daemon_pid" > "${PID_FILE}"
+        else
+            "${BIN_DIR}/${DAEMON_BIN}" > "${LOG_FILE}" 2>&1 &
+            local daemon_pid=$!
+            echo $daemon_pid > "${PID_FILE}"
+        fi
     fi
     
     # Wait and verify it started
@@ -389,8 +407,13 @@ show_debug_info() {
 
 # Check if the user is already logged in by reading the session file
 is_logged_in() {
-    local session_file="${HOME}/.mosaic-session"
-    [ -f "$session_file" ]
+    local real_home
+    if [ -n "$SUDO_USER" ]; then
+        real_home=$(eval echo "~$SUDO_USER")
+    else
+        real_home="$HOME"
+    fi
+    [ -f "${real_home}/.mosaic-session" ]
 }
 
 # Print success message
