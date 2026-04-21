@@ -16,21 +16,23 @@ func main() {
 		port = "8081"
 	}
 
-	// Place all server files next to the binary so everything stays in AuthServer/.
-	binDir, err := binaryDir()
-	if err != nil {
-		log.Fatalf("could not determine binary location: %v", err)
+	// dataDir: use AUTH_DATA env var, otherwise the AuthServer/ folder relative
+	// to the working directory. This works for both `go run ./AuthServer/` (run
+	// from repo root) and the compiled binary placed inside AuthServer/.
+	dataDir := os.Getenv("AUTH_DATA")
+	if dataDir == "" {
+		dataDir = "AuthServer"
 	}
 
 	dbPath := os.Getenv("AUTH_DB")
 	if dbPath == "" {
-		dbPath = filepath.Join(binDir, "mosaic-auth.db")
+		dbPath = filepath.Join(dataDir, "mosaic-auth.db")
 	}
 
-	secretPath := filepath.Join(binDir, ".mosaic-auth-secret")
+	signingKeyPath := filepath.Join(dataDir, ".mosaic-auth-signing.pem")
 
-	if err := loadOrCreateSecret(secretPath); err != nil {
-		log.Fatalf("could not load server secret: %v", err)
+	if err := loadOrCreateSigningKey(signingKeyPath); err != nil {
+		log.Fatalf("could not load server signing key: %v", err)
 	}
 
 	if err := loadDB(dbPath); err != nil {
@@ -45,6 +47,8 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /auth/register", rateLimit("register", handleRegister))
 	mux.HandleFunc("POST /auth/login", rateLimit("login", handleLogin))
+	mux.HandleFunc("POST /auth/verify", rateLimit("verify", handleVerify))
+	mux.HandleFunc("GET /auth/pubkey/server", handleServerPubKey)
 	mux.HandleFunc("GET /auth/pubkey/{userID}", rateLimit("pubkey", handlePubKey))
 
 	server := &http.Server{Addr: ":" + port, Handler: mux}
@@ -66,15 +70,3 @@ func main() {
 	}
 }
 
-// binaryDir returns the directory containing the running executable.
-func binaryDir() (string, error) {
-	exe, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	resolved, err := filepath.EvalSymlinks(exe)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Dir(resolved), nil
-}

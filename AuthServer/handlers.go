@@ -118,11 +118,16 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	// Resolve the node for this session.
 	var node *Node
 	if req.NodeNumber != 0 {
-		// Re-login on a known device — verify the node belongs to this account.
+		// Re-login on a known device — reuse the node if it still exists,
+		// otherwise create a fresh one (handles DB resets gracefully).
 		node = lookupNode(acc.AccountID, req.NodeNumber)
 		if node == nil {
-			jsonError(w, "node not found for this account", http.StatusNotFound)
-			return
+			var err error
+			node, err = createNode(acc.AccountID)
+			if err != nil {
+				jsonError(w, fmt.Sprintf("could not create node: %v", err), http.StatusInternalServerError)
+				return
+			}
 		}
 	} else {
 		// First login on this device — create a new node.
@@ -149,6 +154,61 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		NodeNumber: node.NodeNumber,
 		Details:    fmt.Sprintf("logged in on node-%d", node.NodeNumber),
 	})
+}
+
+// ── Token Verification ────────────────────────────────────────────────────────
+
+type verifyRequest struct {
+	Token string `json:"token"`
+}
+
+type verifyResponse struct {
+	Success    bool   `json:"success"`
+	AccountID  int    `json:"accountID,omitempty"`
+	Username   string `json:"username,omitempty"`
+	NodeNumber int    `json:"nodeNumber,omitempty"`
+	Details    string `json:"details"`
+}
+
+// POST /auth/verify
+// Called by the STUN server to authenticate connecting clients.
+func handleVerify(w http.ResponseWriter, r *http.Request) {
+	var req verifyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "could not parse request body", http.StatusBadRequest)
+		return
+	}
+	claims, err := VerifyToken(req.Token)
+	if err != nil {
+		jsonError(w, fmt.Sprintf("invalid token: %v", err), http.StatusUnauthorized)
+		return
+	}
+	jsonOK(w, verifyResponse{
+		Success:    true,
+		AccountID:  claims.AccountID,
+		Username:   claims.Username,
+		NodeNumber: claims.NodeNumber,
+		Details:    "ok",
+	})
+}
+
+// ── Server Public Key ────────────────────────────────────────────────────────
+
+type serverPubKeyResponse struct {
+	Success   bool   `json:"success"`
+	PublicKey string `json:"publicKey"` // PEM-encoded ECDSA P-256 public key
+	Details   string `json:"details"`
+}
+
+// GET /auth/pubkey/server
+// Returns the server's ECDSA public key so daemons can verify JWTs locally.
+func handleServerPubKey(w http.ResponseWriter, r *http.Request) {
+	pem, err := ServerPublicKeyPEM()
+	if err != nil {
+		jsonError(w, "could not serialize server public key", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, serverPubKeyResponse{Success: true, PublicKey: pem, Details: "ok"})
 }
 
 // ── Public Key Lookup ─────────────────────────────────────────────────────────

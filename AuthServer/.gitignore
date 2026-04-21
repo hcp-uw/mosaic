@@ -1,4 +1,5 @@
 mosaic-auth
 mosaic-auth.db
-.mosaic-auth-secret
+.mosaic-auth-signing.pem
 auth.log
+auth.pid

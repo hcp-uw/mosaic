@@ -1,10 +1,13 @@
 package stun
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"sync"
 	"time"
 
@@ -22,15 +25,35 @@ type ClientInfo struct {
 	Leader bool
 }
 
+// verifyToken calls the auth server's /auth/verify endpoint.
+// Returns nil if the token is valid, an error otherwise.
+// If authServerURL is empty, verification is skipped (dev mode).
+func verifyToken(authServerURL, token string) error {
+	if authServerURL == "" {
+		return nil
+	}
+	body, _ := json.Marshal(map[string]string{"token": token})
+	resp, err := http.Post(authServerURL+"/auth/verify", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("could not reach auth server: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("token rejected by auth server (status %d)", resp.StatusCode)
+	}
+	return nil
+}
+
 // Server represents a STUN server
 type Server struct {
-	conn         *net.UDPConn
-	clients      map[string]*ClientInfo
-	waitingQueue []*ClientInfo
-	mutex        sync.RWMutex
-	ctx          context.Context
-	cancel       context.CancelFunc
-	done         chan bool
+	conn          *net.UDPConn
+	authServerURL string
+	clients       map[string]*ClientInfo
+	waitingQueue  []*ClientInfo
+	mutex         sync.RWMutex
+	ctx           context.Context
+	cancel        context.CancelFunc
+	done          chan bool
 
 	currentLeaderID          string
 	currentTerm              uint
@@ -41,6 +64,7 @@ type Server struct {
 // ServerConfig holds server configuration
 type ServerConfig struct {
 	ListenAddress string
+	AuthServerURL string        // e.g. "http://localhost:8081" — empty disables auth
 	ClientTimeout time.Duration
 	PingInterval  time.Duration
 	MaxQueueSize  int
@@ -66,11 +90,12 @@ func NewServer(config *ServerConfig) *Server {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Server{
-		clients:      make(map[string]*ClientInfo),
-		waitingQueue: make([]*ClientInfo, 0),
-		ctx:          ctx,
-		cancel:       cancel,
-		done:         make(chan bool),
+		authServerURL: config.AuthServerURL,
+		clients:       make(map[string]*ClientInfo),
+		waitingQueue:  make([]*ClientInfo, 0),
+		ctx:           ctx,
+		cancel:        cancel,
+		done:          make(chan bool),
 
 		currentLeaderID:          "",
 		currentTerm:              0,
@@ -185,12 +210,20 @@ func (s *Server) processMessage(data []byte, clientAddr *net.UDPAddr, enableLogg
 
 // handleClientRegister handles client registration
 func (s *Server) handleClientRegister(msg *api.Message, clientAddr *net.UDPAddr, enableLogging bool) {
-	_, err := msg.GetClientRegisterData()
+	data, err := msg.GetClientRegisterData()
 	if err != nil {
 		if enableLogging {
 			log.Printf("Failed to parse client register data: %v", err)
 		}
 		s.sendErrorMessage(clientAddr, "Invalid register data", "INVALID_DATA")
+		return
+	}
+
+	if err := verifyToken(s.authServerURL, data.Token); err != nil {
+		if enableLogging {
+			log.Printf("Rejected unauthenticated client %s: %v", clientAddr, err)
+		}
+		s.sendErrorMessage(clientAddr, "Authentication required", "AUTH_REQUIRED")
 		return
 	}
 

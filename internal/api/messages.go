@@ -56,9 +56,9 @@ func NewSignature(pubKey string) Signature {
 	return Signature{PubKey: pubKey}
 }
 
-// ClientRegisterData represents client registration information (no data needed)
+// ClientRegisterData represents client registration information.
 type ClientRegisterData struct {
-	// No fields needed - client ID is derived from network address
+	Token string `json:"token"` // JWT from auth server; verified by STUN before pairing
 }
 
 type RegisterSuccessData struct {
@@ -160,12 +160,12 @@ func NewServerAssignedLeaderMessage() *Message {
 	}
 }
 
-// NewClientRegisterMessage creates a client registration message
-func NewClientRegisterMessage() *Message {
+// NewClientRegisterMessage creates a client registration message with the auth token.
+func NewClientRegisterMessage(token string) *Message {
 	return &Message{
 		Type:      ClientRegister,
 		Timestamp: time.Now(),
-		Data:      ClientRegisterData{},
+		Data:      ClientRegisterData{Token: token},
 	}
 }
 
@@ -263,9 +263,15 @@ func (m *Message) GetClientRegisterData() (*ClientRegisterData, error) {
 	if m.Type != ClientRegister && m.Type != ClientPing {
 		return nil, ErrInvalidMessageType
 	}
-
-	// No data validation needed since ClientRegisterData is empty
-	return &ClientRegisterData{}, nil
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d ClientRegisterData
+	if err := json.Unmarshal(b, &d); err != nil {
+		return nil, err
+	}
+	return &d, nil
 }
 
 func (m *Message) GetCurrentMembersData() (*CurrentMembersData, error) {

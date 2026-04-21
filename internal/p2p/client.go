@@ -13,6 +13,7 @@ import (
 // Client represents a STUN client
 type Client struct {
 	id               string
+	token            string // JWT sent during registration for STUN auth
 	serverAddr       *net.UDPAddr
 	serverConn       *net.UDPConn
 	state            ClientState
@@ -29,6 +30,7 @@ type Client struct {
 // ClientConfig holds client configuration
 type ClientConfig struct {
 	ServerAddress  string
+	Token          string // JWT for STUN authentication
 	PingInterval   time.Duration
 	ConnectTimeout time.Duration
 }
@@ -56,6 +58,7 @@ func NewClient(config *ClientConfig) (*Client, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Client{
+		token:            config.Token,
 		serverAddr:       serverAddr,
 		state:            StateDisconnected,
 		peers:            make(map[string]*PeerInfo),
@@ -100,9 +103,9 @@ func (c *Client) GetPeerById(id string) *PeerInfo {
 	return c.peers[id]
 }
 
-// register sends registration message to server
+// register sends registration message to server with the auth token.
 func (c *Client) register() error {
-	msg := api.NewClientRegisterMessage()
+	msg := api.NewClientRegisterMessage(c.token)
 	return c.sendToServer(msg)
 }
 
@@ -175,6 +178,13 @@ func (c *Client) processPeerMessage(data []byte) {
 	// Filter out STUN punch packets
 	if string(data) == "STUN_PUNCH" {
 		return // Ignore punch packets
+	}
+
+	// Binary shard frames start with 0x01. JSON always starts with '{' (0x7B).
+	// Route binary frames directly to the application layer without any parsing.
+	if len(data) > 0 && data[0] == 0x01 {
+		c.notifyMessageReceived(data)
+		return
 	}
 
 	// Try to parse as a structured message first.

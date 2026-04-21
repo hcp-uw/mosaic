@@ -1,13 +1,16 @@
 package main
 
 import (
-	"crypto/hmac"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"os"
 	"strings"
 	"time"
@@ -15,49 +18,73 @@ import (
 
 const tokenTTL = 30 * 24 * time.Hour // 30 days
 
-// serverSecret is loaded once at startup and used to sign all tokens.
-var serverSecret []byte
+// serverSigningKey is the ECDSA P-256 private key used to sign all JWTs.
+// Loaded once at startup from disk (or generated fresh on first run).
+var serverSigningKey *ecdsa.PrivateKey
 
-// loadOrCreateSecret loads the HMAC signing secret from path, or generates
-// and saves a new 32-byte random secret if none exists.
-func loadOrCreateSecret(path string) error {
+// loadOrCreateSigningKey loads the ECDSA P-256 signing key from path,
+// or generates a new one and saves it if none exists.
+func loadOrCreateSigningKey(path string) error {
 	data, err := os.ReadFile(path)
 	if err == nil {
-		serverSecret, err = hex.DecodeString(strings.TrimSpace(string(data)))
-		if err != nil {
-			return fmt.Errorf("could not decode server secret: %w", err)
+		block, _ := pem.Decode(data)
+		if block == nil {
+			return fmt.Errorf("signing key file contains no PEM block")
 		}
+		key, err := x509.ParseECPrivateKey(block.Bytes)
+		if err != nil {
+			return fmt.Errorf("could not parse signing key: %w", err)
+		}
+		serverSigningKey = key
 		return nil
 	}
 	if !os.IsNotExist(err) {
-		return fmt.Errorf("could not read server secret: %w", err)
+		return fmt.Errorf("could not read signing key: %w", err)
 	}
 
-	secret := make([]byte, 32)
-	if _, err := rand.Read(secret); err != nil {
-		return fmt.Errorf("could not generate server secret: %w", err)
+	// Generate a new P-256 keypair.
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return fmt.Errorf("could not generate signing key: %w", err)
 	}
-	if err := os.WriteFile(path, []byte(hex.EncodeToString(secret)), 0600); err != nil {
-		return fmt.Errorf("could not save server secret: %w", err)
+
+	der, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return fmt.Errorf("could not marshal signing key: %w", err)
 	}
-	serverSecret = secret
+	pemData := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
+	if err := os.WriteFile(path, pemData, 0600); err != nil {
+		return fmt.Errorf("could not save signing key: %w", err)
+	}
+
+	serverSigningKey = key
 	return nil
 }
 
-// jwtHeader is the fixed base64url-encoded JWT header for HS256.
-var jwtHeader = base64url([]byte(`{"alg":"HS256","typ":"JWT"}`))
+// ServerPublicKeyPEM returns the server's ECDSA public key as a PEM string.
+// Exposed at GET /auth/pubkey/server so daemons can verify tokens locally.
+func ServerPublicKeyPEM() (string, error) {
+	der, err := x509.MarshalPKIXPublicKey(&serverSigningKey.PublicKey)
+	if err != nil {
+		return "", fmt.Errorf("could not marshal server public key: %w", err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})), nil
+}
+
+// jwtHeader is the fixed base64url-encoded JWT header for ES256.
+var jwtHeader = base64url([]byte(`{"alg":"ES256","typ":"JWT"}`))
 
 // TokenClaims are the payload fields embedded in the JWT.
 type TokenClaims struct {
 	AccountID  int    `json:"accountID"`
 	Username   string `json:"username"`
 	NodeNumber int    `json:"nodeNumber"` // 1, 2, 3... per account
-	PublicKey  string `json:"publicKey"`  // hex PKIX DER
+	PublicKey  string `json:"publicKey"`  // hex PKIX DER of user's ECDSA key
 	IssuedAt   int64  `json:"iat"`
 	ExpiresAt  int64  `json:"exp"`
 }
 
-// IssueToken creates a signed HS256 JWT for the given account and node.
+// IssueToken creates a signed ES256 JWT for the given account and node.
 func IssueToken(acc *Account, node *Node) (string, error) {
 	now := time.Now()
 	claims := TokenClaims{
@@ -75,21 +102,42 @@ func IssueToken(acc *Account, node *Node) (string, error) {
 	}
 
 	unsigned := jwtHeader + "." + base64url(payload)
-	sig := hmacSHA256([]byte(unsigned))
+	sig, err := ecdsaSign([]byte(unsigned))
+	if err != nil {
+		return "", fmt.Errorf("could not sign token: %w", err)
+	}
 	return unsigned + "." + base64url(sig), nil
 }
 
-// VerifyToken parses and verifies a token issued by this server.
+// VerifyToken parses and verifies an ES256 JWT signed by this server.
 // Returns the claims if valid, error otherwise.
 func VerifyToken(token string) (*TokenClaims, error) {
+	return verifyTokenWithKey(token, &serverSigningKey.PublicKey)
+}
+
+// verifyTokenWithKey verifies a JWT against a given ECDSA public key.
+// Used both server-side (VerifyToken) and exported for daemon-side verification.
+func verifyTokenWithKey(token string, pub *ecdsa.PublicKey) (*TokenClaims, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return nil, fmt.Errorf("malformed token")
 	}
 
 	unsigned := parts[0] + "." + parts[1]
-	expectedSig := base64url(hmacSHA256([]byte(unsigned)))
-	if expectedSig != parts[2] {
+	sigBytes, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		return nil, fmt.Errorf("could not decode token signature: %w", err)
+	}
+	if len(sigBytes) != 64 {
+		return nil, fmt.Errorf("invalid ES256 signature length (%d)", len(sigBytes))
+	}
+
+	// ES256 signature is r||s, each 32 bytes (P1363 format).
+	r := new(big.Int).SetBytes(sigBytes[:32])
+	s := new(big.Int).SetBytes(sigBytes[32:])
+
+	hash := sha256.Sum256([]byte(unsigned))
+	if !ecdsa.Verify(pub, hash[:], r, s) {
 		return nil, fmt.Errorf("invalid token signature")
 	}
 
@@ -110,10 +158,18 @@ func VerifyToken(token string) (*TokenClaims, error) {
 	return &claims, nil
 }
 
-func hmacSHA256(data []byte) []byte {
-	mac := hmac.New(sha256.New, serverSecret)
-	mac.Write(data)
-	return mac.Sum(nil)
+// ecdsaSign signs data with the server's ECDSA key.
+// Returns the signature in P1363 format: r||s, each zero-padded to 32 bytes.
+func ecdsaSign(data []byte) ([]byte, error) {
+	hash := sha256.Sum256(data)
+	r, s, err := ecdsa.Sign(rand.Reader, serverSigningKey, hash[:])
+	if err != nil {
+		return nil, err
+	}
+	sig := make([]byte, 64)
+	r.FillBytes(sig[:32])
+	s.FillBytes(sig[32:])
+	return sig, nil
 }
 
 func base64url(data []byte) string {

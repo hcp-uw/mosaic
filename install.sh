@@ -387,6 +387,12 @@ show_debug_info() {
     echo ""
 }
 
+# Check if the user is already logged in by reading the session file
+is_logged_in() {
+    local session_file="${HOME}/.mosaic-session"
+    [ -f "$session_file" ]
+}
+
 # Print success message
 print_success() {
     echo ""
@@ -397,12 +403,30 @@ print_success() {
     echo "Platform: $OS"
     echo "Installed to: ${BIN_DIR}"
     echo ""
-    echo "Usage:"
-    echo "  mos help            - View all mosaic commands"
+
+    if is_logged_in; then
+        echo -e "${GREEN}✓ Logged in${NC}"
+        echo ""
+        echo "Next steps:"
+        echo "  mos join <stun-server-ip>:3478   - Connect to the network"
+        echo "  mos upload file <path>            - Upload a file"
+        echo "  mos download file <name>          - Download a file"
+    else
+        echo -e "${YELLOW}⚠ You are not logged in.${NC}"
+        echo ""
+        echo "To get started:"
+        echo -e "  ${GREEN}mos create account <username> <key>${NC}   - Create an account (first time only)"
+        echo -e "  ${GREEN}mos login account <username> <key>${NC}    - Log in"
+        echo ""
+        echo "Then connect to the network:"
+        echo "  mos join <stun-server-ip>:3478"
+    fi
+
+    echo ""
+    echo "  mos help            - View all commands"
     echo "  mos shutdown        - Stop daemon and cleanup"
     echo "  ./install.sh --stop - Stop daemon and menu bar app"
     echo ""
-
     echo "Logs: ${LOG_FILE}"
     echo ""
 }

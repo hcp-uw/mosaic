@@ -20,6 +20,7 @@ type Session struct {
 	NodeNumber int    `json:"nodeNumber"` // 1, 2, 3... shown as "node-1" etc.
 	PublicKey  string `json:"publicKey"`
 	ExpiresAt  string `json:"expiresAt"` // RFC3339
+	Token      string `json:"token"`     // raw JWT for STUN authentication
 }
 
 func sessionPath() string {
@@ -82,6 +83,15 @@ func LoadSession() (Session, error) {
 	}
 
 	return s, nil
+}
+
+// GetToken returns the raw JWT stored in the session, or "" if not logged in.
+func GetToken() string {
+	s, err := LoadSession()
+	if err != nil {
+		return ""
+	}
+	return s.Token
 }
 
 // ClearSession removes the session file (called on logout).

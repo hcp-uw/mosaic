@@ -65,7 +65,7 @@ func TestClientRegistrationAssignsLeader(t *testing.T) {
 	}
 	defer clientConn.Close()
 
-	registerMsg := api.NewClientRegisterMessage()
+	registerMsg := api.NewClientRegisterMessage("")
 	data, err := registerMsg.Serialize()
 	if err != nil {
 		t.Fatalf("Failed to serialize message: %v", err)
@@ -111,7 +111,7 @@ func TestClientPairing(t *testing.T) {
 	}
 	defer client2Conn.Close()
 
-	registerMsg1 := api.NewClientRegisterMessage()
+	registerMsg1 := api.NewClientRegisterMessage("")
 	data1, _ := registerMsg1.Serialize()
 	if _, err := client1Conn.Write(data1); err != nil {
 		t.Fatalf("Failed to send registration for client 1: %v", err)
@@ -124,7 +124,7 @@ func TestClientPairing(t *testing.T) {
 		t.Fatalf("Expected leader assignment for client 1, got: %v", msg.Type)
 	}
 
-	registerMsg2 := api.NewClientRegisterMessage()
+	registerMsg2 := api.NewClientRegisterMessage("")
 	data2, _ := registerMsg2.Serialize()
 	if _, err := client2Conn.Write(data2); err != nil {
 		t.Fatalf("Failed to send registration for client 2: %v", err)
@@ -182,7 +182,7 @@ func TestClientPing(t *testing.T) {
 	}
 	defer clientConn.Close()
 
-	registerMsg := api.NewClientRegisterMessage()
+	registerMsg := api.NewClientRegisterMessage("")
 	data, _ := registerMsg.Serialize()
 	clientConn.Write(data)
 
@@ -225,7 +225,7 @@ func TestClientTimeout(t *testing.T) {
 	}
 	defer clientConn.Close()
 
-	registerMsg := api.NewClientRegisterMessage()
+	registerMsg := api.NewClientRegisterMessage("")
 	data, _ := registerMsg.Serialize()
 	clientConn.Write(data)
 
@@ -333,7 +333,7 @@ func TestMessageCreation(t *testing.T) {
 func TestMessageSerialization(t *testing.T) {
 	sign := api.NewSignature("test-sender")
 	messages := []*api.Message{
-		api.NewClientRegisterMessage(),
+		api.NewClientRegisterMessage(""),
 		api.NewClientPingMessage(sign),
 		api.NewWaitingForPeerMessage(),
 		api.NewServerErrorMessage("test", "ERR"),

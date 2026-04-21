@@ -29,6 +29,7 @@ func runClient(serverAddr string) {
 	mosaicDir := filepath.Join(os.Getenv("HOME"), "Mosaic")
 
 	config := p2p.DefaultClientConfig(serverAddr)
+	config.Token = helpers.GetToken()
 	client, err := p2p.NewClient(config)
 	if err != nil {
 		log.Printf("Failed to create P2P client: %v", err)
@@ -60,6 +61,11 @@ func runClient(serverAddr string) {
 	})
 
 	client.OnMessageReceived(func(data []byte) {
+		// Binary shard frame — skip JSON parsing entirely.
+		if len(data) > 0 && data[0] == 0x01 {
+			go transfer.HandleBinaryShardChunk(data)
+			return
+		}
 		msg, err := api.DeserializeMessage(data)
 		if err != nil {
 			return
@@ -67,8 +73,6 @@ func runClient(serverAddr string) {
 		switch msg.Type {
 		case api.ManifestSync:
 			go handleManifestSync(mosaicDir, msg)
-		case api.ShardChunk:
-			go transfer.HandleShardChunk(msg)
 		case api.ShardRequest:
 			go transfer.HandleShardRequest(msg, client)
 		}

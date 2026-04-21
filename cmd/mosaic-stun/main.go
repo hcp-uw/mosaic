@@ -13,13 +13,16 @@ import (
 
 func main() {
 	port := flag.String("port", "3478", "Port to listen on (server mode)")
+	authURL := flag.String("auth", "http://localhost:8081", "Auth server URL (empty to disable auth)")
+	flag.Parse()
 
-	runServer(*port)
+	runServer(*port, *authURL)
 }
 
-func runServer(port string) {
+func runServer(port, authURL string) {
 	config := &stun.ServerConfig{
 		ListenAddress: ":" + port,
+		AuthServerURL: authURL,
 		ClientTimeout: 30 * 1000000000, // 30 seconds in nanoseconds
 		PingInterval:  10 * 1000000000, // 10 seconds in nanoseconds
 		MaxQueueSize:  100,
