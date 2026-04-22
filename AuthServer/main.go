@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -51,7 +53,13 @@ func main() {
 	mux.HandleFunc("GET /auth/pubkey/server", handleServerPubKey)
 	mux.HandleFunc("GET /auth/pubkey/{userID}", rateLimit("pubkey", handlePubKey))
 
-	server := &http.Server{Addr: ":" + port, Handler: mux}
+	// Force IPv4 listener so external clients on the hotspot can connect.
+	ln, err := net.Listen("tcp4", "0.0.0.0:"+port)
+	if err != nil {
+		log.Fatalf("could not listen on port %s: %v", port, err)
+	}
+
+	server := &http.Server{Handler: mux}
 
 	// Graceful shutdown on Ctrl+C / SIGTERM.
 	go func() {
@@ -59,13 +67,13 @@ func main() {
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 		<-sigChan
 		fmt.Println("\nShutting down auth server...")
-		server.Close()
+		server.Shutdown(context.Background())
 	}()
 
 	fmt.Printf("Mosaic auth server listening on port %s\n", port)
 	fmt.Printf("Database: %s\n", dbPath)
 
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := server.Serve(ln); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server error: %v", err)
 	}
 }
