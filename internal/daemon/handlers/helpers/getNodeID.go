@@ -1,11 +1,5 @@
 package helpers
 
-// GetNodeID returns the authenticated user's node number (1, 2, 3...) from
-// the local session. Returns 0 if the user is not logged in.
-func GetNodeID() int {
-	s, err := LoadSession()
-	if err != nil {
-		return 0
-	}
-	return s.NodeNumber
-}
+// GetNodeID returns 1. Without an auth server there is no multi-device node
+// numbering — each installation is simply node 1.
+func GetNodeID() int { return 1 }

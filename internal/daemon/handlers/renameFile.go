@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/hcp-uw/mosaic/internal/cli/protocol"
+	"github.com/hcp-uw/mosaic/internal/cli/shared"
 	"github.com/hcp-uw/mosaic/internal/daemon/handlers/helpers"
 	filesystem "github.com/hcp-uw/mosaic/internal/fileSystem"
 )
@@ -16,9 +17,8 @@ func RenameFile(req protocol.RenameFileRequest) protocol.RenameFileResponse {
 	newName := removePath(req.NewName)
 	fmt.Printf("Daemon: renaming %s → %s\n", oldName, newName)
 
-	mosaicDir := filepath.Join(os.Getenv("HOME"), "Mosaic")
+	mosaicDir := shared.MosaicDir()
 
-	// we check if ts file even exists in our manifest
 	if !filesystem.IsInManifest(mosaicDir, oldName) {
 		return protocol.RenameFileResponse{
 			Success: false,
@@ -26,7 +26,7 @@ func RenameFile(req protocol.RenameFileRequest) protocol.RenameFileResponse {
 		}
 	}
 
-	// Rename the real cached file if it exists
+	// Rename the real cached file if it exists.
 	oldReal := filepath.Join(mosaicDir, oldName)
 	newReal := filepath.Join(mosaicDir, newName)
 	if _, err := os.Stat(oldReal); err == nil {
@@ -38,7 +38,7 @@ func RenameFile(req protocol.RenameFileRequest) protocol.RenameFileResponse {
 		}
 	}
 
-	// Rename the stub if the file was remote only
+	// Rename the stub if the file was remote only.
 	oldStub := filepath.Join(mosaicDir, oldName+".mosaic")
 	newStub := filepath.Join(mosaicDir, newName+".mosaic")
 	if _, err := os.Stat(oldStub); err == nil {
@@ -56,8 +56,8 @@ func RenameFile(req protocol.RenameFileRequest) protocol.RenameFileResponse {
 	}
 
 	// Update the network manifest: decrypt own section, mutate, encrypt+sign, write, broadcast.
-	if aesKey, err := filesystem.LoadOrCreateNetworkKey(networkKeyPath()); err == nil {
-		if kp, kerr := filesystem.LoadOrCreateUserKey(userKeyPath()); kerr == nil {
+	if aesKey, err := filesystem.LoadOrCreateNetworkKey(shared.NetworkKeyPath()); err == nil {
+		if kp, kerr := filesystem.LoadOrCreateUserKey(shared.UserKeyPath()); kerr == nil {
 			if nm, err := filesystem.ReadAndDecryptNetworkManifest(mosaicDir, aesKey, helpers.GetAccountID(), kp.Private); err == nil {
 				nm = filesystem.RenameFileInNetwork(nm, helpers.GetAccountID(), oldName, newName)
 				if werr := filesystem.EncryptSignAndWriteNetworkManifest(mosaicDir, aesKey, nm, helpers.GetAccountID(), kp); werr != nil {
@@ -70,8 +70,6 @@ func RenameFile(req protocol.RenameFileRequest) protocol.RenameFileResponse {
 			fmt.Println("Warning: could not load user key:", kerr)
 		}
 	}
-
-	// TODO: this is where we do the actual network renaming in other nodes
 
 	return protocol.RenameFileResponse{
 		Success:     true,

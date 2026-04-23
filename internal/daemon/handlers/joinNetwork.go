@@ -4,11 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 
 	"github.com/hcp-uw/mosaic/internal/api"
 	"github.com/hcp-uw/mosaic/internal/cli/protocol"
+	"github.com/hcp-uw/mosaic/internal/cli/shared"
 	"github.com/hcp-uw/mosaic/internal/daemon/handlers/helpers"
 	filesystem "github.com/hcp-uw/mosaic/internal/fileSystem"
 	"github.com/hcp-uw/mosaic/internal/p2p"
@@ -30,10 +29,9 @@ func HandleJoin(req protocol.JoinRequest) protocol.JoinResponse {
 }
 
 func runClient(serverAddr string, errCh chan<- error) {
-	mosaicDir := filepath.Join(os.Getenv("HOME"), "Mosaic")
+	mosaicDir := shared.MosaicDir()
 
 	config := p2p.DefaultClientConfig(serverAddr)
-	config.Token = helpers.GetToken()
 	client, err := p2p.NewClient(config)
 	if err != nil {
 		log.Printf("Failed to create P2P client: %v", err)
@@ -92,12 +90,11 @@ func runClient(serverAddr string, errCh chan<- error) {
 	}
 	errCh <- nil
 	fmt.Println("[P2P] Connected. Waiting for peers.")
-	// runClient returns here; the P2P client goroutines keep running in background.
 }
 
 // pushManifestToPeer sends our local network manifest to a newly connected peer.
 func pushManifestToPeer(mosaicDir string, client *p2p.Client) {
-	aesKey, err := filesystem.LoadOrCreateNetworkKey(networkKeyPath())
+	aesKey, err := filesystem.LoadOrCreateNetworkKey(shared.NetworkKeyPath())
 	if err != nil {
 		fmt.Println("pushManifestToPeer: could not load network key:", err)
 		return
@@ -131,7 +128,7 @@ func handleManifestSync(mosaicDir string, msg *api.Message) {
 		fmt.Println("handleManifestSync: could not parse remote manifest:", err)
 		return
 	}
-	aesKey, err := filesystem.LoadOrCreateNetworkKey(networkKeyPath())
+	aesKey, err := filesystem.LoadOrCreateNetworkKey(shared.NetworkKeyPath())
 	if err != nil {
 		fmt.Println("handleManifestSync: could not load network key:", err)
 		return
@@ -148,7 +145,7 @@ func handleManifestSync(mosaicDir string, msg *api.Message) {
 	}
 	fmt.Printf("handleManifestSync: merged — %d user entries\n", len(merged.Entries))
 
-	kp, kerr := filesystem.LoadOrCreateUserKey(userKeyPath())
+	kp, kerr := filesystem.LoadOrCreateUserKey(shared.UserKeyPath())
 	if kerr == nil {
 		_ = filesystem.GetUserFiles(merged, helpers.GetAccountID())
 		_ = kp

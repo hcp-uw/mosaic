@@ -4,15 +4,16 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 
+	"github.com/hcp-uw/mosaic/internal/cli/shared"
 	"github.com/hcp-uw/mosaic/internal/daemon"
+	"github.com/hcp-uw/mosaic/internal/daemon/handlers"
 	filesystem "github.com/hcp-uw/mosaic/internal/fileSystem"
 )
 
 func main() {
-	mountPoint := filepath.Join(os.Getenv("HOME"), "Mosaic")
+	mountPoint := shared.MosaicDir()
 
 	if err := filesystem.StartMount(mountPoint); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not create Mosaic directory: %v\n", err)
@@ -24,6 +25,10 @@ func main() {
 			signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 			<-c
 			fmt.Println("Shutting down Mosaic...")
+			if client := handlers.GetP2PClient(); client != nil {
+				_ = client.DisconnectFromStun()
+				handlers.SetP2PClient(nil)
+			}
 			filesystem.StopMount(mountPoint)
 			os.Exit(0)
 		}()

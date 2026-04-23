@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/hcp-uw/mosaic/internal/api"
+	"github.com/hcp-uw/mosaic/internal/cli/shared"
 	"github.com/hcp-uw/mosaic/internal/encoding"
 	"github.com/hcp-uw/mosaic/internal/p2p"
 )
@@ -71,7 +72,7 @@ var (
 
 // ShardsDir returns ~/Mosaic/.shards — the base directory for all stored shards.
 func ShardsDir() string {
-	return filepath.Join(os.Getenv("HOME"), "Mosaic", ".shards")
+	return filepath.Join(shared.MosaicDir(), ".shards")
 }
 
 // ──────────────────────────────────────────────────────────
@@ -83,7 +84,7 @@ func ShardsDir() string {
 // so all nodes in the network can encrypt and decrypt each other's shards.
 func shardEncryptionKey() ([32]byte, error) {
 	var key [32]byte
-	data, err := os.ReadFile(filepath.Join(os.Getenv("HOME"), ".mosaic-login.key"))
+	data, err := os.ReadFile(shared.LoginKeyPath())
 	if err != nil {
 		return key, fmt.Errorf("not logged in — run 'mos login account <username> <key>'")
 	}
@@ -575,7 +576,7 @@ func finalizeShard(asm *shardAssembly) {
 }
 
 func autoReconstruct(asm *shardAssembly) {
-	mosaicDir := filepath.Join(os.Getenv("HOME"), "Mosaic")
+	mosaicDir := shared.MosaicDir()
 	outDir, err := os.MkdirTemp("", "mosaic-recon-*")
 	if err != nil {
 		fmt.Printf("[Transfer] Reconstruct: cannot create output dir: %v\n", err)

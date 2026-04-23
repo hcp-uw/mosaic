@@ -1,52 +1,19 @@
 package helpers
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
-	"time"
+
+	"github.com/hcp-uw/mosaic/internal/cli/shared"
 )
 
-const sessionFilename = ".mosaic-session"
-const nodeFilename = ".mosaic-node"
-
-// Session holds the identity fields returned by the auth server after a
-// successful login. Written to ~/.mosaic-session (0600) by the login handler
-// and read by GetAccountID, GetUsername, and GetNodeID.
+// Session holds the local identity derived from the user's login key.
+// No server involvement — everything is derived deterministically from the key.
 type Session struct {
-	AccountID  int    `json:"accountID"`
-	Username   string `json:"username"`
-	NodeNumber int    `json:"nodeNumber"` // 1, 2, 3... shown as "node-1" etc.
-	PublicKey  string `json:"publicKey"`
-	ExpiresAt  string `json:"expiresAt"` // RFC3339
-	Token      string `json:"token"`     // raw JWT for STUN authentication
-}
-
-func sessionPath() string {
-	return filepath.Join(os.Getenv("HOME"), sessionFilename)
-}
-
-func nodePath() string {
-	return filepath.Join(os.Getenv("HOME"), nodeFilename)
-}
-
-// SaveNodeNumber writes the node number to ~/.mosaic-node (0600).
-// This file survives logout so the same machine always gets the same node number.
-func SaveNodeNumber(nodeNumber int) error {
-	return os.WriteFile(nodePath(), []byte(fmt.Sprintf("%d", nodeNumber)), 0600)
-}
-
-// LoadNodeNumber reads the persisted node number for this machine.
-// Returns 0 if no node number has been assigned yet (first ever login).
-func LoadNodeNumber() int {
-	data, err := os.ReadFile(nodePath())
-	if err != nil {
-		return 0
-	}
-	var n int
-	fmt.Sscanf(string(data), "%d", &n)
-	return n
+	PublicKey string `json:"publicKey"` // hex PKIX DER of ECDSA P-256 public key
 }
 
 // SaveSession writes the session to disk (0600).
@@ -55,15 +22,14 @@ func SaveSession(s Session) error {
 	if err != nil {
 		return fmt.Errorf("could not marshal session: %w", err)
 	}
-	return os.WriteFile(sessionPath(), data, 0600)
+	return os.WriteFile(shared.SessionPath(), data, 0600)
 }
 
 // LoadSession reads and returns the current session.
-// Returns an error if no session exists or if it has expired.
 func LoadSession() (Session, error) {
-	data, err := os.ReadFile(sessionPath())
+	data, err := os.ReadFile(shared.SessionPath())
 	if os.IsNotExist(err) {
-		return Session{}, fmt.Errorf("not logged in — run 'mos login account <username> <key>'")
+		return Session{}, fmt.Errorf("not logged in — run 'mos login <key>'")
 	}
 	if err != nil {
 		return Session{}, fmt.Errorf("could not read session: %w", err)
@@ -73,32 +39,31 @@ func LoadSession() (Session, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return Session{}, fmt.Errorf("could not parse session: %w", err)
 	}
-
-	if s.ExpiresAt != "" {
-		exp, err := time.Parse(time.RFC3339, s.ExpiresAt)
-		if err == nil && time.Now().After(exp) {
-			_ = ClearSession()
-			return Session{}, fmt.Errorf("session expired — run 'mos login account <username> <key>'")
-		}
-	}
-
 	return s, nil
 }
 
-// GetToken returns the raw JWT stored in the session, or "" if not logged in.
-func GetToken() string {
-	s, err := LoadSession()
-	if err != nil {
-		return ""
-	}
-	return s.Token
+// IsLoggedIn returns true if a valid session exists.
+func IsLoggedIn() bool {
+	_, err := LoadSession()
+	return err == nil
 }
+
+// GetToken is removed — no JWT in the keyless model.
+// Kept as a stub returning "" so callers that haven't been updated yet don't break.
+func GetToken() string { return "" }
 
 // ClearSession removes the session file (called on logout).
 func ClearSession() error {
-	err := os.Remove(sessionPath())
+	err := os.Remove(shared.SessionPath())
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	return nil
+}
+
+// DeriveAccountID returns a deterministic integer identity from the public key.
+// Used wherever an int user ID is needed (e.g. manifest entries).
+func DeriveAccountID(pubKeyHex string) int {
+	h := sha256.Sum256([]byte(pubKeyHex))
+	return int(binary.BigEndian.Uint32(h[:4]))
 }

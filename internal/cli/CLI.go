@@ -15,6 +15,7 @@ import (
 
 	"github.com/hcp-uw/mosaic/internal/cli/client"
 	"github.com/hcp-uw/mosaic/internal/cli/protocol"
+	"github.com/hcp-uw/mosaic/internal/cli/shared"
 	"github.com/hcp-uw/mosaic/internal/daemon/handlers/helpers"
 )
 
@@ -31,56 +32,25 @@ func Run(Args []string) {
 	}
 
 	switch args[1] {
-	case "create":
-		if len(args) != 5 {
-			fmt.Println()
-			fmt.Println("Usage:")
-			fmt.Println("- mos create account <username> <key>    Create a new Mosaic account.")
-			os.Exit(1)
-		}
-		switch args[2] {
-		case "account":
-			createAccount()
-		default:
-			fmt.Println("Unknown argument:", args[2])
-			os.Exit(1)
-		}
 	case "login":
-		if len(args) < 3 {
+		if len(args) == 3 && args[2] == "status" {
+			loginStatus()
+		} else if len(args) == 3 {
+			loginWithKey(args[2])
+		} else {
 			fmt.Println()
 			fmt.Println("Usage:")
-			fmt.Println("- mos login status                  Show current login status.")
-			fmt.Println("- mos login account <username> <key>    Login with a username and key.")
-			os.Exit(1)
-		}
-		switch args[2] {
-		case "status":
-			loginStatus()
-		case "account":
-			if len(args) != 5 {
-				fmt.Println()
-				fmt.Println("Usage: mos login account <username> <key>")
-				os.Exit(1)
-			}
-			loginWithKey()
-		default:
-			fmt.Println("Unknown argument:", args[2])
+			fmt.Println("  mos login <key>      Log in with your key.")
+			fmt.Println("  mos login status     Show current login status.")
 			os.Exit(1)
 		}
 	case "logout":
-		if len(args) != 3 {
+		if len(args) != 3 || args[2] != "account" {
 			fmt.Println()
-			fmt.Println("Usage:")
-			fmt.Println("- mos logout account    Logout from the account.")
+			fmt.Println("Usage: mos logout account")
 			os.Exit(1)
 		}
-		switch args[2] {
-		case "account":
-			logoutAccount()
-		default:
-			fmt.Println("Unknown argument:", args[2])
-			os.Exit(1)
-		}
+		logoutAccount()
 	case "version":
 		if len(args) != 2 {
 			fmt.Println()
@@ -304,7 +274,7 @@ func stunServerAddr() string {
 	if v := os.Getenv("STUN_SERVER"); v != "" {
 		return v
 	}
-	return "178.128.151.84:3478"
+	return shared.DefaultSTUNServer
 }
 
 func joinNetwork(serverAddr string) {
@@ -385,26 +355,6 @@ func statusAccount() {
 	fmt.Println(message)
 }
 
-// Creates a new Mosaic account on the auth server
-func createAccount() {
-	username := args[3]
-	key := args[4]
-	resp, err := client.SendRequest("createAccount", protocol.CreateAccountRequest{Username: username, LoginKey: key})
-	exitOnErr(err, "Error creating account.")
-
-	var cmdResp protocol.CreateAccountResponse
-	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
-		exitOnErr(err, "Error parsing response.")
-	}
-	if !cmdResp.Success {
-		fmt.Println("\nFailed to create account:", cmdResp.Details)
-		os.Exit(1)
-	}
-	message := fmt.Sprintf("\nAccount created successfully.\n- Username: %s\n- Account ID: %s\n- %s\n",
-		cmdResp.Username, cmdResp.AccountID, cmdResp.Details)
-	fmt.Println(message)
-}
-
 // Shows current login status
 func loginStatus() {
 	resp, err := client.SendRequest("loginStatus", protocol.LoginStatusRequest{})
@@ -418,16 +368,21 @@ func loginStatus() {
 		fmt.Println("\nNot logged in.")
 		return
 	}
-	fmt.Printf("\nLogged in.\n- Username:   %s\n- Account ID: %09d\n- Node:       node-%d\n- Expires:    %s\n",
-		cmdResp.Username, cmdResp.AccountID, cmdResp.NodeNumber, cmdResp.ExpiresAt)
+
+	keyStatus := "missing"
+	if cmdResp.HasKeyPair {
+		keyStatus = "present"
+	}
+	fmt.Printf("\nLogged in.\n- Identity:  %s...\n- Key pair:  %s\n", cmdResp.PublicKey[:8], keyStatus)
+	if !cmdResp.HasKeyPair {
+		fmt.Println("\nWarning: key pair file is missing. Try logging out and back in.")
+	}
 }
 
-// Logs in with a provided username and key
-func loginWithKey() {
-	username := args[3]
-	key := args[4]
-	resp, err := client.SendRequest("loginKey", protocol.LoginKeyRequest{Username: username, Key: key})
-	exitOnErr(err, "Error logging in with key.")
+// Logs in with a key — no auth server, identity derived from the key.
+func loginWithKey(key string) {
+	resp, err := client.SendRequest("loginKey", protocol.LoginKeyRequest{Key: key})
+	exitOnErr(err, "Error logging in.")
 
 	var cmdResp protocol.LoginKeyResponse
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
@@ -435,33 +390,25 @@ func loginWithKey() {
 	}
 	if !cmdResp.Success {
 		if cmdResp.AlreadyLoggedIn {
-			fmt.Printf("\nAlready logged in as %s (node-%d).\nRun 'mos logout account' before logging in as a different user.\n", cmdResp.Username, cmdResp.CurrentNode)
+			fmt.Println("\nAlready logged in. Run 'mos logout account' first.")
 		} else {
 			fmt.Println("\nLogin failed:", cmdResp.Details)
 		}
 		os.Exit(1)
 	}
-	message := fmt.Sprintf("\nLogged in successfully.\n- Current Node: %s@node-%v\n", cmdResp.Username, cmdResp.CurrentNode)
-	fmt.Println(message)
+	fmt.Println("\n" + cmdResp.Details)
 }
 
 // Logs out of the current account
 func logoutAccount() {
-	// Read username before the daemon clears the session.
-	username := helpers.GetUsername()
-
-	resp, err := client.SendRequest("logout", protocol.LogoutRequest{AccountID: helpers.GetAccountID()})
+	resp, err := client.SendRequest("logout", protocol.LogoutRequest{})
 	exitOnErr(err, "Error logging out.")
 
 	var cmdResp protocol.LogoutResponse
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
-	if username == "" {
-		username = cmdResp.Username
-	}
-	message := fmt.Sprintf("\nLogged out successfully.\n- Username: %s\n", username)
-	fmt.Println(message)
+	fmt.Println("\nLogged out successfully.")
 }
 
 // List some data on all the peers in the network
@@ -817,17 +764,17 @@ func Shutdown() {
 		daemonName = "mosaicd.exe"
 		needsSudo = false
 	case "darwin":
-		pidFile = "/tmp/mosaicd.pid"
-		sockFile = "/tmp/mosaicd.sock"
-		logFile = "/tmp/mosaicd.log"
+		pidFile = shared.DaemonPIDFile
+		sockFile = shared.SocketPath
+		logFile = shared.DaemonLogFile
 		binDir = "/usr/local/bin"
 		cliName = "mos"
 		daemonName = "mosaicd"
 		needsSudo = true
 	case "linux":
-		pidFile = "/tmp/mosaicd.pid"
-		sockFile = "/tmp/mosaicd.sock"
-		logFile = "/tmp/mosaicd.log"
+		pidFile = shared.DaemonPIDFile
+		sockFile = shared.SocketPath
+		logFile = shared.DaemonLogFile
 		binDir = filepath.Join(os.Getenv("HOME"), ".local", "bin")
 		cliName = "mos"
 		daemonName = "mosaicd"

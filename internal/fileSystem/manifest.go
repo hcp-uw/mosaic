@@ -123,6 +123,23 @@ func RenameInManifest(mosaicDir, oldName, newName string) error {
 	return writeManifestLocked(mosaicDir, entries)
 }
 
+// MarkUncachedInManifest flips the cached flag to false.
+func MarkUncachedInManifest(mosaicDir, name string) error {
+	manifestMu.Lock()
+	defer manifestMu.Unlock()
+	entries, err := readManifestLocked(mosaicDir)
+	if err != nil {
+		return err
+	}
+	entry, ok := entries[name]
+	if !ok {
+		return nil
+	}
+	entry.Cached = false
+	entries[name] = entry
+	return writeManifestLocked(mosaicDir, entries)
+}
+
 // MarkCachedInManifest flips the cached flag to true.
 func MarkCachedInManifest(mosaicDir, name string) error {
 	manifestMu.Lock()

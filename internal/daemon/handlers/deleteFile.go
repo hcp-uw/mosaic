@@ -6,10 +6,10 @@ import (
 	"path/filepath"
 
 	"github.com/hcp-uw/mosaic/internal/cli/protocol"
+	"github.com/hcp-uw/mosaic/internal/cli/shared"
 	"github.com/hcp-uw/mosaic/internal/daemon/handlers/helpers"
 	filesystem "github.com/hcp-uw/mosaic/internal/fileSystem"
 )
-
 
 // Deletes a file from the network and returns an DeleteFileResponse
 func DeleteFile(req protocol.DeleteFileRequest) protocol.DeleteFileResponse {
@@ -17,7 +17,7 @@ func DeleteFile(req protocol.DeleteFileRequest) protocol.DeleteFileResponse {
 
 	filename := removePath(req.FilePath)
 
-	mosaicDir := filepath.Join(os.Getenv("HOME"), "Mosaic")
+	mosaicDir := shared.MosaicDir()
 	// Remove the stub (if it exists — cached files won't have one).
 	if err := filesystem.RemoveStub(mosaicDir, filename); err != nil {
 		fmt.Println("Warning: could not remove stub for", filename, "-", err)
@@ -35,8 +35,8 @@ func DeleteFile(req protocol.DeleteFileRequest) protocol.DeleteFileResponse {
 	}
 
 	// Update the network manifest: decrypt own section, mutate, encrypt+sign, write, broadcast.
-	if aesKey, err := filesystem.LoadOrCreateNetworkKey(networkKeyPath()); err == nil {
-		if kp, kerr := filesystem.LoadOrCreateUserKey(userKeyPath()); kerr == nil {
+	if aesKey, err := filesystem.LoadOrCreateNetworkKey(shared.NetworkKeyPath()); err == nil {
+		if kp, kerr := filesystem.LoadOrCreateUserKey(shared.UserKeyPath()); kerr == nil {
 			if nm, err := filesystem.ReadAndDecryptNetworkManifest(mosaicDir, aesKey, helpers.GetAccountID(), kp.Private); err == nil {
 				nm = filesystem.RemoveFileFromNetwork(nm, helpers.GetAccountID(), filename)
 				if werr := filesystem.EncryptSignAndWriteNetworkManifest(mosaicDir, aesKey, nm, helpers.GetAccountID(), kp); werr != nil {

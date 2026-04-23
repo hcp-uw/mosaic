@@ -1,14 +1,13 @@
 Mosaic Command Line Interface — Distributed Storage Network
 
 Account:
-  create account <username> <key>         Create a new Mosaic account.
-  login account <username> <key>          Log in to your Mosaic account.
-  login status                            Show current login status, node, and session info.
-  logout account                          Log out of the current account.
+  login <key>                             Log in with your key.
+  login status                            Show current login status.
+  logout account                          Log out.
 
 Network:
   join network                            Join the storage network.
-  leave network                           Disconnect from the network and stop pinging.
+  leave network                           Disconnect from the network.
   status network                          Show connection state, role (leader/member), peers, and storage.
   peers network                           List peers currently connected to the network.
 

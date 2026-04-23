@@ -173,7 +173,7 @@ Inside the AES-GCM envelope, the JSON looks like:
   "entries": [
     {
       "userID": 12304938,
-      "username": "GavJoons",
+      "username": "a3f9b21c",
       "publicKey": "<PKIX DER bytes, base64>",
       "ephemeralPubKey": "<ECDH ephemeral key bytes, base64>",
       "encryptedFiles": "<ECIES ciphertext of this user's file list, base64>",
@@ -452,6 +452,5 @@ The P2P broadcast in `BroadcastNetworkManifest` is best-effort: if no peer is co
 To give an accurate picture of the current state:
 
 - **Shard distribution** — `FetchFileBytes` and the `TODO: distribute file shards to peers` comment in `uploadFile.go` are stubs. Files are not actually split and distributed yet. The manifest infrastructure is complete and ready; the network transport layer is the missing piece.
-- **Real authentication** — `helpers.GetAccountID()` returns a hardcoded integer. When real login is implemented, the user's actual account ID will be used as the manifest key.
 - **Proof of Storage** — the `Tapestry` protobuf definition exists in `internal/tapestry/` and is designed for this. It will allow the network to verify that storage nodes actually hold the shards they claim to hold, without requiring file owners to have the bytes cached locally.
-- **Key distribution** — `~/.mosaic-network.key` is generated independently per node. When real auth lands, nodes that belong to the same account will share a key via the auth service so they can decrypt each other's on-disk manifests when roaming.
+- **Key distribution** — `~/.mosaic-network.key` is generated independently per node. There is no auth server. Nodes that belong to the same account share the same derived ECDSA keypair (because it is deterministically derived from the login key), but the outer AES disk-encryption key is still per-node. On-disk manifests from two different machines cannot directly decrypt each other; they exchange manifests as plain JSON over P2P and each node re-encrypts with its own AES key on receipt.

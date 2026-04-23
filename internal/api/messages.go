@@ -57,9 +57,7 @@ func NewSignature(pubKey string) Signature {
 }
 
 // ClientRegisterData represents client registration information.
-type ClientRegisterData struct {
-	Token string `json:"token"` // JWT from auth server; verified by STUN before pairing
-}
+type ClientRegisterData struct{}
 
 type RegisterSuccessData struct {
 	Message       string `json:"message"`
@@ -161,12 +159,12 @@ func NewServerAssignedLeaderMessage() *Message {
 	}
 }
 
-// NewClientRegisterMessage creates a client registration message with the auth token.
-func NewClientRegisterMessage(token string) *Message {
+// NewClientRegisterMessage creates a client registration message.
+func NewClientRegisterMessage() *Message {
 	return &Message{
 		Type:      ClientRegister,
 		Timestamp: time.Now(),
-		Data:      ClientRegisterData{Token: token},
+		Data:      ClientRegisterData{},
 	}
 }
 

@@ -22,6 +22,5 @@ stop_server() {
     fi
 }
 
-stop_server "Auth server" auth
 stop_server "STUN server" stun
 stop_server "TURN server" turn

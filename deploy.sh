@@ -27,12 +27,6 @@ echo "Syncing code..."
 rsync -az --delete \
     --exclude='.git' \
     --exclude='bin/' \
-    --exclude='AuthServer/mosaic-auth' \
-    --exclude='AuthServer/mosaic-auth.db' \
-    --exclude='AuthServer/.mosaic-auth-signing.pem' \
-    --exclude='AuthServer/.mosaic-auth-secret' \
-    --exclude='AuthServer/auth.log' \
-    --exclude='AuthServer/auth.pid' \
     --exclude='*.log' \
     --exclude='*.pid' \
     --exclude='files/' \
@@ -48,13 +42,12 @@ echo "Building on server..."
 ssh -i "${SSH_KEY}" "${REMOTE_USER}@${DROPLET_IP}" bash << 'EOF'
 cd /root/mosaic
 export PATH=$PATH:/usr/local/go/bin
-go build -o AuthServer/mosaic-auth ./AuthServer/
 go build -o bin/mosaic-stun ./cmd/mosaic-stun/
 go build -o bin/mosaic-turn ./cmd/mosaic-turn/
 echo "✓ Build complete"
 EOF
 
 echo ""
-echo "Done. To start the servers on the droplet:"
+echo "Done. To start the servers:"
 echo "  ssh -i ~/.ssh/mosaic-droplet root@${DROPLET_IP}"
-echo "  cd /root/mosaic && ./scripts/start.sh <public-ip>"
+echo "  cd /root/mosaic && ./scripts/start.sh ${DROPLET_IP}"

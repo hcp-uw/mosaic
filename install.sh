@@ -151,9 +151,14 @@ stop_daemon() {
             if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
                 echo "Stopping daemon (PID: $pid)..."
                 kill "$pid" 2>/dev/null || true
-                sleep 1
-                
-                # Check if still alive, use SIGKILL
+                # Wait up to 4s for graceful disconnect (daemon leaves P2P network on SIGTERM).
+                local wait=0
+                while [ $wait -lt 4 ] && kill -0 "$pid" 2>/dev/null; do
+                    sleep 1
+                    wait=$((wait+1))
+                done
+
+                # Force kill if still alive.
                 if kill -0 "$pid" 2>/dev/null; then
                     echo "Process still alive, using SIGKILL..."
                     kill -9 "$pid" 2>/dev/null || true
@@ -438,8 +443,7 @@ print_success() {
         echo -e "${YELLOW}⚠ You are not logged in.${NC}"
         echo ""
         echo "To get started:"
-        echo -e "  ${GREEN}mos create account <username> <key>${NC}   - Create an account (first time only)"
-        echo -e "  ${GREEN}mos login account <username> <key>${NC}    - Log in"
+        echo -e "  ${GREEN}mos login <key>${NC}   - Log in with your key"
         echo ""
         echo "Then connect to the network:"
         echo "  mos join <stun-server-ip>:3478"

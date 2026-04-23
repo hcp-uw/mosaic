@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/hcp-uw/mosaic/internal/cli/protocol"
+	"github.com/hcp-uw/mosaic/internal/cli/shared"
 	"github.com/hcp-uw/mosaic/internal/daemon/handlers"
 	filesystem "github.com/hcp-uw/mosaic/internal/fileSystem"
 )
@@ -54,7 +55,7 @@ func handleFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := handlers.ListFiles(protocol.ListFilesRequest{})
-	mosaicDir := filepath.Join(os.Getenv("HOME"), "Mosaic")
+	mosaicDir := shared.MosaicDir()
 
 	files := make([]FileWithStatus, 0, len(resp.Files))
 	for _, name := range resp.Files {
@@ -85,11 +86,10 @@ func handleFileByName(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mosaicDir := filepath.Join(os.Getenv("HOME"), "Mosaic")
+	mosaicDir := shared.MosaicDir()
 
 	switch {
 	case r.Method == http.MethodGet && sub == "info":
-		// Return FileWithStatus so isCached is included for badge decisions.
 		info := handlers.GetFileInfo(protocol.FileInfoRequest{FilePath: name})
 		writeJSON(w, http.StatusOK, FileWithStatus{
 			Name:      info.FileName,
@@ -111,7 +111,6 @@ func handleFileByName(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "missing newName", http.StatusBadRequest)
 			return
 		}
-		// Suppress watcher events for both old and new paths — daemon is doing this rename.
 		if GlobalWatcher != nil {
 			GlobalWatcher.SuppressNext(filepath.Join(mosaicDir, name))
 			GlobalWatcher.SuppressNext(filepath.Join(mosaicDir, name+".mosaic"))
@@ -126,13 +125,10 @@ func handleFileByName(w http.ResponseWriter, r *http.Request) {
 		if resp.Success {
 			stubPath := filepath.Join(mosaicDir, name+".mosaic")
 
-			// If no manifest entry exists (file came from a peer), add a minimal one.
 			if !filesystem.IsInManifest(mosaicDir, name) {
 				_ = filesystem.AddToManifest(mosaicDir, name, 0, 0, "")
 			}
 
-			// Delete the stub — the real file now lives alongside it.
-			// Suppress the watcher so it doesn't interpret this as a user-initiated delete.
 			if GlobalWatcher != nil {
 				GlobalWatcher.SuppressNext(stubPath)
 			}

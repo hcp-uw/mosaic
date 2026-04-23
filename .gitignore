@@ -1,6 +1,5 @@
 files
 output
-note.md
 bin/
 *.log
 *.pid

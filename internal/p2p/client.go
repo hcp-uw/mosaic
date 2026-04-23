@@ -12,9 +12,8 @@ import (
 
 // Client represents a STUN client
 type Client struct {
-	id               string
-	token            string // JWT sent during registration for STUN auth
-	queuePosition    int    // server-assigned position; 1 = leader, 2 = next, etc.
+	id            string
+	queuePosition int // server-assigned position; 1 = leader, 2 = next, etc.
 	serverAddr       *net.UDPAddr
 	serverConn       *net.UDPConn
 	state            ClientState
@@ -35,7 +34,6 @@ type Client struct {
 // ClientConfig holds client configuration
 type ClientConfig struct {
 	ServerAddress  string
-	Token          string // JWT for STUN authentication
 	PingInterval   time.Duration
 	ConnectTimeout time.Duration
 }
@@ -63,7 +61,6 @@ func NewClient(config *ClientConfig) (*Client, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Client{
-		token:            config.Token,
 		serverAddr:       serverAddr,
 		state:            StateDisconnected,
 		peers:            make(map[string]*PeerInfo),
@@ -108,9 +105,9 @@ func (c *Client) GetPeerById(id string) *PeerInfo {
 	return c.peers[id]
 }
 
-// register sends registration message to server with the auth token.
+// register sends registration message to server.
 func (c *Client) register() error {
-	msg := api.NewClientRegisterMessage(c.token)
+	msg := api.NewClientRegisterMessage()
 	return c.sendToServer(msg)
 }
 

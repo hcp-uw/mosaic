@@ -7,18 +7,11 @@ import (
 	"time"
 
 	"github.com/hcp-uw/mosaic/internal/cli/protocol"
+	"github.com/hcp-uw/mosaic/internal/cli/shared"
 	"github.com/hcp-uw/mosaic/internal/daemon/handlers/helpers"
 	filesystem "github.com/hcp-uw/mosaic/internal/fileSystem"
 	"github.com/hcp-uw/mosaic/internal/transfer"
 )
-
-func networkKeyPath() string {
-	return filepath.Join(os.Getenv("HOME"), ".mosaic-network.key")
-}
-
-func userKeyPath() string {
-	return filepath.Join(os.Getenv("HOME"), ".mosaic-user.key")
-}
 
 // UploadFile uploads a file to the network.
 // If the file is already cached locally (e.g. a re-upload), it re-fetches
@@ -43,7 +36,7 @@ func uploadFile(path string, keepLocal bool) protocol.UploadFileResponse {
 		originalSize = int(info.Size())
 	}
 
-	mosaicDir := filepath.Join(os.Getenv("HOME"), "Mosaic")
+	mosaicDir := shared.MosaicDir()
 	nodeID := helpers.GetNodeID()
 	realPath := filepath.Join(mosaicDir, filename)
 
@@ -57,8 +50,8 @@ func uploadFile(path string, keepLocal bool) protocol.UploadFileResponse {
 	}
 
 	// Update the network manifest: decrypt own section, mutate, encrypt+sign, write, broadcast.
-	if aesKey, err := filesystem.LoadOrCreateNetworkKey(networkKeyPath()); err == nil {
-		if kp, kerr := filesystem.LoadOrCreateUserKey(userKeyPath()); kerr == nil {
+	if aesKey, err := filesystem.LoadOrCreateNetworkKey(shared.NetworkKeyPath()); err == nil {
+		if kp, kerr := filesystem.LoadOrCreateUserKey(shared.UserKeyPath()); kerr == nil {
 			if nm, err := filesystem.ReadAndDecryptNetworkManifest(mosaicDir, aesKey, helpers.GetAccountID(), kp.Private); err == nil {
 				entry := filesystem.NetworkFileEntry{
 					Name:          filename,

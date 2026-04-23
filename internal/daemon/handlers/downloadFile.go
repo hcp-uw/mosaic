@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/hcp-uw/mosaic/internal/cli/protocol"
+	"github.com/hcp-uw/mosaic/internal/cli/shared"
 	"github.com/hcp-uw/mosaic/internal/daemon/handlers/helpers"
 	filesystem "github.com/hcp-uw/mosaic/internal/fileSystem"
 )
@@ -28,7 +29,8 @@ func DownloadFile(req protocol.DownloadFileRequest) protocol.DownloadFileRespons
 		}
 	}
 
-	destPath := filepath.Join(os.Getenv("HOME"), "Mosaic", filename)
+	mosaicDir := shared.MosaicDir()
+	destPath := filepath.Join(mosaicDir, filename)
 	if err := os.WriteFile(destPath, data, 0644); err != nil {
 		fmt.Println("Daemon: could not write", destPath, "-", err)
 		return protocol.DownloadFileResponse{
@@ -42,7 +44,6 @@ func DownloadFile(req protocol.DownloadFileRequest) protocol.DownloadFileRespons
 	fmt.Println("Daemon: wrote", len(data), "bytes to", destPath)
 
 	// Verify content integrity against the manifest hash (if one was recorded at upload time).
-	mosaicDir := filepath.Join(os.Getenv("HOME"), "Mosaic")
 	if entry, err := filesystem.GetManifestEntry(mosaicDir, filename); err == nil && entry.ContentHash != "" {
 		actualHash, herr := sha256File(destPath)
 		if herr != nil || actualHash != entry.ContentHash {

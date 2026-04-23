@@ -2,10 +2,9 @@ package handlers
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 
 	"github.com/hcp-uw/mosaic/internal/cli/protocol"
+	"github.com/hcp-uw/mosaic/internal/cli/shared"
 	"github.com/hcp-uw/mosaic/internal/daemon/handlers/helpers"
 	filesystem "github.com/hcp-uw/mosaic/internal/fileSystem"
 )
@@ -15,7 +14,7 @@ func GetFileInfo(req protocol.FileInfoRequest) protocol.FileInfoResponse {
 	fmt.Println("Daemon: getting file info.")
 
 	filename := removePath(req.FilePath)
-	mosaicDir := filepath.Join(os.Getenv("HOME"), "Mosaic")
+	mosaicDir := shared.MosaicDir()
 
 	// Read metadata from the manifest (authoritative) with fallback to stub.
 	size := 0

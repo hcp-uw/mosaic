@@ -3,27 +3,22 @@ package helpers
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
+
+	"github.com/hcp-uw/mosaic/internal/cli/shared"
 )
-
-const loginKeyFilename = ".mosaic-login.key"
-
-func loginKeyPath() string {
-	return filepath.Join(os.Getenv("HOME"), loginKeyFilename)
-}
 
 // SaveLoginKey persists the raw login key string to disk with 0600 permissions.
 // Called by the login handler so subsequent daemon operations can derive the
 // user keypair from it without re-prompting for the key.
 func SaveLoginKey(key string) error {
-	return os.WriteFile(loginKeyPath(), []byte(strings.TrimSpace(key)), 0600)
+	return os.WriteFile(shared.LoginKeyPath(), []byte(strings.TrimSpace(key)), 0600)
 }
 
 // LoadLoginKey reads the persisted login key, or returns ("", nil) if the user
 // has not yet logged in. Callers that require a key should check for empty string.
 func LoadLoginKey() (string, error) {
-	data, err := os.ReadFile(loginKeyPath())
+	data, err := os.ReadFile(shared.LoginKeyPath())
 	if os.IsNotExist(err) {
 		return "", nil
 	}
@@ -35,7 +30,7 @@ func LoadLoginKey() (string, error) {
 
 // ClearLoginKey removes the persisted login key (called on logout).
 func ClearLoginKey() error {
-	err := os.Remove(loginKeyPath())
+	err := os.Remove(shared.LoginKeyPath())
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
