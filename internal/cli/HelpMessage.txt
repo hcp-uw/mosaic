@@ -1,33 +1,38 @@
 Mosaic Command Line Interface — Distributed Storage Network
 
 Account:
-  create account <username> <key>    Create a new Mosaic account.
-  login account <username> <key>     Log in to your Mosaic account.
-  login status                       Show current login status, node, and session info.
-  logout account                     Log out of the current account.
+  create account <username> <key>         Create a new Mosaic account.
+  login account <username> <key>          Log in to your Mosaic account.
+  login status                            Show current login status, node, and session info.
+  logout account                          Log out of the current account.
 
-Network Management:
-  join network                       Join the storage network.
-  leave network                      Leave the connected network.
-  status network                     View status and statistics for the network.
-  peers network                      List peers currently connected to the network.
+Network:
+  join network                            Join the storage network.
+  leave network                           Disconnect from the network and stop pinging.
+  status network                          Show connection state, role (leader/member), peers, and storage.
+  peers network                           List peers currently connected to the network.
 
-Node & Account Management:
-  status node <node_id>              View information about a specific node.
-  status account                     View overall account status and all connected nodes.
+Node & Account:
+  status node <node_id>                   View information about a specific node.
+  status account                          View overall account status and all connected nodes.
 
-Storage Management:
-  set storage <amount>               Set the total storage to share with the network.
-  empty storage                      Delete all stored data from the network.
+Storage:
+  set storage <amount>                    Set the total storage to share with the network.
+  empty storage                           Delete all stored data from the network.
 
-File Operations:
-  list file                          List all files stored on the network.
-  upload (file/folder) <path>        Upload a file or folder to the network.
-  download (file/folder) <path>      Download a file or folder from the network.
-  info (file/folder) <path>          Display information about a specific file or folder.
-  delete (file/folder) <path>        Delete a file or folder from the network.
-  rename file <oldname> <newname>    Rename a file on the network.
+Files:
+  list file                               List all files stored on the network.
+  upload file <path>                      Upload a file to the network.
+  upload folder <path>                    Upload a folder to the network.
+  download file <name>                    Download a file from the network.
+  download folder <name>                  Download a folder from the network.
+  info file <path>                        Display information about a specific file.
+  info folder <path>                      Display information about a specific folder.
+  delete file <path>                      Delete a file from the network.
+  delete folder <path>                    Delete a folder from the network.
+  rename file <oldname> <newname>         Rename a file on the network.
 
 Other:
-  version                            Display current MOS client version.
-  help                               Show this help message.
+  version                                 Display current Mosaic client version.
+  shutdown                                Stop the daemon and clean up.
+  help                                    Show this help message.

@@ -13,6 +13,7 @@ type PeerInfo struct {
 	Address      *net.UDPAddr
 	Conn         *net.UDPConn
 	ID           string
+	IsLeader     bool      // true when this peer is the network leader
 	LastPeerPong time.Time
 }
 

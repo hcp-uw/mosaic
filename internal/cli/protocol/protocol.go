@@ -38,12 +38,16 @@ type NetworkStatusRequest struct {
 }
 
 type NetworkStatusResponse struct {
-	Success          bool   `json:"success"`
-	Details          string `json:"details"`
-	NetworkStorage   int    `json:"networkStorage"`
-	AvailableStorage int    `json:"availableStorage"`
-	StorageUsed      int    `json:"storageUsed"`
-	Peers            int    `json:"peers"`
+	Success          bool     `json:"success"`
+	Details          string   `json:"details"`
+	NetworkStorage   int      `json:"networkStorage"`
+	AvailableStorage int      `json:"availableStorage"`
+	StorageUsed      int      `json:"storageUsed"`
+	Peers            int      `json:"peers"`
+	Connected        bool     `json:"connected"`
+	State            string   `json:"state"`
+	IsLeader         bool     `json:"isLeader"`
+	PeerAddresses    []string `json:"peerAddresses"`
 }
 
 type JoinRequest struct {

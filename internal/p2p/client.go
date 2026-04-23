@@ -14,6 +14,7 @@ import (
 type Client struct {
 	id               string
 	token            string // JWT sent during registration for STUN auth
+	queuePosition    int    // server-assigned position; 1 = leader, 2 = next, etc.
 	serverAddr       *net.UDPAddr
 	serverConn       *net.UDPConn
 	state            ClientState
@@ -25,6 +26,10 @@ type Client struct {
 	peerCallbacks    []func(*PeerInfo)
 	errorCallbacks   []func(error)
 	messageCallbacks []func([]byte)
+
+	// STUN reconnect state (leader only)
+	stunFailCount    int
+	stunReconnecting bool
 }
 
 // ClientConfig holds client configuration
@@ -295,14 +300,21 @@ func (c *Client) processMessage(msg *api.Message) {
 			return
 		}
 
+		// PeerAssignment from STUN always points a member to the leader,
+		// or tells the leader about a new member. We can identify the leader
+		// peer on the member side: if our state is not leader, the assigned
+		// peer IS the leader.
 		peerInfo := &PeerInfo{
 			Address: peerAddr,
 			ID:      data.PeerID,
 		}
 
 		c.mutex.Lock()
-		c.peers[data.PeerID] = peerInfo
 		state := c.state
+		if state != StateLeader {
+			peerInfo.IsLeader = true
+		}
+		c.peers[data.PeerID] = peerInfo
 		c.mutex.Unlock()
 
 		if state != StateLeader {
@@ -333,6 +345,7 @@ func (c *Client) processMessage(msg *api.Message) {
 
 		c.mutex.Lock()
 		c.id = data.ID
+		c.queuePosition = data.QueuePosition
 		c.mutex.Unlock()
 
 	default:

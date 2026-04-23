@@ -28,7 +28,8 @@ func authServerURL() string {
 	if u := os.Getenv("AUTH_SERVER"); u != "" {
 		return strings.TrimRight(u, "/")
 	}
-	return "http://localhost:8081"
+	return "http://178.128.151.84:8081"
+
 }
 
 // ──────────────────────────────────────────────────────────

@@ -15,17 +15,21 @@ import (
 	"github.com/hcp-uw/mosaic/internal/transfer"
 )
 
-// HandleJoin joins the P2P network in the background and returns immediately.
+// HandleJoin joins the P2P network, verifying the STUN connection before returning.
 func HandleJoin(req protocol.JoinRequest) protocol.JoinResponse {
 	fmt.Println("Daemon: joining network.")
-	go runClient(req.ServerAddress)
-	return protocol.JoinResponse{
-		Success: true,
-		Details: "Network joined in background.",
+
+	errCh := make(chan error, 1)
+	go runClient(req.ServerAddress, errCh)
+
+	if err := <-errCh; err != nil {
+		return protocol.JoinResponse{Success: false, Details: fmt.Sprintf("failed to connect to STUN server: %v", err)}
 	}
+
+	return protocol.JoinResponse{Success: true, Details: "Joined network successfully."}
 }
 
-func runClient(serverAddr string) {
+func runClient(serverAddr string, errCh chan<- error) {
 	mosaicDir := filepath.Join(os.Getenv("HOME"), "Mosaic")
 
 	config := p2p.DefaultClientConfig(serverAddr)
@@ -33,6 +37,7 @@ func runClient(serverAddr string) {
 	client, err := p2p.NewClient(config)
 	if err != nil {
 		log.Printf("Failed to create P2P client: %v", err)
+		errCh <- err
 		return
 	}
 
@@ -82,8 +87,10 @@ func runClient(serverAddr string) {
 	if err := client.ConnectToStun(); err != nil {
 		log.Printf("Failed to connect to STUN: %v", err)
 		SetP2PClient(nil)
+		errCh <- err
 		return
 	}
+	errCh <- nil
 	fmt.Println("[P2P] Connected. Waiting for peers.")
 	// runClient returns here; the P2P client goroutines keep running in background.
 }

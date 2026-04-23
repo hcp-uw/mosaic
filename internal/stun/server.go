@@ -8,26 +8,25 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/hcp-uw/mosaic/internal/api"
 )
 
-// ClientInfo holds information about connected clients
+// ClientInfo holds information about a connected client.
 type ClientInfo struct {
-	ID           string
-	Address      *net.UDPAddr
-	LastPing     time.Time
-	Connected    time.Time
-	PairedWithID string
-
-	Leader bool
+	ID            string
+	Address       *net.UDPAddr
+	LastPing      time.Time
+	Connected     time.Time
+	QueuePosition int  // server-assigned; 1 = first to join, 2 = second, etc.
+	Leader        bool // true when this client is the current leader
 }
 
 // verifyToken calls the auth server's /auth/verify endpoint.
-// Returns nil if the token is valid, an error otherwise.
-// If authServerURL is empty, verification is skipped (dev mode).
+// Returns nil if the token is valid. Empty authServerURL disables auth (dev mode).
 func verifyToken(authServerURL, token string) error {
 	if authServerURL == "" {
 		return nil
@@ -44,34 +43,43 @@ func verifyToken(authServerURL, token string) error {
 	return nil
 }
 
-// Server represents a STUN server
+// Server represents a STUN server.
 type Server struct {
 	conn          *net.UDPConn
 	authServerURL string
-	clients       map[string]*ClientInfo
-	waitingQueue  []*ClientInfo
-	mutex         sync.RWMutex
-	ctx           context.Context
-	cancel        context.CancelFunc
-	done          chan bool
 
-	currentLeaderID          string
+	// All registered clients, keyed by IP:port. Clients stay here until they
+	// stop pinging — they are NOT removed after pairing.
+	clients map[string]*ClientInfo
+
+	// Monotonically increasing counter; each new registration gets the next value.
+	queueCounter int
+
+	currentLeaderID string
+
+	mutex sync.Mutex
+	ctx   context.Context
+	cancel context.CancelFunc
+	done  chan bool
+
+	// Legacy fields kept for compatibility.
+	waitingQueue             []*ClientInfo
 	currentTerm              uint
 	leaseExpirationTimeStamp *time.Time
 	leaseID                  uint
 }
 
-// ServerConfig holds server configuration
+// ServerConfig holds server configuration.
 type ServerConfig struct {
 	ListenAddress string
-	AuthServerURL string        // e.g. "http://localhost:8081" — empty disables auth
+	AuthServerURL string
 	ClientTimeout time.Duration
 	PingInterval  time.Duration
 	MaxQueueSize  int
 	EnableLogging bool
 }
 
-// DefaultServerConfig returns default server configuration
+// DefaultServerConfig returns a default configuration.
 func DefaultServerConfig() *ServerConfig {
 	return &ServerConfig{
 		ListenAddress: ":3478",
@@ -82,12 +90,11 @@ func DefaultServerConfig() *ServerConfig {
 	}
 }
 
-// NewServer creates a new STUN server
+// NewServer creates a new STUN server.
 func NewServer(config *ServerConfig) *Server {
 	if config == nil {
 		config = DefaultServerConfig()
 	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Server{
 		authServerURL: config.AuthServerURL,
@@ -96,69 +103,52 @@ func NewServer(config *ServerConfig) *Server {
 		ctx:           ctx,
 		cancel:        cancel,
 		done:          make(chan bool),
-
-		currentLeaderID:          "",
-		currentTerm:              0,
-		leaseExpirationTimeStamp: nil,
-		leaseID:                  0,
 	}
 }
 
-// Start begins listening for client connections
+// Start begins listening for UDP messages.
 func (s *Server) Start(config *ServerConfig) error {
 	addr, err := net.ResolveUDPAddr("udp", config.ListenAddress)
 	if err != nil {
 		return fmt.Errorf("failed to resolve UDP address: %w", err)
 	}
-
 	conn, err := net.ListenUDP("udp", addr)
 	if err != nil {
 		return fmt.Errorf("failed to listen on UDP: %w", err)
 	}
-
 	s.conn = conn
 
 	if config.EnableLogging {
 		log.Printf("STUN server started on %s", config.ListenAddress)
 	}
 
-	// Start cleanup routine
 	go s.cleanupRoutine(config.ClientTimeout, config.EnableLogging)
-
-	// Start message handling
 	go s.handleMessages(config.EnableLogging)
-
 	return nil
 }
 
-// Stop stops the server
+// Stop shuts down the server.
 func (s *Server) Stop() error {
 	s.cancel()
-
 	if s.conn != nil {
 		s.conn.Close()
 	}
-
-	// Wait for cleanup to finish
 	select {
 	case <-s.done:
 	case <-time.After(5 * time.Second):
 		log.Println("Server stop timeout")
 	}
-
 	return nil
 }
 
-func (s *Server) GetConn() *net.UDPConn {
-	return s.conn
-}
+func (s *Server) GetConn() *net.UDPConn { return s.conn }
 
-// handleMessages processes incoming messages from clients
+// ──────────────────────────────────────────────────────────────────────────────
+// Message loop
+// ──────────────────────────────────────────────────────────────────────────────
+
 func (s *Server) handleMessages(enableLogging bool) {
-	defer func() {
-		s.done <- true
-	}()
-
+	defer func() { s.done <- true }()
 	buffer := make([]byte, 1024)
 
 	for {
@@ -179,12 +169,10 @@ func (s *Server) handleMessages(enableLogging bool) {
 			}
 			continue
 		}
-
 		go s.processMessage(buffer[:n], clientAddr, enableLogging)
 	}
 }
 
-// processMessage handles a single message from a client
 func (s *Server) processMessage(data []byte, clientAddr *net.UDPAddr, enableLogging bool) {
 	msg, err := api.DeserializeMessage(data)
 	if err != nil {
@@ -208,7 +196,10 @@ func (s *Server) processMessage(data []byte, clientAddr *net.UDPAddr, enableLogg
 	}
 }
 
-// handleClientRegister handles client registration
+// ──────────────────────────────────────────────────────────────────────────────
+// Registration
+// ──────────────────────────────────────────────────────────────────────────────
+
 func (s *Server) handleClientRegister(msg *api.Message, clientAddr *net.UDPAddr, enableLogging bool) {
 	data, err := msg.GetClientRegisterData()
 	if err != nil {
@@ -230,53 +221,81 @@ func (s *Server) handleClientRegister(msg *api.Message, clientAddr *net.UDPAddr,
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	// Use IP:port as the client ID
 	clientID := clientAddr.String()
 
-	clientInfo := &ClientInfo{
-		ID:        clientID,
-		Address:   clientAddr,
-		LastPing:  time.Now(),
-		Connected: time.Now(),
-	}
-
-	// Check if client already exists
-	if existingClient, exists := s.clients[clientID]; exists {
-		existingClient.Address = clientAddr
-		existingClient.LastPing = time.Now()
+	// Reconnecting client — refresh ping time and re-pair if needed.
+	if existing, exists := s.clients[clientID]; exists {
+		existing.Address = clientAddr
+		existing.LastPing = time.Now()
 		if enableLogging {
 			log.Printf("Client %s reconnected", clientID)
 		}
 		return
 	}
 
+	// Assign next queue position.
+	s.queueCounter++
+	queuePos := s.queueCounter
+
+	clientInfo := &ClientInfo{
+		ID:            clientID,
+		Address:       clientAddr,
+		LastPing:      time.Now(),
+		Connected:     time.Now(),
+		QueuePosition: queuePos,
+	}
 	s.clients[clientID] = clientInfo
 
 	if enableLogging {
-		log.Printf("Client %s registered", clientID)
+		log.Printf("Client %s registered (queue position %d)", clientID, queuePos)
 	}
 
-	s.sendRegistrationSuccess(clientID, clientAddr)
+	s.sendRegistrationSuccess(clientID, clientAddr, queuePos)
 
 	if s.currentLeaderID == "" {
-		s.sendLeaderAssignment(clientAddr)
-
-		// TODO: Need to perform a check to see if leader is accepted
-		s.clients[clientID].Leader = true
-		s.currentLeaderID = clientID
-
+		s.promoteAsLeader(clientInfo, enableLogging)
 	} else {
-		s.pairClients(clientInfo, true)
+		s.pairWithLeader(clientInfo, enableLogging)
 	}
 }
 
-func (s *Server) sendRegistrationSuccess(id string, clientAddr *net.UDPAddr) {
-	// Currently no specific success message defined
-	msg := api.NewRegisterSuccessMessage("Registration successful", id)
-	s.sendMessage(clientAddr, msg)
+// promoteAsLeader designates a client as the network leader.
+// Must be called with s.mutex held.
+func (s *Server) promoteAsLeader(client *ClientInfo, enableLogging bool) {
+	client.Leader = true
+	s.currentLeaderID = client.ID
+	s.sendLeaderAssignment(client.Address)
+	if enableLogging {
+		log.Printf("Client %s assigned as leader (queue position %d)", client.ID, client.QueuePosition)
+	}
 }
 
-// handleClientPing handles ping messages
+// pairWithLeader sends peer-assignment messages to both the leader and the new client.
+// Must be called with s.mutex held.
+func (s *Server) pairWithLeader(client *ClientInfo, enableLogging bool) {
+	leader, exists := s.clients[s.currentLeaderID]
+	if !exists || leader == nil {
+		// Leader gone — promote this client instead.
+		if enableLogging {
+			log.Printf("Leader gone when pairing %s — promoting as new leader", client.ID)
+		}
+		s.promoteAsLeader(client, enableLogging)
+		return
+	}
+
+	s.sendPeerAssignment(leader.Address, client.Address, client.ID)
+	s.sendPeerAssignment(client.Address, leader.Address, s.currentLeaderID)
+
+	if enableLogging {
+		log.Printf("Paired client %s (queue %d) with leader %s (queue %d)",
+			client.ID, client.QueuePosition, leader.ID, leader.QueuePosition)
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Ping
+// ──────────────────────────────────────────────────────────────────────────────
+
 func (s *Server) handleClientPing(msg *api.Message, clientAddr *net.UDPAddr, enableLogging bool) {
 	_, err := msg.GetClientRegisterData()
 	if err != nil {
@@ -289,9 +308,7 @@ func (s *Server) handleClientPing(msg *api.Message, clientAddr *net.UDPAddr, ena
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	// Use IP:port as the client ID
 	clientID := clientAddr.String()
-
 	if client, exists := s.clients[clientID]; exists {
 		client.LastPing = time.Now()
 		client.Address = clientAddr
@@ -301,66 +318,52 @@ func (s *Server) handleClientPing(msg *api.Message, clientAddr *net.UDPAddr, ena
 	}
 }
 
-// pairClients pairs two clients together
-func (s *Server) pairClients(client *ClientInfo, enableLogging bool) {
-	// Send peer info to both clients
-	s.sendPeerAssignment(s.clients[s.currentLeaderID].Address, client.Address, client.ID)
-	s.sendPeerAssignment(client.Address, s.clients[s.currentLeaderID].Address, s.currentLeaderID)
+// ──────────────────────────────────────────────────────────────────────────────
+// Leader election
+// ──────────────────────────────────────────────────────────────────────────────
 
-	if enableLogging {
-		log.Printf("Paired clients %s to leader %s", client.ID, s.currentLeaderID)
+// electNewLeader picks the active client with the lowest queue position and
+// promotes them as leader, then re-pairs all other active clients with them.
+// Must be called with s.mutex held.
+func (s *Server) electNewLeader(enableLogging bool) {
+	// Collect all remaining clients sorted by queue position (ascending).
+	candidates := make([]*ClientInfo, 0, len(s.clients))
+	for _, c := range s.clients {
+		candidates = append(candidates, c)
 	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].QueuePosition < candidates[j].QueuePosition
+	})
 
-	// Remove both clients from server memory since they no longer need the server
-	delete(s.clients, client.ID)
-
-	if enableLogging {
-		log.Printf("Removed paired client %s from server memory", client.ID)
-	}
-}
-
-func (s *Server) sendLeaderAssignment(clientAddr *net.UDPAddr) {
-	msg := api.NewServerAssignedLeaderMessage()
-	s.sendMessage(clientAddr, msg)
-}
-
-// sendPeerAssignment sends peer information to a client
-func (s *Server) sendPeerAssignment(clientAddr, peerAddr *net.UDPAddr, peerID string) {
-	msg := api.NewPeerAssignmentMessage(peerAddr, peerID)
-	s.sendMessage(clientAddr, msg)
-}
-
-// sendWaitingMessage sends waiting message to a client
-func (s *Server) sendWaitingMessage(clientAddr *net.UDPAddr) {
-	msg := api.NewWaitingForPeerMessage()
-	s.sendMessage(clientAddr, msg)
-}
-
-// sendErrorMessage sends error message to a client
-func (s *Server) sendErrorMessage(clientAddr *net.UDPAddr, errorMsg, errorCode string) {
-	msg := api.NewServerErrorMessage(errorMsg, errorCode)
-	s.sendMessage(clientAddr, msg)
-}
-
-// sendMessage sends a message to a client
-func (s *Server) sendMessage(clientAddr *net.UDPAddr, msg *api.Message) {
-	data, err := msg.Serialize()
-	if err != nil {
-		log.Printf("Failed to serialize message: %v", err)
+	if len(candidates) == 0 {
+		s.currentLeaderID = ""
+		if enableLogging {
+			log.Println("No clients remaining after leader departure.")
+		}
 		return
 	}
 
-	_, err = s.conn.WriteToUDP(data, clientAddr)
-	if err != nil {
-		log.Printf("Failed to send message to %s: %v", clientAddr, err)
+	newLeader := candidates[0]
+	s.promoteAsLeader(newLeader, enableLogging)
+
+	// Re-pair all other clients with the new leader.
+	for _, c := range candidates[1:] {
+		c.Leader = false
+		s.sendPeerAssignment(newLeader.Address, c.Address, c.ID)
+		s.sendPeerAssignment(c.Address, newLeader.Address, newLeader.ID)
+		if enableLogging {
+			log.Printf("Re-paired %s with new leader %s", c.ID, newLeader.ID)
+		}
 	}
 }
 
-// cleanupRoutine periodically removes inactive clients
+// ──────────────────────────────────────────────────────────────────────────────
+// Cleanup
+// ──────────────────────────────────────────────────────────────────────────────
+
 func (s *Server) cleanupRoutine(timeout time.Duration, enableLogging bool) {
 	ticker := time.NewTicker(timeout / 2)
 	defer ticker.Stop()
-
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -371,48 +374,83 @@ func (s *Server) cleanupRoutine(timeout time.Duration, enableLogging bool) {
 	}
 }
 
-// cleanupInactiveClients removes clients that haven't pinged recently
 func (s *Server) cleanupInactiveClients(timeout time.Duration, enableLogging bool) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
 	now := time.Now()
-	var toRemove []string
+	leaderRemoved := false
 
 	for clientID, client := range s.clients {
-		// Remove inactive clients (paired clients are already removed from memory)
 		if now.Sub(client.LastPing) > timeout {
-			toRemove = append(toRemove, clientID)
+			if client.Leader {
+				leaderRemoved = true
+			}
+			delete(s.clients, clientID)
+			if enableLogging {
+				log.Printf("Removed inactive client %s (queue %d, leader=%v)",
+					clientID, client.QueuePosition, client.Leader)
+			}
 		}
 	}
 
-	for _, clientID := range toRemove {
-		delete(s.clients, clientID)
-
-		// Remove from waiting queue if present
-		for i, waitingClient := range s.waitingQueue {
-			if waitingClient.ID == clientID {
-				s.waitingQueue = append(s.waitingQueue[:i], s.waitingQueue[i+1:]...)
-				break
-			}
-		}
-
+	if leaderRemoved {
+		s.currentLeaderID = ""
 		if enableLogging {
-			log.Printf("Removed inactive client %s", clientID)
+			log.Println("Leader removed — electing new leader.")
 		}
+		s.electNewLeader(enableLogging)
 	}
 }
 
-// GetConnectedClients returns the number of connected clients
+// ──────────────────────────────────────────────────────────────────────────────
+// Messaging helpers
+// ──────────────────────────────────────────────────────────────────────────────
+
+func (s *Server) sendRegistrationSuccess(id string, clientAddr *net.UDPAddr, queuePos int) {
+	msg := api.NewRegisterSuccessMessage("Registration successful", id, queuePos)
+	s.sendMessage(clientAddr, msg)
+}
+
+func (s *Server) sendLeaderAssignment(clientAddr *net.UDPAddr) {
+	msg := api.NewServerAssignedLeaderMessage()
+	s.sendMessage(clientAddr, msg)
+}
+
+func (s *Server) sendPeerAssignment(clientAddr, peerAddr *net.UDPAddr, peerID string) {
+	msg := api.NewPeerAssignmentMessage(peerAddr, peerID)
+	s.sendMessage(clientAddr, msg)
+}
+
+func (s *Server) sendErrorMessage(clientAddr *net.UDPAddr, errorMsg, errorCode string) {
+	msg := api.NewServerErrorMessage(errorMsg, errorCode)
+	s.sendMessage(clientAddr, msg)
+}
+
+func (s *Server) sendMessage(clientAddr *net.UDPAddr, msg *api.Message) {
+	data, err := msg.Serialize()
+	if err != nil {
+		log.Printf("Failed to serialize message: %v", err)
+		return
+	}
+	_, err = s.conn.WriteToUDP(data, clientAddr)
+	if err != nil {
+		log.Printf("Failed to send message to %s: %v", clientAddr, err)
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Stats
+// ──────────────────────────────────────────────────────────────────────────────
+
 func (s *Server) GetConnectedClients() int {
-	s.mutex.RLock()
-	defer s.mutex.RUnlock()
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
 	return len(s.clients)
 }
 
-// GetWaitingClients returns the number of clients in waiting queue
 func (s *Server) GetWaitingClients() int {
-	s.mutex.RLock()
-	defer s.mutex.RUnlock()
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
 	return len(s.waitingQueue)
 }

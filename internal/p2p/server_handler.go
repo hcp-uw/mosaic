@@ -39,9 +39,7 @@ func (c *Client) ConnectToStun() error {
 	// Start message handling
 	go c.handleMessages()
 
-	// Start ping routine
-	// this jawn needs to be more robust
-	go c.pingRoutine("SERVER")
+	go c.pingRoutine()
 
 	// Register with server
 	return c.register()

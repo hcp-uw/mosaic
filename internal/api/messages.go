@@ -62,8 +62,9 @@ type ClientRegisterData struct {
 }
 
 type RegisterSuccessData struct {
-	Message string `json:"message"`
-	ID      string `json:"id"`
+	Message       string `json:"message"`
+	ID            string `json:"id"`
+	QueuePosition int    `json:"queuePosition"` // server-assigned; 1 = leader, 2 = next, etc.
 }
 
 // Doesnt need to contain anything
@@ -181,13 +182,14 @@ func NewPeerAssignmentMessage(peerAddr *net.UDPAddr, peerID string) *Message {
 	}
 }
 
-func NewRegisterSuccessMessage(message, id string) *Message {
+func NewRegisterSuccessMessage(message, id string, queuePosition int) *Message {
 	return &Message{
 		Type:      RegisterSuccess,
 		Timestamp: time.Now(),
 		Data: RegisterSuccessData{
-			Message: message,
-			ID:      id,
+			Message:       message,
+			ID:            id,
+			QueuePosition: queuePosition,
 		},
 	}
 }

@@ -90,15 +90,19 @@ func Run(Args []string) {
 		}
 		version()
 	case "join":
-		if len(args) != 4 {
+		if len(args) < 3 {
 			fmt.Println()
 			fmt.Println("Usage:")
-			fmt.Println("- mos join network <Server address to connect to (e.g., 127.0.0.1:3478)> Join the network.")
+			fmt.Println("- mos join network    Join the network.")
 			os.Exit(1)
 		}
 		switch args[2] {
 		case "network":
-			joinNetwork(args[3])
+			addr := stunServerAddr()
+			if len(args) == 4 {
+				addr = args[3] // optional override
+			}
+			joinNetwork(addr)
 		default:
 			fmt.Println("Unknown argument:", args[2])
 			os.Exit(1)
@@ -294,6 +298,15 @@ func Run(Args []string) {
 }
 
 // Connects the user to the mosaic network
+// stunServerAddr returns the STUN server address from STUN_SERVER env var,
+// defaulting to the production droplet.
+func stunServerAddr() string {
+	if v := os.Getenv("STUN_SERVER"); v != "" {
+		return v
+	}
+	return "178.128.151.84:3478"
+}
+
 func joinNetwork(serverAddr string) {
 	resp, err := client.SendRequest("joinNetwork", protocol.JoinRequest{ServerAddress: serverAddr})
 	exitOnErr(err, "Error joining network.")
@@ -311,13 +324,37 @@ func statusNetwork() {
 	resp, err := client.SendRequest("statusNetwork", protocol.NetworkStatusRequest{})
 	exitOnErr(err, "Error getting network status.")
 
-	var cmdResp protocol.NetworkStatusResponse
-	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
+	var r protocol.NetworkStatusResponse
+	if err := mapToStruct(resp.Data, &r); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
-	message := fmt.Sprintf("\nNetwork Status:\n- Total Network Storage: %d GB\n- Your Available Storage: %d GB\n- Number of Peers: %d\n",
-		cmdResp.NetworkStorage, cmdResp.AvailableStorage, cmdResp.Peers)
-	fmt.Println(message)
+
+	fmt.Println()
+	fmt.Println("Network Status")
+	fmt.Println("──────────────")
+
+	if !r.Connected {
+		fmt.Println("  Connection:  not connected (run: mos join network <stun-ip>:3478)")
+	} else {
+		role := "member"
+		if r.IsLeader {
+			role = "leader"
+		}
+		fmt.Printf("  Connection:  connected (%s)\n", role)
+		fmt.Printf("  State:       %s\n", r.State)
+		fmt.Printf("  Peers:       %d\n", r.Peers)
+		if len(r.PeerAddresses) > 0 {
+			fmt.Println("  Peer addresses:")
+			for _, addr := range r.PeerAddresses {
+				fmt.Printf("    - %s\n", addr)
+			}
+		}
+	}
+
+	fmt.Println()
+	fmt.Printf("  Network storage:    %d GB\n", r.NetworkStorage)
+	fmt.Printf("  Available storage:  %d GB\n", r.AvailableStorage)
+	fmt.Println()
 }
 
 // Gets info about a specific node in the network
