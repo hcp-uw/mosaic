@@ -9,24 +9,26 @@ This file is for connection logic that pertains to Client-Server Connection
 import (
 	"fmt"
 	"net"
+	"time"
 )
 
 func (c *Client) ConnectToStun() error {
 	c.mutex.Lock()
-	defer c.mutex.Unlock()
 
 	if c.state != StateDisconnected {
+		c.mutex.Unlock()
 		return fmt.Errorf("client already connected or connecting")
 	}
 
-	// Use ListenUDP to create an unconnected socket that can send to multiple addresses
-	localAddr, err := net.ResolveUDPAddr("udp", ":0") // Use random local port
+	localAddr, err := net.ResolveUDPAddr("udp", ":0")
 	if err != nil {
+		c.mutex.Unlock()
 		return fmt.Errorf("failed to resolve local address: %w", err)
 	}
 
 	conn, err := net.ListenUDP("udp", localAddr)
 	if err != nil {
+		c.mutex.Unlock()
 		return fmt.Errorf("failed to create UDP socket: %w", err)
 	}
 
@@ -34,15 +36,31 @@ func (c *Client) ConnectToStun() error {
 	conn.SetReadBuffer(32 * 1024 * 1024)
 
 	c.serverConn = conn
+	c.registrationDone = make(chan error, 1)
 	c.setState(StateConnecting)
 
-	// Start message handling
 	go c.handleMessages()
-
 	go c.pingRoutine()
 
-	// Register with server
-	return c.register()
+	if err := c.register(); err != nil {
+		c.mutex.Unlock()
+		return err
+	}
+
+	// Capture the channel before releasing the lock so we can wait outside it.
+	regDone := c.registrationDone
+	c.mutex.Unlock()
+
+	// Block until the STUN server acknowledges the registration or we time out.
+	// This is the real connection confirmation — fire-and-forget UDP is not enough.
+	select {
+	case err := <-regDone:
+		return err
+	case <-time.After(30 * time.Second):
+		return fmt.Errorf("timed out waiting for STUN server acknowledgment — server may be unreachable")
+	case <-c.ctx.Done():
+		return fmt.Errorf("connection cancelled")
+	}
 }
 
 // Disconnect closes the connection to the server

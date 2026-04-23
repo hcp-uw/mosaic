@@ -18,6 +18,7 @@ import (
 	"os/signal"
 
 	"github.com/hcp-uw/mosaic/internal/api"
+	"github.com/hcp-uw/mosaic/internal/cli/shared"
 	"github.com/hcp-uw/mosaic/internal/encoding"
 	"github.com/hcp-uw/mosaic/internal/p2p"
 )
@@ -79,7 +80,7 @@ func startSendLimiter(ctx context.Context) {
 }
 
 func main() {
-	serverAddr := "127.0.0.1:3478"
+	serverAddr := shared.DefaultSTUNServer
 	runClient(serverAddr)
 }
 

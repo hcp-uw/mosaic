@@ -29,6 +29,12 @@ type Client struct {
 	// STUN reconnect state (leader only)
 	stunFailCount    int
 	stunReconnecting bool
+
+	// registrationDone is written once by processMessage when RegisterSuccess
+	// arrives. ConnectToStun blocks on it so the CLI gets a real confirmation
+	// that the STUN server received and acknowledged the registration.
+	// Nil after the first registration completes.
+	registrationDone chan error
 }
 
 // ClientConfig holds client configuration
@@ -331,7 +337,18 @@ func (c *Client) processMessage(msg *api.Message) {
 			return
 		}
 
-		c.notifyError(fmt.Errorf("server error [%s]: %s", data.ErrorCode, data.ErrorMessage))
+		serverErr := fmt.Errorf("server error [%s]: %s", data.ErrorCode, data.ErrorMessage)
+
+		c.mutex.Lock()
+		ch := c.registrationDone
+		c.registrationDone = nil
+		c.mutex.Unlock()
+
+		if ch != nil {
+			ch <- serverErr // fail the ConnectToStun call
+		} else {
+			c.notifyError(serverErr)
+		}
 
 	case api.RegisterSuccess:
 		data, err := msg.GetRegisterSuccessData()
@@ -343,7 +360,13 @@ func (c *Client) processMessage(msg *api.Message) {
 		c.mutex.Lock()
 		c.id = data.ID
 		c.queuePosition = data.QueuePosition
+		ch := c.registrationDone
+		c.registrationDone = nil // signal only once
 		c.mutex.Unlock()
+
+		if ch != nil {
+			ch <- nil
+		}
 
 	default:
 		c.notifyError(fmt.Errorf("unknown message type: %s", msg.Type))

@@ -2,34 +2,31 @@ package handlers
 
 import (
 	"fmt"
-	"os"
-	"strings"
 
 	"github.com/hcp-uw/mosaic/internal/cli/protocol"
 	"github.com/hcp-uw/mosaic/internal/cli/shared"
 	"github.com/hcp-uw/mosaic/internal/daemon/handlers/helpers"
+	filesystem "github.com/hcp-uw/mosaic/internal/fileSystem"
 )
 
-// Lists files by scanning stubs in ~/Mosaic/.
+// Lists files by reading the manifest (source of truth for all network files).
 func ListFiles(req protocol.ListFilesRequest) protocol.ListFilesResponse {
 	fmt.Println("Daemon: listing files.")
 
 	mosaicDir := shared.MosaicDir()
-	entries, err := os.ReadDir(mosaicDir)
+	entries, err := filesystem.ReadManifest(mosaicDir)
 	if err != nil {
 		return protocol.ListFilesResponse{
 			Success:  false,
-			Details:  fmt.Sprintf("could not read Mosaic directory: %v", err),
+			Details:  fmt.Sprintf("could not read manifest: %v", err),
 			Username: helpers.GetUsername(),
 			Files:    []string{},
 		}
 	}
 
-	var files []string
-	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".mosaic") {
-			files = append(files, strings.TrimSuffix(entry.Name(), ".mosaic"))
-		}
+	files := make([]string, 0, len(entries))
+	for name := range entries {
+		files = append(files, name)
 	}
 
 	return protocol.ListFilesResponse{
