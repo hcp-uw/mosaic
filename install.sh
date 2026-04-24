@@ -88,6 +88,55 @@ stop_app() {
     fi
 }
 
+# Build the Swift menu bar app using xcodebuild (requires Xcode.app, not just CLT).
+build_app() {
+    if [ "$OS" != "macOS" ]; then
+        return 0
+    fi
+
+    local script_dir
+    script_dir="$(cd "$(dirname "$0")" && pwd)"
+    local project="${script_dir}/MosaicApp/Mosaic.xcodeproj"
+
+    if [ ! -d "$project" ]; then
+        echo -e "${YELLOW}⚠ MosaicApp/Mosaic.xcodeproj not found — skipping app build${NC}"
+        return 0
+    fi
+
+    if ! command -v xcodebuild &> /dev/null; then
+        echo -e "${YELLOW}⚠ xcodebuild not found — skipping app build (install Xcode.app)${NC}"
+        return 0
+    fi
+
+    echo ""
+    echo "Building Mosaic.app..."
+
+    local derived="${script_dir}/MosaicApp/DerivedData"
+
+    xcodebuild \
+        -project "$project" \
+        -scheme Mosaic \
+        -configuration Release \
+        -derivedDataPath "$derived" \
+        CODE_SIGN_IDENTITY="-" \
+        DEVELOPMENT_TEAM="" \
+        CODE_SIGNING_ALLOWED=YES \
+        > /tmp/mosaic-xcodebuild.log 2>&1
+
+    if [ $? -ne 0 ]; then
+        echo -e "${YELLOW}⚠ App build failed — check /tmp/mosaic-xcodebuild.log${NC}"
+        echo "  The CLI and daemon will work normally without the menu bar app."
+        return 0
+    fi
+
+    local app_path="${derived}/Build/Products/Release/Mosaic.app"
+    if [ -d "$app_path" ]; then
+        # Remove quarantine so Gatekeeper doesn't block it on first launch.
+        xattr -dr com.apple.quarantine "$app_path" 2>/dev/null || true
+        echo -e "${GREEN}✓ Mosaic.app built${NC}"
+    fi
+}
+
 # Launch the Swift menu bar app.
 # Uses the bundle ID so macOS finds it wherever it's registered — the same
 # mechanism that auto-launches it when a .mosaic file is double-clicked.
@@ -490,7 +539,8 @@ main() {
         exit 1
     fi
 
-    # Start the Swift app (best-effort — warns but doesn't fail)
+    # Build and start the Swift app (best-effort — warns but doesn't fail)
+    build_app
     start_app
 
     print_success
