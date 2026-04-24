@@ -94,7 +94,7 @@ func (c *Client) tickStunPing(state ClientState) {
 // timed out. If the evicted peer was the network leader, triggers STUN re-registration.
 func (c *Client) tickPeerPings(state ClientState) {
 	type pingTarget struct {
-		conn *net.UDPConn
+		conn net.PacketConn
 		addr *net.UDPAddr
 	}
 
@@ -102,15 +102,17 @@ func (c *Client) tickPeerPings(state ClientState) {
 	now := time.Now()
 	var toSend []pingTarget
 	deadLeaderFound := false
+	var turnFallbackIDs []string  // peers to try TURN for (direct timed out)
+	var stunRetryIDs   []string   // TURN peers to attempt STUN promotion for
 
 	for id, peer := range c.peers {
 		if peer.Conn == nil {
 			continue
 		}
-		// Evict peers that haven't ponged within the timeout window.
-		// LastPeerPong is initialised to time.Now() in ConnectToPeer, so the
-		// timeout clock starts from the moment the connection is established.
-		if now.Sub(peer.LastPeerPong) > peerPongTimeout {
+		staleness := now.Sub(peer.LastPeerPong)
+
+		// Evict peers that haven't ponged within the full timeout window.
+		if staleness > peerPongTimeout {
 			if peer.IsLeader {
 				deadLeaderFound = true
 			}
@@ -118,6 +120,19 @@ func (c *Client) tickPeerPings(state ClientState) {
 			c.notifyError(fmt.Errorf("peer %s timed out — evicted", id))
 			continue
 		}
+
+		// If a direct peer hasn't ponged within the TURN fallback window and
+		// we haven't already switched it to TURN, queue a fallback attempt.
+		if !peer.ViaTURN && staleness > turnFallbackTimeout && peer.IsLeader {
+			turnFallbackIDs = append(turnFallbackIDs, id)
+		}
+
+		// Periodically retry STUN hole-punch for TURN-relayed peers so they
+		// can be promoted back to direct UDP when network conditions improve.
+		if peer.ViaTURN {
+			stunRetryIDs = append(stunRetryIDs, id)
+		}
+
 		toSend = append(toSend, pingTarget{conn: peer.Conn, addr: peer.Address})
 	}
 	c.mutex.Unlock()
@@ -126,12 +141,25 @@ func (c *Client) tickPeerPings(state ClientState) {
 	for _, t := range toSend {
 		msg := api.NewPeerPingMessage(api.NewSignature(c.id))
 		if data, err := msg.Serialize(); err == nil {
-			t.conn.WriteToUDP(data, t.addr) //nolint:errcheck — best-effort UDP
+			t.conn.WriteTo(data, t.addr) //nolint:errcheck — best-effort UDP
 		}
 	}
 
+	// TURN fallback: leader peer hasn't responded to direct hole-punch.
+	for _, id := range turnFallbackIDs {
+		go func(peerID string) {
+			if err := c.ConnectViaTURN(peerID); err != nil {
+				c.notifyError(fmt.Errorf("TURN fallback failed for %s: %w", peerID, err))
+			}
+		}(id)
+	}
+
+	// STUN promotion attempts for existing TURN connections.
+	for _, id := range stunRetryIDs {
+		go c.tryPromoteToDirectUDP(id)
+	}
+
 	// A member whose leader just died re-registers with STUN.
-	// STUN will elect whoever has the lowest queue position among active clients.
 	if deadLeaderFound && state != StateLeader {
 		go c.reregisterWithStun()
 	}
@@ -220,7 +248,7 @@ func (c *Client) sendPeerPing(peerID string) error {
 		return fmt.Errorf("failed to serialize peer ping: %w", err)
 	}
 
-	_, err = peer.Conn.WriteToUDP(data, peer.Address)
+	_, err = peer.Conn.WriteTo(data, peer.Address)
 	return err
 }
 
@@ -240,6 +268,6 @@ func (c *Client) sendPeerPong(peerId string) error {
 		return fmt.Errorf("failed to serialize peer pong: %w", err)
 	}
 
-	_, err = peer.Conn.WriteToUDP(data, peer.Address)
+	_, err = peer.Conn.WriteTo(data, peer.Address)
 	return err
 }

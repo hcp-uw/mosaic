@@ -91,8 +91,10 @@ func main() {
 		AuthHandler: func(username, realm string, srcAddr net.Addr) (key []byte, ok bool) {
 			password, exists := userMap[username]
 			if !exists {
+				log.Printf("AUTH DENIED  user=%q src=%s", username, srcAddr)
 				return nil, false
 			}
+			log.Printf("AUTH OK      user=%q src=%s", username, srcAddr)
 			return turn.GenerateAuthKey(username, realm, password), true
 		},
 

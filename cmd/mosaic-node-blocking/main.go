@@ -85,7 +85,7 @@ func main() {
 }
 
 func runClient(serverAddr string) {
-	config := p2p.DefaultClientConfig(serverAddr)
+	config := p2p.DefaultClientConfig(serverAddr, shared.DefaultTURNServer, shared.TURNUsername, shared.TURNPassword)
 	client, err := p2p.NewClient(config)
 	if err != nil {
 		log.Fatalf("Failed to create client: %v", err)

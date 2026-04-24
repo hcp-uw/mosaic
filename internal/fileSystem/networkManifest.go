@@ -136,7 +136,7 @@ func ReadAndDecryptNetworkManifest(mosaicDir string, aesKey [32]byte, userID int
 	if err != nil {
 		return m, err
 	}
-	i := findUserIndex(m, userID)
+	i := FindUserIndex(m, userID)
 	if i != -1 {
 		if derr := DecryptUserFiles(&m.Entries[i], priv); derr != nil {
 			// Non-fatal: entry may be new and have no ciphertext yet.
@@ -152,7 +152,7 @@ func EncryptSignAndWriteNetworkManifest(mosaicDir string, aesKey [32]byte, m Net
 	networkManifestMu.Lock()
 	defer networkManifestMu.Unlock()
 
-	i := findUserIndex(m, userID)
+	i := FindUserIndex(m, userID)
 	if i != -1 {
 		if err := EncryptAndSignUserEntry(&m.Entries[i], kp); err != nil {
 			return fmt.Errorf("could not encrypt/sign entry: %w", err)
@@ -165,8 +165,8 @@ func EncryptSignAndWriteNetworkManifest(mosaicDir string, aesKey [32]byte, m Net
 // Binary search helpers
 // ──────────────────────────────────────────────────────────
 
-// findUserIndex returns the index in m.Entries where UserID == userID, or -1.
-func findUserIndex(m NetworkManifest, userID int) int {
+// FindUserIndex returns the index in m.Entries where UserID == userID, or -1.
+func FindUserIndex(m NetworkManifest, userID int) int {
 	n := len(m.Entries)
 	i := sort.Search(n, func(i int) bool { return m.Entries[i].UserID >= userID })
 	if i < n && m.Entries[i].UserID == userID {
@@ -186,7 +186,7 @@ func insertSorted(entries []UserNetworkEntry, e UserNetworkEntry) []UserNetworkE
 // GetUserFiles returns the in-memory Files for userID, or nil if not present.
 // Only populated after DecryptUserFiles has been called for that entry.
 func GetUserFiles(m NetworkManifest, userID int) []NetworkFileEntry {
-	i := findUserIndex(m, userID)
+	i := FindUserIndex(m, userID)
 	if i == -1 {
 		return nil
 	}
@@ -195,7 +195,7 @@ func GetUserFiles(m NetworkManifest, userID int) []NetworkFileEntry {
 
 // UserExistsInNetwork reports whether userID has an entry in the manifest.
 func UserExistsInNetwork(m NetworkManifest, userID int) bool {
-	return findUserIndex(m, userID) != -1
+	return FindUserIndex(m, userID) != -1
 }
 
 // ──────────────────────────────────────────────────────────
@@ -205,7 +205,7 @@ func UserExistsInNetwork(m NetworkManifest, userID int) bool {
 // AddFileToNetwork adds or replaces a NetworkFileEntry for the given user.
 // Requires DecryptUserFiles to have been called first for this user's entry.
 func AddFileToNetwork(m NetworkManifest, userID int, username string, entry NetworkFileEntry) NetworkManifest {
-	i := findUserIndex(m, userID)
+	i := FindUserIndex(m, userID)
 	if i == -1 {
 		m.Entries = insertSorted(m.Entries, UserNetworkEntry{
 			UserID:   userID,
@@ -227,7 +227,7 @@ func AddFileToNetwork(m NetworkManifest, userID int, username string, entry Netw
 // RemoveFileFromNetwork removes the named file from userID's entry.
 // Requires DecryptUserFiles to have been called first.
 func RemoveFileFromNetwork(m NetworkManifest, userID int, filename string) NetworkManifest {
-	i := findUserIndex(m, userID)
+	i := FindUserIndex(m, userID)
 	if i == -1 {
 		return m
 	}
@@ -247,7 +247,7 @@ func RemoveFileFromNetwork(m NetworkManifest, userID int, filename string) Netwo
 // RenameFileInNetwork renames a file within userID's entry.
 // Requires DecryptUserFiles to have been called first.
 func RenameFileInNetwork(m NetworkManifest, userID int, oldName, newName string) NetworkManifest {
-	i := findUserIndex(m, userID)
+	i := FindUserIndex(m, userID)
 	if i == -1 {
 		return m
 	}
@@ -376,7 +376,7 @@ func MergeNetworkManifest(local, remote NetworkManifest) NetworkManifest {
 			continue
 		}
 
-		i := findUserIndex(merged, remoteEntry.UserID)
+		i := FindUserIndex(merged, remoteEntry.UserID)
 		if i == -1 {
 			// New user not in local manifest.
 			merged.Entries = insertSorted(merged.Entries, remoteEntry)

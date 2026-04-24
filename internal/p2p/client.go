@@ -16,6 +16,9 @@ type Client struct {
 	queuePosition int // server-assigned position; 1 = leader, 2 = next, etc.
 	serverAddr       *net.UDPAddr
 	serverConn       *net.UDPConn
+	turnAddr         string // TURN server "host:port", empty = disabled
+	turnUsername     string
+	turnPassword     string
 	state            ClientState
 	peers            map[string]*PeerInfo
 	mutex            sync.RWMutex
@@ -40,14 +43,20 @@ type Client struct {
 // ClientConfig holds client configuration
 type ClientConfig struct {
 	ServerAddress  string
+	TURNAddress    string // optional — empty disables TURN fallback
+	TURNUsername   string
+	TURNPassword   string
 	PingInterval   time.Duration
 	ConnectTimeout time.Duration
 }
 
-// DefaultClientConfig returns default client configuration
-func DefaultClientConfig(serverAddr string) *ClientConfig {
+// DefaultClientConfig returns default client configuration with TURN fallback enabled.
+func DefaultClientConfig(serverAddr, turnAddr, turnUsername, turnPassword string) *ClientConfig {
 	return &ClientConfig{
 		ServerAddress:  serverAddr,
+		TURNAddress:    turnAddr,
+		TURNUsername:   turnUsername,
+		TURNPassword:   turnPassword,
 		PingInterval:   10 * time.Second,
 		ConnectTimeout: 30 * time.Second,
 	}
@@ -68,6 +77,9 @@ func NewClient(config *ClientConfig) (*Client, error) {
 
 	return &Client{
 		serverAddr:       serverAddr,
+		turnAddr:         config.TURNAddress,
+		turnUsername:     config.TURNUsername,
+		turnPassword:     config.TURNPassword,
 		state:            StateDisconnected,
 		peers:            make(map[string]*PeerInfo),
 		ctx:              ctx,

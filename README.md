@@ -1,7 +1,7 @@
 # Mosaic
 ### The cloud that belongs to everyone.
 
-Mosaic is a peer-to-peer cloud storage network. Instead of uploading to a central server, files are distributed as shards across trusted nodes using Reed-Solomon erasure coding. Every participant contributes storage and gains access to the network in return.
+Mosaic is a peer-to-peer cloud storage network. Instead of uploading to a central server, files are distributed as shards across multiple user nodes. Every participant contributes storage and gains access to the network in return.
 
 ---
 

@@ -16,6 +16,14 @@ const (
 	// DefaultSTUNServer is the production STUN server address.
 	// Change this one constant if the droplet IP or port ever changes.
 	DefaultSTUNServer = "178.128.151.84:3478"
+
+	// DefaultTURNServer is the TURN relay address — same droplet, port 3479.
+	// Used as fallback when STUN hole-punching fails (e.g. restrictive NAT/firewall).
+	DefaultTURNServer = "178.128.151.84:3479"
+
+	// TURNUsername and TURNPassword are the shared credentials for the relay.
+	TURNUsername = "mosaic"
+	TURNPassword = "mosaic-turn"
 )
 
 // MosaicDir returns ~/Mosaic — the user's file storage directory.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/hcp-uw/mosaic/internal/api"
 	"github.com/hcp-uw/mosaic/internal/cli/protocol"
@@ -31,7 +32,7 @@ func HandleJoin(req protocol.JoinRequest) protocol.JoinResponse {
 func runClient(serverAddr string, errCh chan<- error) {
 	mosaicDir := shared.MosaicDir()
 
-	config := p2p.DefaultClientConfig(serverAddr)
+	config := p2p.DefaultClientConfig(serverAddr, shared.DefaultTURNServer, shared.TURNUsername, shared.TURNPassword)
 	client, err := p2p.NewClient(config)
 	if err != nil {
 		log.Printf("Failed to create P2P client: %v", err)
@@ -93,6 +94,8 @@ func runClient(serverAddr string, errCh chan<- error) {
 }
 
 // pushManifestToPeer sends our local network manifest to a newly connected peer.
+// Retries until a peer is reachable (ConnectToPeer is async so Conn may not be
+// set yet when OnPeerAssigned fires).
 func pushManifestToPeer(mosaicDir string, client *p2p.Client) {
 	aesKey, err := filesystem.LoadOrCreateNetworkKey(shared.NetworkKeyPath())
 	if err != nil {
@@ -109,11 +112,17 @@ func pushManifestToPeer(mosaicDir string, client *p2p.Client) {
 		fmt.Println("pushManifestToPeer: could not serialize manifest:", err)
 		return
 	}
-	if err := client.SendToAllPeers(api.NewManifestSyncMessage(data)); err != nil {
-		fmt.Println("pushManifestToPeer: send error:", err)
-	} else {
-		fmt.Println("pushManifestToPeer: manifest pushed to peer")
+
+	msg := api.NewManifestSyncMessage(data)
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := client.SendToAllPeers(msg); err == nil {
+			fmt.Println("pushManifestToPeer: manifest pushed to peer")
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
+	fmt.Println("pushManifestToPeer: timed out waiting for a connected peer")
 }
 
 // handleManifestSync merges a received manifest into our local one.
@@ -145,9 +154,33 @@ func handleManifestSync(mosaicDir string, msg *api.Message) {
 	}
 	fmt.Printf("handleManifestSync: merged — %d user entries\n", len(merged.Entries))
 
+	// Decrypt our section and create stubs + local manifest entries for any
+	// files we don't already have locally.
 	kp, kerr := filesystem.LoadOrCreateUserKey(shared.UserKeyPath())
-	if kerr == nil {
-		_ = filesystem.GetUserFiles(merged, helpers.GetAccountID())
-		_ = kp
+	if kerr != nil {
+		fmt.Println("handleManifestSync: could not load user key:", kerr)
+		return
 	}
+	accountID := helpers.GetAccountID()
+	idx := filesystem.FindUserIndex(merged, accountID)
+	if idx == -1 {
+		return // no files for this user yet
+	}
+	if err := filesystem.DecryptUserFiles(&merged.Entries[idx], kp.Private); err != nil {
+		fmt.Println("handleManifestSync: could not decrypt user files:", err)
+		return
+	}
+	for _, f := range merged.Entries[idx].Files {
+		if filesystem.IsInManifest(mosaicDir, f.Name) {
+			continue
+		}
+		if err := filesystem.AddToManifest(mosaicDir, f.Name, f.Size, accountID, f.ContentHash); err != nil {
+			fmt.Printf("handleManifestSync: could not add %s to manifest: %v\n", f.Name, err)
+			continue
+		}
+		if err := filesystem.WriteStub(mosaicDir, f.Name, f.Size, accountID, f.ContentHash); err != nil {
+			fmt.Printf("handleManifestSync: could not write stub for %s: %v\n", f.Name, err)
+		}
+	}
+	fmt.Printf("handleManifestSync: synced %d files from network\n", len(merged.Entries[idx].Files))
 }
