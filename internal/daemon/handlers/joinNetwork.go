@@ -147,12 +147,18 @@ func handleManifestSync(mosaicDir string, msg *api.Message) {
 		fmt.Println("handleManifestSync: could not read local manifest:", err)
 		return
 	}
-	merged := filesystem.MergeNetworkManifest(local, remote)
+	merged, changed := filesystem.MergeNetworkManifest(local, remote)
 	if err := filesystem.WriteNetworkManifest(mosaicDir, aesKey, merged); err != nil {
 		fmt.Println("handleManifestSync: could not write merged manifest:", err)
 		return
 	}
-	fmt.Printf("handleManifestSync: merged — %d user entries\n", len(merged.Entries))
+	fmt.Printf("handleManifestSync: merged — %d user entries (changed=%v)\n", len(merged.Entries), changed)
+
+	// If the merge brought in new information, broadcast the combined result
+	// back to all peers so the network converges to the same state.
+	if changed {
+		go BroadcastNetworkManifest(merged)
+	}
 
 	// Decrypt our section and create stubs + local manifest entries for any
 	// files we don't already have locally.

@@ -55,6 +55,7 @@ type UserNetworkEntry struct {
 	EphemeralPubKey []byte `json:"ephemeralPubKey"` // ECIES sender ephemeral public key
 	EncryptedFiles  []byte `json:"encryptedFiles"`  // ECIES ciphertext of json(Files)
 	Signature       []byte `json:"signature"`       // ECDSA r||s over SHA-256(EphemeralPubKey||EncryptedFiles)
+	UpdatedAt       string `json:"updatedAt"`       // RFC3339 UTC; set on each sign so merge can compare per-user
 
 	// In-memory only. Populated by DecryptUserFiles; never written to disk.
 	Files []NetworkFileEntry `json:"-"`
@@ -291,6 +292,7 @@ func EncryptAndSignUserEntry(entry *UserNetworkEntry, kp UserKeyPair) error {
 	}
 	entry.EphemeralPubKey = ephPub
 	entry.EncryptedFiles = ciphertext
+	entry.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 
 	// Sign SHA-256(EphemeralPubKey || EncryptedFiles).
 	hash := ciphertextPayloadHash(*entry)
@@ -360,15 +362,15 @@ func VerifyUserEntry(entry UserNetworkEntry) bool {
 // the local one. Every remote entry is signature-verified before being
 // accepted. Tampered or unsigned entries are silently dropped.
 //
-// Merge strategy per user:
-//   - Remote entry passes verification + newer manifest → take remote entry
-//   - Remote entry fails verification → drop it, keep local
-//   - Local only → keep as-is
-func MergeNetworkManifest(local, remote NetworkManifest) NetworkManifest {
-	localTime, _ := time.Parse(time.RFC3339, local.UpdatedAt)
-	remoteTime, _ := time.Parse(time.RFC3339, remote.UpdatedAt)
-
+// Merge strategy per user entry (independent of global manifest timestamp):
+//   - Remote entry fails signature verification → drop, keep local
+//   - Remote entry not in local manifest → add it
+//   - Both exist → keep whichever has the newer per-entry UpdatedAt
+//
+// Returns the merged manifest and whether anything actually changed.
+func MergeNetworkManifest(local, remote NetworkManifest) (NetworkManifest, bool) {
 	merged := local
+	changed := false
 
 	for _, remoteEntry := range remote.Entries {
 		if !VerifyUserEntry(remoteEntry) {
@@ -378,18 +380,21 @@ func MergeNetworkManifest(local, remote NetworkManifest) NetworkManifest {
 
 		i := FindUserIndex(merged, remoteEntry.UserID)
 		if i == -1 {
-			// New user not in local manifest.
 			merged.Entries = insertSorted(merged.Entries, remoteEntry)
+			changed = true
 			continue
 		}
 
-		// Both exist: take remote if remote manifest is strictly newer.
-		if remoteTime.After(localTime) {
+		// Both exist: compare per-entry timestamps and take the newer one.
+		localEntryTime, _ := time.Parse(time.RFC3339, merged.Entries[i].UpdatedAt)
+		remoteEntryTime, _ := time.Parse(time.RFC3339, remoteEntry.UpdatedAt)
+		if remoteEntryTime.After(localEntryTime) {
 			merged.Entries[i] = remoteEntry
+			changed = true
 		}
 	}
 
-	return merged
+	return merged, changed
 }
 
 // ManifestToJSON serializes the manifest to JSON bytes for P2P transmission.
