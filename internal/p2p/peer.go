@@ -11,9 +11,11 @@ import (
 // PeerInfo holds information about the assigned peer
 type PeerInfo struct {
 	Address      *net.UDPAddr
-	Conn         *net.UDPConn
+	Conn         net.PacketConn // direct *net.UDPConn or a TURN relay PacketConn
 	ID           string
+	IsLeader     bool      // true when this peer is the network leader
 	LastPeerPong time.Time
+	ViaTURN      bool      // true when Conn routes through the TURN relay
 }
 
 // SendToPeer sends data to the connected peer
@@ -41,7 +43,7 @@ func (c *Client) SendToPeer(peerId string, message *api.Message) error {
 		return err
 	}
 
-	_, err = peerInfo.Conn.WriteToUDP(data, peerInfo.Address)
+	_, err = peerInfo.Conn.WriteTo(data, peerInfo.Address)
 	return err
 }
 
@@ -66,8 +68,30 @@ func (c *Client) SendToAllPeers(message *api.Message) error {
 	}
 
 	for _, peer := range allPeers {
-		_, err := peer.Conn.WriteToUDP(data, peer.Address)
+		_, err := peer.Conn.WriteTo(data, peer.Address)
 		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SendRawToAllPeers sends raw bytes directly to all connected peers without
+// any JSON serialization. Used for binary shard frames.
+func (c *Client) SendRawToAllPeers(data []byte) error {
+	c.mutex.RLock()
+	allPeers := c.GetConnectedPeers()
+	state := c.state
+	c.mutex.RUnlock()
+
+	if len(allPeers) == 0 {
+		return fmt.Errorf("no peer information available")
+	}
+	if state == StateDisconnected {
+		return fmt.Errorf("client disconnected")
+	}
+	for _, peer := range allPeers {
+		if _, err := peer.Conn.WriteTo(data, peer.Address); err != nil {
 			return err
 		}
 	}
@@ -123,7 +147,7 @@ func (c *Client) establishPeerConnection(peerAddr *net.UDPAddr) {
 	// Send initial "punch" packets to establish connection
 	punchMessage := []byte("STUN_PUNCH")
 	for range 3 {
-		_, err := peerConn.WriteToUDP(punchMessage, peerAddr)
+		_, err := peerConn.WriteTo(punchMessage, peerAddr)
 		if err != nil {
 			c.notifyError(fmt.Errorf("failed to send punch packet: %w", err))
 		}

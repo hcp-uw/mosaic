@@ -1,7 +1,11 @@
 package helpers
 
-// Returns the user's accountID (which they dont know)
+// GetAccountID returns a deterministic integer derived from the user's public key.
+// Returns 0 if not logged in.
 func GetAccountID() int {
-	// all the actual logic and stuff goes here
-	return 12304938
+	s, err := LoadSession()
+	if err != nil {
+		return 0
+	}
+	return DeriveAccountID(s.PublicKey)
 }

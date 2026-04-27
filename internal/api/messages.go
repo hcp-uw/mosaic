@@ -22,16 +22,21 @@ const (
 	WaitingForPeer   MessageType = "waiting_for_peer"
 	AssignedAsLeader MessageType = "assigned_as_leader"
 
-	// Leader to Peer message 
+	// Leader to Peer message
 	// To be sent to the joining node contianing a list of all nodes in the network
 	CurrentMembers MessageType = "current_members"
-	// To be sent to the nodes in the network notifying them of the new node that is joining 
+	// To be sent to the nodes in the network notifying them of the new node that is joining
 	NewPeerJoiner MessageType = "new_joiner"
 
 	// Peer to Peer messages
-	PeerPing MessageType = "peer_ping"
-	PeerPong MessageType = "peer_pong"
+	PeerPing        MessageType = "peer_ping"
+	PeerPong        MessageType = "peer_pong"
 	PeerTextMessage MessageType = "peer_text_message"
+	ManifestSync    MessageType = "manifest_sync"
+	ShardPush       MessageType = "shard_push"
+	ShardRequest    MessageType = "shard_request"
+	ShardResponse   MessageType = "shard_response"
+	ShardChunk      MessageType = "shard_chunk"
 )
 
 // Message represents the base message structure
@@ -51,14 +56,13 @@ func NewSignature(pubKey string) Signature {
 	return Signature{PubKey: pubKey}
 }
 
-// ClientRegisterData represents client registration information (no data needed)
-type ClientRegisterData struct {
-	// No fields needed - client ID is derived from network address
-}
+// ClientRegisterData represents client registration information.
+type ClientRegisterData struct{}
 
 type RegisterSuccessData struct {
-	Message string `json:"message"`
-	ID      string `json:"id"`
+	Message       string `json:"message"`
+	ID            string `json:"id"`
+	QueuePosition int    `json:"queuePosition"` // server-assigned; 1 = leader, 2 = next, etc.
 }
 
 // Doesnt need to contain anything
@@ -74,7 +78,7 @@ type CurrentMembersData struct {
 
 type NewPeerJoinerData struct {
 	JoinerAddress string `json:"joiner_address"`
-	JoinerID string `json:"joiner_id"`
+	JoinerID      string `json:"joiner_id"`
 }
 
 // just for testing rn -sending text messages between terminals
@@ -101,12 +105,12 @@ type PeerPingData struct {
 
 func NewPeerTextMessage(message, senderID string) *Message {
 	return &Message{
-		Type: PeerTextMessage,
+		Type:      PeerTextMessage,
 		Timestamp: time.Now(),
 		Sign: Signature{
 			PubKey: senderID,
 		},
-		Data: PeerTextMessageData {
+		Data: PeerTextMessageData{
 			Message: message,
 		},
 	}
@@ -114,12 +118,12 @@ func NewPeerTextMessage(message, senderID string) *Message {
 
 func NewNewPeerJoinerMessage(senderID, joinerID, joinerAddr string) *Message {
 	return &Message{
-		Type: NewPeerJoiner,
+		Type:      NewPeerJoiner,
 		Timestamp: time.Now(),
-		Sign: NewSignature(senderID),
+		Sign:      NewSignature(senderID),
 		Data: NewPeerJoinerData{
 			JoinerAddress: joinerAddr,
-			JoinerID: joinerID,
+			JoinerID:      joinerID,
 		},
 	}
 }
@@ -127,15 +131,15 @@ func NewNewPeerJoinerMessage(senderID, joinerID, joinerAddr string) *Message {
 func NewCurrentMembersMessage(members map[string]*net.UDPAddr, senderID string) *Message {
 	stringMembers := make(map[string]string)
 
-    // 2. Iterate and convert each UDPAddr to a string
-    for id, addr := range members {
-        if addr != nil {
-            stringMembers[id] = addr.String()
-        }
-    }
+	// 2. Iterate and convert each UDPAddr to a string
+	for id, addr := range members {
+		if addr != nil {
+			stringMembers[id] = addr.String()
+		}
+	}
 
 	return &Message{
-		Type: CurrentMembers,
+		Type:      CurrentMembers,
 		Timestamp: time.Now(),
 		Sign: Signature{
 			PubKey: senderID,
@@ -155,7 +159,7 @@ func NewServerAssignedLeaderMessage() *Message {
 	}
 }
 
-// NewClientRegisterMessage creates a client registration message
+// NewClientRegisterMessage creates a client registration message.
 func NewClientRegisterMessage() *Message {
 	return &Message{
 		Type:      ClientRegister,
@@ -176,13 +180,14 @@ func NewPeerAssignmentMessage(peerAddr *net.UDPAddr, peerID string) *Message {
 	}
 }
 
-func NewRegisterSuccessMessage(message, id string) *Message {
+func NewRegisterSuccessMessage(message, id string, queuePosition int) *Message {
 	return &Message{
 		Type:      RegisterSuccess,
 		Timestamp: time.Now(),
 		Data: RegisterSuccessData{
-			Message: message,
-			ID:      id,
+			Message:       message,
+			ID:            id,
+			QueuePosition: queuePosition,
 		},
 	}
 }
@@ -258,9 +263,15 @@ func (m *Message) GetClientRegisterData() (*ClientRegisterData, error) {
 	if m.Type != ClientRegister && m.Type != ClientPing {
 		return nil, ErrInvalidMessageType
 	}
-
-	// No data validation needed since ClientRegisterData is empty
-	return &ClientRegisterData{}, nil
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d ClientRegisterData
+	if err := json.Unmarshal(b, &d); err != nil {
+		return nil, err
+	}
+	return &d, nil
 }
 
 func (m *Message) GetCurrentMembersData() (*CurrentMembersData, error) {
@@ -404,6 +415,164 @@ func (m *Message) GetRegisterSuccessData() (*RegisterSuccessData, error) {
 	var data RegisterSuccessData
 	err = json.Unmarshal(dataBytes, &data)
 	return &data, err
+}
+
+// ManifestSyncData carries the full serialized network manifest (JSON, not
+// encrypted — each UserNetworkEntry's Files section is already ECIES-encrypted
+// and the outer envelope is just the manifest index). Transit security comes
+// from the per-entry ECDSA signatures; a tampered payload is rejected on merge.
+type ManifestSyncData struct {
+	ManifestJSON []byte `json:"manifestJSON"`
+}
+
+// NewManifestSyncMessage creates a manifest sync message for P2P broadcast.
+func NewManifestSyncMessage(manifestJSON []byte) *Message {
+	return &Message{
+		Type:      ManifestSync,
+		Timestamp: time.Now(),
+		Data:      ManifestSyncData{ManifestJSON: manifestJSON},
+	}
+}
+
+// GetManifestSyncData extracts manifest sync data from a message.
+func (m *Message) GetManifestSyncData() (*ManifestSyncData, error) {
+	if m.Type != ManifestSync {
+		return nil, ErrInvalidMessageType
+	}
+	dataBytes, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var data ManifestSyncData
+	err = json.Unmarshal(dataBytes, &data)
+	return &data, err
+}
+
+// ShardPushData carries a single Reed-Solomon shard from an uploading peer.
+type ShardPushData struct {
+	FileHash        string `json:"fileHash"`        // hex SHA-256 of original file
+	FileName        string `json:"fileName"`        // base name without extension
+	FileSize        int    `json:"fileSize"`        // original file size in bytes (needed by DecodeShards)
+	ShardIndex      int    `json:"shardIndex"`      // 0-based index of this shard
+	TotalDataShards int    `json:"totalDataShards"` // minimum shards needed to reconstruct
+	TotalShards     int    `json:"totalShards"`     // data + parity
+	Data            []byte `json:"data"`            // raw shard bytes
+}
+
+// ShardRequestData asks a peer to send a specific shard.
+type ShardRequestData struct {
+	FileHash   string `json:"fileHash"`
+	ShardIndex int    `json:"shardIndex"`
+}
+
+// ShardResponseData is the reply to a ShardRequest.
+type ShardResponseData struct {
+	FileHash   string `json:"fileHash"`
+	ShardIndex int    `json:"shardIndex"`
+	Found      bool   `json:"found"`
+	Data       []byte `json:"data,omitempty"`
+}
+
+func NewShardPushMessage(sign Signature, d ShardPushData) *Message {
+	return &Message{
+		Sign:      sign,
+		Type:      ShardPush,
+		Timestamp: time.Now(),
+		Data:      d,
+	}
+}
+
+func NewShardRequestMessage(sign Signature, d ShardRequestData) *Message {
+	return &Message{
+		Sign:      sign,
+		Type:      ShardRequest,
+		Timestamp: time.Now(),
+		Data:      d,
+	}
+}
+
+func NewShardResponseMessage(sign Signature, d ShardResponseData) *Message {
+	return &Message{
+		Sign:      sign,
+		Type:      ShardResponse,
+		Timestamp: time.Now(),
+		Data:      d,
+	}
+}
+
+func (m *Message) GetShardPushData() (*ShardPushData, error) {
+	if m.Type != ShardPush {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d ShardPushData
+	err = json.Unmarshal(b, &d)
+	return &d, err
+}
+
+func (m *Message) GetShardRequestData() (*ShardRequestData, error) {
+	if m.Type != ShardRequest {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d ShardRequestData
+	err = json.Unmarshal(b, &d)
+	return &d, err
+}
+
+func (m *Message) GetShardResponseData() (*ShardResponseData, error) {
+	if m.Type != ShardResponse {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d ShardResponseData
+	err = json.Unmarshal(b, &d)
+	return &d, err
+}
+
+// ShardChunkData carries one 32KB slice of a Reed-Solomon shard for large-file transfer.
+// Shards are split into chunks because a full shard (e.g. 100MB) far exceeds the UDP max.
+type ShardChunkData struct {
+	FileHash        string `json:"fileHash"`
+	FileName        string `json:"fileName"`        // base name, no extension
+	FileSize        int    `json:"fileSize"`        // original file size in bytes
+	ShardIndex      int    `json:"shardIndex"`      // 0-based shard number
+	ChunkIndex      int    `json:"chunkIndex"`      // 0-based chunk within this shard
+	TotalChunks     int    `json:"totalChunks"`     // total chunks for this shard
+	TotalDataShards int    `json:"totalDataShards"` // data shards needed to reconstruct
+	TotalShards     int    `json:"totalShards"`     // data + parity
+	Data            []byte `json:"data"`            // ≤32KB raw bytes
+}
+
+func NewShardChunkMessage(sign Signature, d ShardChunkData) *Message {
+	return &Message{
+		Sign:      sign,
+		Type:      ShardChunk,
+		Timestamp: time.Now(),
+		Data:      d,
+	}
+}
+
+func (m *Message) GetShardChunkData() (*ShardChunkData, error) {
+	if m.Type != ShardChunk {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d ShardChunkData
+	err = json.Unmarshal(b, &d)
+	return &d, err
 }
 
 // Error types

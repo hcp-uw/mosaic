@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/hcp-uw/mosaic/internal/cli/client"
 	"github.com/hcp-uw/mosaic/internal/cli/protocol"
+	"github.com/hcp-uw/mosaic/internal/cli/shared"
 	"github.com/hcp-uw/mosaic/internal/daemon/handlers/helpers"
 )
 
@@ -32,33 +35,24 @@ func Run(Args []string) {
 
 	switch args[1] {
 	case "login":
-		if len(args) != 4 {
+		if len(args) == 3 && args[2] == "status" {
+			loginStatus()
+		} else if len(args) == 3 {
+			loginWithKey(args[2])
+		} else {
 			fmt.Println()
 			fmt.Println("Usage:")
-			fmt.Println("- mos login key <key>    Login with a key.")
-			os.Exit(1)
-		}
-		switch args[2] {
-		case "key":
-			loginWithKey()
-		default:
-			fmt.Println("Unknown argument:", args[2])
+			fmt.Println("  mos login <key>      Log in with your key.")
+			fmt.Println("  mos login status     Show current login status.")
 			os.Exit(1)
 		}
 	case "logout":
-		if len(args) != 3 {
+		if len(args) != 3 || args[2] != "account" {
 			fmt.Println()
-			fmt.Println("Usage:")
-			fmt.Println("- mos logout account    Logout from the account.")
+			fmt.Println("Usage: mos logout account")
 			os.Exit(1)
 		}
-		switch args[2] {
-		case "account":
-			logoutAccount()
-		default:
-			fmt.Println("Unknown argument:", args[2])
-			os.Exit(1)
-		}
+		logoutAccount()
 	case "version":
 		if len(args) != 2 {
 			fmt.Println()
@@ -68,15 +62,19 @@ func Run(Args []string) {
 		}
 		version()
 	case "join":
-		if len(args) != 4 {
+		if len(args) < 3 {
 			fmt.Println()
 			fmt.Println("Usage:")
-			fmt.Println("- mos join network <Server address to connect to (e.g., 127.0.0.1:3478)> Join the network.")
+			fmt.Println("- mos join network    Join the network.")
 			os.Exit(1)
 		}
 		switch args[2] {
 		case "network":
-			joinNetwork(args[3])
+			addr := stunServerAddr()
+			if len(args) == 4 {
+				addr = args[3] // optional override
+			}
+			joinNetwork(addr)
 		default:
 			fmt.Println("Unknown argument:", args[2])
 			os.Exit(1)
@@ -169,12 +167,15 @@ func Run(Args []string) {
 	case "list":
 		if len(args) != 3 {
 			fmt.Println("Usage:")
-			fmt.Println("- mos list file    List all files on the network.")
+			fmt.Println("- mos list file        List files tracked on this machine.")
+			fmt.Println("- mos list manifest    List all files in your network manifest.")
 			os.Exit(1)
 		}
 		switch args[2] {
 		case "file":
 			listFile()
+		case "manifest":
+			listManifest()
 		default:
 			fmt.Println("Unknown argument:", args[2])
 			os.Exit(1)
@@ -228,20 +229,32 @@ func Run(Args []string) {
 			fmt.Println("Unknown argument:", args[2])
 			os.Exit(1)
 		}
-	case "delete":
-		if len(args) != 4 {
+	case "rename":
+		if len(args) != 5 || args[2] != "file" {
 			fmt.Println("Usage:")
-			fmt.Println("- mos delete file <path>    Delete a file.")
-			fmt.Println("- mos delete folder <path>  Delete a folder.")
+			fmt.Println("- mos rename file <oldname> <newname>    Rename a file on the network.")
 			os.Exit(1)
 		}
-		switch args[2] {
-		case "file":
+		if args[4] == "-" || args[4] == "--" {
+			fmt.Println("Error: invalid new name. Do not use -> syntax.")
+			fmt.Println("Usage:")
+			fmt.Println("- mos rename file <oldname> <newname>    Rename a file on the network.")
+			os.Exit(1)
+		}
+		renameFile()
+	case "delete":
+		switch {
+		case len(args) == 4 && args[2] == "file":
 			deleteFile()
-		case "folder":
+		case len(args) == 5 && args[2] == "file" && args[3] == "-s":
+			deleteStub()
+		case len(args) == 4 && args[2] == "folder":
 			deleteFolder()
 		default:
-			fmt.Println("Unknown argument:", args[2])
+			fmt.Println("Usage:")
+			fmt.Println("- mos delete file <name>       Delete a file from the network.")
+			fmt.Println("- mos delete file -s <name>    Remove local stub only (keeps file in manifest).")
+			fmt.Println("- mos delete folder <name>     Delete a folder.")
 			os.Exit(1)
 		}
 	case "shutdown":
@@ -259,6 +272,15 @@ func Run(Args []string) {
 }
 
 // Connects the user to the mosaic network
+// stunServerAddr returns the STUN server address from STUN_SERVER env var,
+// defaulting to the production droplet.
+func stunServerAddr() string {
+	if v := os.Getenv("STUN_SERVER"); v != "" {
+		return v
+	}
+	return shared.DefaultSTUNServer
+}
+
 func joinNetwork(serverAddr string) {
 	resp, err := client.SendRequest("joinNetwork", protocol.JoinRequest{ServerAddress: serverAddr})
 	exitOnErr(err, "Error joining network.")
@@ -267,7 +289,7 @@ func joinNetwork(serverAddr string) {
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
-	message := fmt.Sprintf("\nJoined network successfully.\n- Connected to %d peers.\n", 0)
+	message := "\nJoined network successfully.\n-"
 	fmt.Println(message)
 }
 
@@ -276,13 +298,37 @@ func statusNetwork() {
 	resp, err := client.SendRequest("statusNetwork", protocol.NetworkStatusRequest{})
 	exitOnErr(err, "Error getting network status.")
 
-	var cmdResp protocol.NetworkStatusResponse
-	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
+	var r protocol.NetworkStatusResponse
+	if err := mapToStruct(resp.Data, &r); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
-	message := fmt.Sprintf("\nNetwork Status:\n- Total Network Storage: %d GB\n- Your Available Storage: %d GB\n- Number of Peers: %d\n",
-		cmdResp.NetworkStorage, cmdResp.AvailableStorage, cmdResp.Peers)
-	fmt.Println(message)
+
+	fmt.Println()
+	fmt.Println("Network Status")
+	fmt.Println("──────────────")
+
+	if !r.Connected {
+		fmt.Println("  Connection:  not connected (run: mos join network <stun-ip>:3478)")
+	} else {
+		role := "member"
+		if r.IsLeader {
+			role = "leader"
+		}
+		fmt.Printf("  Connection:  connected (%s)\n", role)
+		fmt.Printf("  State:       %s\n", r.State)
+		fmt.Printf("  Peers:       %d\n", r.Peers)
+		if len(r.PeerAddresses) > 0 {
+			fmt.Println("  Peer addresses:")
+			for _, addr := range r.PeerAddresses {
+				fmt.Printf("    - %s\n", addr)
+			}
+		}
+	}
+
+	fmt.Println()
+	fmt.Printf("  Network storage:    %d GB\n", r.NetworkStorage)
+	fmt.Printf("  Available storage:  %d GB\n", r.AvailableStorage)
+	fmt.Println()
 }
 
 // Gets info about a specific node in the network
@@ -313,31 +359,63 @@ func statusAccount() {
 	fmt.Println(message)
 }
 
-// Logs in with a provided key
-func loginWithKey() {
-	key := args[3]
+// Shows current login status
+func loginStatus() {
+	resp, err := client.SendRequest("loginStatus", protocol.LoginStatusRequest{})
+	exitOnErr(err, "Error getting login status.")
+
+	var cmdResp protocol.LoginStatusResponse
+	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
+		exitOnErr(err, "Error parsing response.")
+	}
+	if !cmdResp.LoggedIn {
+		fmt.Println("\nNot logged in.")
+		return
+	}
+
+	keyStatus := "missing"
+	if cmdResp.HasKeyPair {
+		keyStatus = "present"
+	}
+	raw, _ := hex.DecodeString(cmdResp.PublicKey)
+	h := sha256.Sum256(raw)
+	fp := hex.EncodeToString(h[:])[:8]
+	fmt.Printf("\nLogged in.\n- Identity:  %s...\n- Key pair:  %s\n", fp, keyStatus)
+	if !cmdResp.HasKeyPair {
+		fmt.Println("\nWarning: key pair file is missing. Try logging out and back in.")
+	}
+}
+
+// Logs in with a key — no auth server, identity derived from the key.
+func loginWithKey(key string) {
 	resp, err := client.SendRequest("loginKey", protocol.LoginKeyRequest{Key: key})
-	exitOnErr(err, "Error logging in with key.")
+	exitOnErr(err, "Error logging in.")
 
 	var cmdResp protocol.LoginKeyResponse
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
-	message := fmt.Sprintf("\nLogged in with key successfully.\n- Current Node: %s@node-%v\n", cmdResp.Username, cmdResp.CurrentNode)
-	fmt.Println(message)
+	if !cmdResp.Success {
+		if cmdResp.AlreadyLoggedIn {
+			fmt.Println("\nAlready logged in. Run 'mos logout account' first.")
+		} else {
+			fmt.Println("\nLogin failed:", cmdResp.Details)
+		}
+		os.Exit(1)
+	}
+	fmt.Println("\n" + cmdResp.Details)
 }
 
 // Logs out of the current account
 func logoutAccount() {
-	resp, err := client.SendRequest("logout", protocol.LogoutRequest{AccountID: helpers.GetAccountID()})
+	resp, err := client.SendRequest("logout", protocol.LogoutRequest{})
 	exitOnErr(err, "Error logging out.")
 
 	var cmdResp protocol.LogoutResponse
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
-	message := fmt.Sprintf("\nLogged out successfully.\n- Username: %s\n", cmdResp.Username)
-	fmt.Println(message)
+	fmt.Println("\nLogged out successfully.")
 }
 
 // List some data on all the peers in the network
@@ -421,11 +499,47 @@ func listFile() {
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
-	message := "\nFiles on Network:\n"
-	for _, file := range cmdResp.Files {
-		message += fmt.Sprintf("- %s\n", file)
+	if len(cmdResp.Files) == 0 {
+		fmt.Println("\nNo local files.")
+		return
 	}
-	fmt.Println(message)
+	fmt.Println("\nLocal Files:")
+	for _, f := range cmdResp.Files {
+		status := "stub"
+		if f.Cached {
+			status = "cached"
+		}
+		fmt.Printf("- %-30s [%s]\n", f.Name, status)
+	}
+	fmt.Println()
+}
+
+// Lists all files in the user's network manifest (cross-machine view)
+func listManifest() {
+	resp, err := client.SendRequest("listManifest", protocol.ListManifestRequest{})
+	exitOnErr(err, "Error listing manifest.")
+
+	var cmdResp protocol.ListManifestResponse
+	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
+		exitOnErr(err, "Error parsing response.")
+	}
+	if !cmdResp.Success {
+		fmt.Println("\nError:", cmdResp.Details)
+		os.Exit(1)
+	}
+	if len(cmdResp.Files) == 0 {
+		fmt.Println("\nNo files in network manifest.")
+		return
+	}
+	fmt.Println("\nNetwork Manifest:")
+	for _, f := range cmdResp.Files {
+		cached := "stub"
+		if f.Cached {
+			cached = "cached"
+		}
+		fmt.Printf("- %-30s  %d KB  added %s  [%s]\n", f.Name, f.Size/1024, f.DateAdded, cached)
+	}
+	fmt.Println()
 }
 
 // Uploads a file to the network
@@ -444,10 +558,13 @@ func uploadFile() {
 		os.Exit(1)
 	}
 
+	absPath, err := filepath.Abs(filePath)
+	exitOnErr(err, "Error resolving path:")
+
 	fileSize := fileInfo.Size() / 1024
 	fmt.Printf("Uploading file: %s (%d KB)\n", fileInfo.Name(), fileSize)
 	resp, uploadErr := client.SendRequest("uploadFile", protocol.UploadFileRequest{
-		Path: filePath,
+		Path: absPath,
 	})
 	exitOnErr(uploadErr, "Error uploading file.")
 
@@ -531,6 +648,23 @@ func downloadFolder() {
 	fmt.Println(message)
 }
 
+// Removes only the local stub/cache without touching the manifest
+func deleteStub() {
+	filePath := args[4]
+	resp, err := client.SendRequest("deleteStub", protocol.DeleteStubRequest{FilePath: filePath})
+	exitOnErr(err, "Error deleting stub for "+filePath+": ")
+
+	var cmdResp protocol.DeleteStubResponse
+	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
+		exitOnErr(err, "Error parsing response.")
+	}
+	if !cmdResp.Success {
+		fmt.Println("\nError:", cmdResp.Details)
+		os.Exit(1)
+	}
+	fmt.Printf("\n%s\n", cmdResp.Details)
+}
+
 // Deletes a file from the network
 func deleteFile() {
 	filePath := args[3]
@@ -562,6 +696,30 @@ func deleteFolder() {
 	fmt.Println(message)
 }
 
+// Renames a file on the network
+func renameFile() {
+	oldName := args[3]
+	newName := args[4]
+	resp, err := client.SendRequest("renameFile", protocol.RenameFileRequest{FilePath: oldName, NewName: newName})
+	if err != nil {
+		fmt.Println("Error: could not reach daemon. Is mosaic-node running?")
+		fmt.Println("Start it with: mosaic-node &")
+		fmt.Println("Details:", err)
+		os.Exit(1)
+	}
+
+	var cmdResp protocol.RenameFileResponse
+	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
+		fmt.Println("Error parsing response:", err)
+		os.Exit(1)
+	}
+	if !cmdResp.Success {
+		fmt.Println("Error:", cmdResp.Details)
+		os.Exit(1)
+	}
+	fmt.Printf("\nRenamed '%s' to '%s' successfully.\n", oldName, cmdResp.FileName)
+}
+
 // Gets info about a file from the network
 func fileInfo() {
 	filePath := args[3]
@@ -574,9 +732,10 @@ func fileInfo() {
 		exitOnErr(err, "Error parsing response.")
 	}
 	message := fmt.Sprintf("\nFile '%v' info retrieved successfully from network.\n"+
-		"- NodeID: %s@node-%v\n"+
+		"- Owner:      %s\n"+
+		"- Node:       %d\n"+
 		"- Date Added: %v\n"+
-		"- Size: %v GB\n", cmdResp.FileName, cmdResp.Username, cmdResp.NodeID, cmdResp.DateAdded, cmdResp.Size)
+		"- Size:       %d KB\n", cmdResp.FileName, cmdResp.Username, cmdResp.NodeID, cmdResp.DateAdded, cmdResp.Size/1024)
 	fmt.Println(message)
 }
 
@@ -623,7 +782,12 @@ func help() {
 // ExitOnErr prints the message and error and exits if err is not nil
 func exitOnErr(err error, msg string) {
 	if err != nil {
-		fmt.Println(msg, err)
+		if strings.Contains(err.Error(), "failed to connect to daemon") {
+			fmt.Println("Error: could not reach daemon. Is mosaic-node running?")
+			fmt.Println("Start it with: mosaic-node &")
+		} else {
+			fmt.Println(msg, err)
+		}
 		os.Exit(1)
 	}
 }
@@ -661,17 +825,17 @@ func Shutdown() {
 		daemonName = "mosaicd.exe"
 		needsSudo = false
 	case "darwin":
-		pidFile = "/tmp/mosaicd.pid"
-		sockFile = "/tmp/mosaicd.sock"
-		logFile = "/tmp/mosaicd.log"
+		pidFile = shared.DaemonPIDFile
+		sockFile = shared.SocketPath
+		logFile = shared.DaemonLogFile
 		binDir = "/usr/local/bin"
 		cliName = "mos"
 		daemonName = "mosaicd"
 		needsSudo = true
 	case "linux":
-		pidFile = "/tmp/mosaicd.pid"
-		sockFile = "/tmp/mosaicd.sock"
-		logFile = "/tmp/mosaicd.log"
+		pidFile = shared.DaemonPIDFile
+		sockFile = shared.SocketPath
+		logFile = shared.DaemonLogFile
 		binDir = filepath.Join(os.Getenv("HOME"), ".local", "bin")
 		cliName = "mos"
 		daemonName = "mosaicd"
@@ -679,6 +843,15 @@ func Shutdown() {
 	default:
 		fmt.Printf("Unsupported operating system: %s\n", goos)
 		os.Exit(1)
+	}
+
+	// Stop the Swift menu bar app (macOS only)
+	if goos == "darwin" {
+		fmt.Println("Stopping Mosaic app...")
+		stopAppCmd := exec.Command("pkill", "-x", "Mosaic")
+		stopAppCmd.Run()
+		exec.Command("pkill", "-x", "MosaicFinderSync").Run()
+		fmt.Println("✓ Mosaic app stopped")
 	}
 
 	// Try to stop the daemon - first by PID file
@@ -825,71 +998,3 @@ func isDaemonRunning(goos string) bool {
 		return false
 	}
 }
-
-// ... (keep the killProcess, killByName, and isDaemonRunning functions the same) ...
-
-// This is the old version of upload folder which I kept because I am proud of my recursive solution heh :)
-// Unfortunately it will eventually have to go but not today!
-/*
-func uploadFolder() {
-	root := args[3]
-
-	info, err := os.Stat(root)
-	if os.IsNotExist(err) {
-		fmt.Println("Error: folder does not exist at path:", root)
-		os.Exit(1)
-	}
-	exitOnErr(err, "Error reading folder info:")
-
-	if !info.IsDir() {
-		fmt.Println("Error: path points to a file. Use 'mos upload file <path>' instead.")
-		os.Exit(1)
-	}
-
-	fmt.Printf("Starting upload of folder: %s\n", root)
-	err = UploadFolderRecursive(root, false, true)
-	exitOnErr(err, "Error uploading folder:")
-	if root == "." {
-		fmt.Println("Finished uploading current folder.")
-	} else {
-		fmt.Printf("Finished uploading folder: %s\n", root)
-	}
-	storage := helpers.AvailableStorage()
-	fmt.Printf("Storage remaining: %d GB\n", storage)
-}
-func UploadFolderRecursive(path string, showSubFiles bool, isRoot bool) error {
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return err
-	}
-
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), ".") {
-			continue
-		}
-		fullPath := filepath.Join(path, entry.Name())
-
-		if entry.IsDir() {
-			if isRoot || showSubFiles {
-				fmt.Println("Uploading folder:", entry.Name())
-			}
-			//fmt.Println("Uploading folder:", entry.Name())
-			err := UploadFolderRecursive(fullPath, showSubFiles, false)
-			if err != nil {
-				return err
-			}
-		} else {
-			// replace with: uploadErr := uploadFile(fullPath)
-			_, uploadErr := client.SendRequest("uploadFile", protocol.UploadRequest{
-				Path: fullPath,
-			})
-			exitOnErr(uploadErr, "Error uploading file: "+fullPath)
-			if isRoot || showSubFiles {
-				fmt.Println("Uploading file:", entry.Name())
-			}
-		}
-	}
-
-	return nil
-}
-*/

@@ -1,4 +1,4 @@
-.PHONY: build install clean start stop uninstall status help quickstart shutdown restart
+.PHONY: build install clean start stop uninstall status help quickstart shutdown restart start-db stop-db restart-db
 
 # Detect OS
 ifeq ($(OS),Windows_NT)
@@ -193,6 +193,25 @@ quickstart: build install start
 
 shutdown: stop uninstall clean
 
+# start-db: build the auth server binary fresh and start it in the background.
+start-db:
+	@echo "Building auth server..."
+	@go build -o AuthServer/mosaic-auth ./AuthServer/
+	@echo "Starting auth server..."
+	@AuthServer/mosaic-auth > AuthServer/auth.log 2>&1 &
+	@echo "✓ Auth server started (logs: AuthServer/auth.log)"
+
+# stop-db: stop the server, wipe the binary, database, secret, and all local session files.
+stop-db:
+	@echo "Stopping auth server..."
+	@pkill -f mosaic-auth 2>/dev/null || true
+	@rm -f AuthServer/mosaic-auth.db AuthServer/.mosaic-auth-secret AuthServer/mosaic-auth AuthServer/auth.log
+	@rm -f $(HOME)/.mosaic-session $(HOME)/.mosaic-node $(HOME)/.mosaic-login.key $(HOME)/.mosaic-user.key
+	@echo "✓ Auth server stopped and all data cleared."
+
+# restart-db: full stop then fresh start.
+restart-db: stop-db start-db
+
 # Show help
 help:
 	@echo "Mosaic Makefile Commands ($(DETECTED_OS)):"
@@ -205,7 +224,10 @@ help:
 	@echo "  make status     - Check daemon status"
 	@echo "  make clean      - Remove build artifacts"
 	@echo "  make uninstall  - Remove from system"
-	@echo "  make quickstart - Build, install, and start"
-	@echo "  make shutdown   - Stop, uninstall, and clean"
+	@echo "  make quickstart    - Build, install, and start"
+	@echo "  make shutdown      - Stop, uninstall, and clean"
+	@echo "  make start-db      - Build auth server binary and start it"
+	@echo "  make stop-db       - Stop auth server and wipe all auth data"
+	@echo "  make restart-db    - stop-db then start-db"
 	@echo ""
 	@echo "After install, use: mos help to view all mosaic commands"

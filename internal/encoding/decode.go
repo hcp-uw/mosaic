@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -42,7 +41,6 @@ func (e *Encoder) DecodeShards(relativePath string, fileLength int) error {
 	outPath := filepath.Dir(filepath.Join(e.dirOut, relativePath))
 	err := os.MkdirAll(outPath, 0755)
 	if err != nil {
-		log.Fatal("here")
 		return err
 	}
 

@@ -12,9 +12,13 @@ import (
 
 // Client represents a STUN client
 type Client struct {
-	id               string
+	id            string
+	queuePosition int // server-assigned position; 1 = leader, 2 = next, etc.
 	serverAddr       *net.UDPAddr
 	serverConn       *net.UDPConn
+	turnAddr         string // TURN server "host:port", empty = disabled
+	turnUsername     string
+	turnPassword     string
 	state            ClientState
 	peers            map[string]*PeerInfo
 	mutex            sync.RWMutex
@@ -24,19 +28,35 @@ type Client struct {
 	peerCallbacks    []func(*PeerInfo)
 	errorCallbacks   []func(error)
 	messageCallbacks []func([]byte)
+
+	// STUN reconnect state (leader only)
+	stunFailCount    int
+	stunReconnecting bool
+
+	// registrationDone is written once by processMessage when RegisterSuccess
+	// arrives. ConnectToStun blocks on it so the CLI gets a real confirmation
+	// that the STUN server received and acknowledged the registration.
+	// Nil after the first registration completes.
+	registrationDone chan error
 }
 
 // ClientConfig holds client configuration
 type ClientConfig struct {
 	ServerAddress  string
+	TURNAddress    string // optional — empty disables TURN fallback
+	TURNUsername   string
+	TURNPassword   string
 	PingInterval   time.Duration
 	ConnectTimeout time.Duration
 }
 
-// DefaultClientConfig returns default client configuration
-func DefaultClientConfig(serverAddr string) *ClientConfig {
+// DefaultClientConfig returns default client configuration with TURN fallback enabled.
+func DefaultClientConfig(serverAddr, turnAddr, turnUsername, turnPassword string) *ClientConfig {
 	return &ClientConfig{
 		ServerAddress:  serverAddr,
+		TURNAddress:    turnAddr,
+		TURNUsername:   turnUsername,
+		TURNPassword:   turnPassword,
 		PingInterval:   10 * time.Second,
 		ConnectTimeout: 30 * time.Second,
 	}
@@ -57,6 +77,9 @@ func NewClient(config *ClientConfig) (*Client, error) {
 
 	return &Client{
 		serverAddr:       serverAddr,
+		turnAddr:         config.TURNAddress,
+		turnUsername:     config.TURNUsername,
+		turnPassword:     config.TURNPassword,
 		state:            StateDisconnected,
 		peers:            make(map[string]*PeerInfo),
 		ctx:              ctx,
@@ -100,7 +123,7 @@ func (c *Client) GetPeerById(id string) *PeerInfo {
 	return c.peers[id]
 }
 
-// register sends registration message to server
+// register sends registration message to server.
 func (c *Client) register() error {
 	msg := api.NewClientRegisterMessage()
 	return c.sendToServer(msg)
@@ -123,32 +146,38 @@ func (c *Client) sendToServer(msg *api.Message) error {
 
 // handleMessages processes incoming messages and routes them between server and peer
 func (c *Client) handleMessages() {
-	buffer := make([]byte, 1024)
+	buffer := make([]byte, 65507)
+
+	// When the context is cancelled, nudge the blocked ReadFromUDP by setting a
+	// deadline of now. This avoids calling SetReadDeadline on every iteration
+	// (a syscall per packet that was limiting throughput to ~42K packets/sec).
+	go func() {
+		<-c.ctx.Done()
+		if c.serverConn != nil {
+			c.serverConn.SetReadDeadline(time.Now())
+		}
+	}()
 
 	for {
-		select {
-		case <-c.ctx.Done():
-			return
-		default:
-		}
-
-		c.serverConn.SetReadDeadline(time.Now().Add(1 * time.Second))
 		n, fromAddr, err := c.serverConn.ReadFromUDP(buffer)
 		if err != nil {
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				continue
+			if c.ctx.Err() != nil {
+				return // context cancelled — expected shutdown
 			}
 			c.notifyError(fmt.Errorf("failed to read from connection: %w", err))
 			continue
 		}
 
+		// Copy bytes before dispatch — buffer is reused on the next ReadFromUDP
+		// and callbacks fire in separate goroutines, so without a copy they race.
+		msg := make([]byte, n)
+		copy(msg, buffer[:n])
+
 		// Route message based on sender address
 		if fromAddr.String() == c.serverAddr.String() {
-			// Message from server - process as server message
-			c.processServerMessage(buffer[:n])
+			c.processServerMessage(msg)
 		} else {
-			// Message from peer - route to peer message channel
-			c.processPeerMessage(buffer[:n])
+			c.processPeerMessage(msg)
 		}
 	}
 }
@@ -171,15 +200,20 @@ func (c *Client) processPeerMessage(data []byte) {
 		return // Ignore punch packets
 	}
 
-	// Try to parse as a STUN message first (for ping/pong)
+	// Binary shard frames start with 0x01. JSON always starts with '{' (0x7B).
+	// Route binary frames directly to the application layer without any parsing.
+	if len(data) > 0 && data[0] == 0x01 {
+		c.notifyMessageReceived(data)
+		return
+	}
+
+	// Try to parse as a structured message first.
 	if msg, err := api.DeserializeMessage(data); err == nil {
 		switch msg.Type {
 		case api.PeerPing:
-			// Respond with pong
 			c.sendPeerPong(msg.Sign.PubKey)
 			return
 		case api.PeerPong:
-			// Update last pong time
 			c.mutex.Lock()
 			if peer, ok := c.peers[msg.Sign.PubKey]; ok {
 				peer.LastPeerPong = time.Now()
@@ -238,12 +272,18 @@ func (c *Client) processPeerMessage(data []byte) {
 				c.mutex.Unlock()
 
 				c.notifyPeerAssigned(peerInfo)
-
 			}
 
+		case api.ManifestSync:
+			// Route manifest sync messages to the application callback layer.
+			c.notifyMessageReceived(data)
+			return
+		case api.ShardPush, api.ShardRequest, api.ShardResponse, api.ShardChunk:
+			c.notifyMessageReceived(data)
+			return
 		}
 
-		// If it's another type of STUN message, don't add to channel
+		// Unknown structured message — drop silently.
 		return
 	}
 }
@@ -275,14 +315,21 @@ func (c *Client) processMessage(msg *api.Message) {
 			return
 		}
 
+		// PeerAssignment from STUN always points a member to the leader,
+		// or tells the leader about a new member. We can identify the leader
+		// peer on the member side: if our state is not leader, the assigned
+		// peer IS the leader.
 		peerInfo := &PeerInfo{
 			Address: peerAddr,
 			ID:      data.PeerID,
 		}
 
 		c.mutex.Lock()
-		c.peers[data.PeerID] = peerInfo
 		state := c.state
+		if state != StateLeader {
+			peerInfo.IsLeader = true
+		}
+		c.peers[data.PeerID] = peerInfo
 		c.mutex.Unlock()
 
 		if state != StateLeader {
@@ -302,7 +349,18 @@ func (c *Client) processMessage(msg *api.Message) {
 			return
 		}
 
-		c.notifyError(fmt.Errorf("server error [%s]: %s", data.ErrorCode, data.ErrorMessage))
+		serverErr := fmt.Errorf("server error [%s]: %s", data.ErrorCode, data.ErrorMessage)
+
+		c.mutex.Lock()
+		ch := c.registrationDone
+		c.registrationDone = nil
+		c.mutex.Unlock()
+
+		if ch != nil {
+			ch <- serverErr // fail the ConnectToStun call
+		} else {
+			c.notifyError(serverErr)
+		}
 
 	case api.RegisterSuccess:
 		data, err := msg.GetRegisterSuccessData()
@@ -313,7 +371,14 @@ func (c *Client) processMessage(msg *api.Message) {
 
 		c.mutex.Lock()
 		c.id = data.ID
+		c.queuePosition = data.QueuePosition
+		ch := c.registrationDone
+		c.registrationDone = nil // signal only once
 		c.mutex.Unlock()
+
+		if ch != nil {
+			ch <- nil
+		}
 
 	default:
 		c.notifyError(fmt.Errorf("unknown message type: %s", msg.Type))

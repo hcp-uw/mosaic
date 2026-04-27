@@ -68,6 +68,123 @@ is_daemon_running() {
     fi
 }
 
+# Check if the Swift menu bar app is running
+is_app_running() {
+    pgrep -x "Mosaic" > /dev/null 2>&1
+}
+
+# Stop the Swift menu bar app if it's running
+stop_app() {
+    if is_app_running; then
+        echo "Stopping Mosaic app..."
+        pkill -x "Mosaic" 2>/dev/null || true
+        pkill -x "MosaicFinderSync" 2>/dev/null || true
+        sleep 1
+        if is_app_running; then
+            pkill -9 -x "Mosaic" 2>/dev/null || true
+            sleep 1
+        fi
+        echo -e "${GREEN}✓ Mosaic app stopped${NC}"
+    fi
+}
+
+# Build the Swift menu bar app using xcodebuild (requires Xcode.app, not just CLT).
+build_app() {
+    if [ "$OS" != "macOS" ]; then
+        return 0
+    fi
+
+    local script_dir
+    script_dir="$(cd "$(dirname "$0")" && pwd)"
+    local project="${script_dir}/MosaicApp/Mosaic.xcodeproj"
+
+    if [ ! -d "$project" ]; then
+        echo -e "${YELLOW}⚠ MosaicApp/Mosaic.xcodeproj not found — skipping app build${NC}"
+        return 0
+    fi
+
+    if ! command -v xcodebuild &> /dev/null; then
+        echo -e "${YELLOW}⚠ xcodebuild not found — skipping app build (install Xcode.app)${NC}"
+        return 0
+    fi
+
+    echo ""
+    echo "Building Mosaic.app..."
+
+    local derived="${script_dir}/MosaicApp/DerivedData"
+
+    xcodebuild \
+        -project "$project" \
+        -scheme Mosaic \
+        -configuration Release \
+        -derivedDataPath "$derived" \
+        CODE_SIGN_IDENTITY="-" \
+        DEVELOPMENT_TEAM="" \
+        CODE_SIGNING_ALLOWED=YES \
+        > /tmp/mosaic-xcodebuild.log 2>&1
+
+    if [ $? -ne 0 ]; then
+        echo -e "${YELLOW}⚠ App build failed — check /tmp/mosaic-xcodebuild.log${NC}"
+        echo "  The CLI and daemon will work normally without the menu bar app."
+        return 0
+    fi
+
+    local app_path="${derived}/Build/Products/Release/Mosaic.app"
+    if [ -d "$app_path" ]; then
+        # Remove quarantine so Gatekeeper doesn't block it on first launch.
+        xattr -dr com.apple.quarantine "$app_path" 2>/dev/null || true
+        echo -e "${GREEN}✓ Mosaic.app built${NC}"
+    fi
+}
+
+# Launch the Swift menu bar app.
+# Uses the bundle ID so macOS finds it wherever it's registered — the same
+# mechanism that auto-launches it when a .mosaic file is double-clicked.
+# Falls back to searching known paths, then warns and continues if not found.
+start_app() {
+    if [ "$OS" != "macOS" ]; then
+        return 0
+    fi
+
+    echo ""
+    echo "Starting Mosaic app..."
+
+    # Try bundle ID first — works as long as the app has been run at least once.
+    if open -b "com.mosaic.Mosaic" 2>/dev/null; then
+        sleep 2
+        if is_app_running; then
+            echo -e "${GREEN}✓ Mosaic app started${NC}"
+            return 0
+        fi
+    fi
+
+    # Fall back to known paths.
+    local script_dir
+    script_dir="$(cd "$(dirname "$0")" && pwd)"
+    local candidates=(
+        "/Applications/Mosaic.app"
+        "${HOME}/Applications/Mosaic.app"
+        "${script_dir}/MosaicApp/build/Release/Mosaic.app"
+        "${script_dir}/MosaicApp/DerivedData/Build/Products/Release/Mosaic.app"
+    )
+
+    for candidate in "${candidates[@]}"; do
+        if [ -d "$candidate" ]; then
+            open "$candidate" 2>/dev/null
+            sleep 2
+            if is_app_running; then
+                echo -e "${GREEN}✓ Mosaic app started from ${candidate}${NC}"
+                return 0
+            fi
+        fi
+    done
+
+    echo -e "${YELLOW}⚠ Mosaic.app not found — running without the menu bar app.${NC}"
+    echo "  Build and run the app in Xcode at least once to register it:"
+    echo "  open MosaicApp/Mosaic.xcodeproj"
+    echo "  The CLI and daemon will work normally without it."
+}
+
 # Stop daemon (robust version)
 stop_daemon() {
     echo ""
@@ -83,9 +200,14 @@ stop_daemon() {
             if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
                 echo "Stopping daemon (PID: $pid)..."
                 kill "$pid" 2>/dev/null || true
-                sleep 1
-                
-                # Check if still alive, use SIGKILL
+                # Wait up to 4s for graceful disconnect (daemon leaves P2P network on SIGTERM).
+                local wait=0
+                while [ $wait -lt 4 ] && kill -0 "$pid" 2>/dev/null; do
+                    sleep 1
+                    wait=$((wait+1))
+                done
+
+                # Force kill if still alive.
                 if kill -0 "$pid" 2>/dev/null; then
                     echo "Process still alive, using SIGKILL..."
                     kill -9 "$pid" 2>/dev/null || true
@@ -167,15 +289,23 @@ stop_daemon() {
 build_binaries() {
     echo "Building binaries for $OS..."
     mkdir -p bin
-    
+
+    # When running as root (sudo), Go may not be in PATH.
+    # Run the build as the real user so their PATH and Go installation are used.
+    local build_cmd
     if [ "$OS" = "Windows" ]; then
-        GOOS=windows GOARCH=amd64 go build -o "bin/${CLI_BIN}" ./cmd/mosaic-cli
-        GOOS=windows GOARCH=amd64 go build -o "bin/${DAEMON_BIN}" ./cmd/mosaic-node
+        build_cmd="GOOS=windows GOARCH=amd64 go build -o bin/${CLI_BIN} ./cmd/mosaic-cli && GOOS=windows GOARCH=amd64 go build -o bin/${DAEMON_BIN} ./cmd/mosaic-node"
     else
-        go build -o "bin/${CLI_BIN}" ./cmd/mosaic-cli
-        go build -o "bin/${DAEMON_BIN}" ./cmd/mosaic-node
+        build_cmd="go build -o bin/${CLI_BIN} ./cmd/mosaic-cli && go build -o bin/${DAEMON_BIN} ./cmd/mosaic-node"
     fi
-    
+
+    if [ -n "$SUDO_USER" ]; then
+        chown "$SUDO_USER" bin
+        su "$SUDO_USER" -c "cd $(pwd) && $build_cmd"
+    else
+        eval "$build_cmd"
+    fi
+
     echo -e "${GREEN}✓ Build complete!${NC}"
 }
 
@@ -227,18 +357,28 @@ start_daemon() {
         return 0
     fi
     
-    # Ensure clean state
-    rm -f "${PID_FILE}" "${SOCK_FILE}"
-    
-    # Start the daemon
+    # Ensure clean state — remove files that may be owned by root from a previous sudo run.
+    rm -f "${PID_FILE}" "${SOCK_FILE}" "${LOG_FILE}"
+
+    # Start the daemon as the real user (not root), even if install.sh was run with sudo.
     if [ "$OS" = "Windows" ]; then
         # Windows background process
         nohup "${BIN_DIR}/${DAEMON_BIN}" > "${LOG_FILE}" 2>&1 &
         echo $! > "${PID_FILE}"
     else
-        "${BIN_DIR}/${DAEMON_BIN}" > "${LOG_FILE}" 2>&1 &
-        local daemon_pid=$!
-        echo $daemon_pid > "${PID_FILE}"
+        if [ -n "$SUDO_USER" ]; then
+            # install.sh was run with sudo — drop back to the real user for the daemon.
+            # Touch the log file as root first so su can write to it, then hand ownership over.
+            touch "${LOG_FILE}"
+            chown "$SUDO_USER" "${LOG_FILE}"
+            local daemon_pid
+            daemon_pid=$(su "$SUDO_USER" -c "${BIN_DIR}/${DAEMON_BIN} >> ${LOG_FILE} 2>&1 & echo \$!")
+            echo "$daemon_pid" > "${PID_FILE}"
+        else
+            "${BIN_DIR}/${DAEMON_BIN}" > "${LOG_FILE}" 2>&1 &
+            local daemon_pid=$!
+            echo $daemon_pid > "${PID_FILE}"
+        fi
     fi
     
     # Wait and verify it started
@@ -319,6 +459,17 @@ show_debug_info() {
     echo ""
 }
 
+# Check if the user is already logged in by reading the session file
+is_logged_in() {
+    local real_home
+    if [ -n "$SUDO_USER" ]; then
+        real_home=$(eval echo "~$SUDO_USER")
+    else
+        real_home="$HOME"
+    fi
+    [ -f "${real_home}/.mosaic-session" ]
+}
+
 # Print success message
 print_success() {
     echo ""
@@ -329,19 +480,29 @@ print_success() {
     echo "Platform: $OS"
     echo "Installed to: ${BIN_DIR}"
     echo ""
-    echo "Usage:"
-    echo "  mos help       - View all mosaic commands"
-    echo "  mos shutdown   - Stop daemon and cleanup"
-    echo ""
-    
-    if [ "$OS" != "macOS" ]; then
-        echo "Daemon management:"
-        echo "  make status    - Check daemon status"
-        echo "  make stop      - Stop the daemon"
-        echo "  make restart   - Restart the daemon"
+
+    if is_logged_in; then
+        echo -e "${GREEN}✓ Logged in${NC}"
         echo ""
+        echo "Next steps:"
+        echo "  mos join <stun-server-ip>:3478   - Connect to the network"
+        echo "  mos upload file <path>            - Upload a file"
+        echo "  mos download file <name>          - Download a file"
+    else
+        echo -e "${YELLOW}⚠ You are not logged in.${NC}"
+        echo ""
+        echo "To get started:"
+        echo -e "  ${GREEN}mos login <key>${NC}   - Log in with your key"
+        echo ""
+        echo "Then connect to the network:"
+        echo "  mos join <stun-server-ip>:3478"
     fi
-    
+
+    echo ""
+    echo "  mos help            - View all commands"
+    echo "  mos shutdown        - Stop daemon and cleanup"
+    echo "  ./install.sh --stop - Stop daemon and menu bar app"
+    echo ""
     echo "Logs: ${LOG_FILE}"
     echo ""
 }
@@ -362,22 +523,27 @@ main() {
         exit 1
     fi
     
-    # Stop any existing daemon
+    # Stop any existing processes
+    stop_app
     stop_daemon || true
-    
+
     # Build and install
     build_binaries
     install_binaries
-    
+
     # Start daemon
-    if start_daemon; then
-        print_success
-    else
+    if ! start_daemon; then
         echo ""
         echo -e "${RED}Installation completed but daemon failed to start${NC}"
         show_debug_info
         exit 1
     fi
+
+    # Build and start the Swift app (best-effort — warns but doesn't fail)
+    build_app
+    start_app
+
+    print_success
 }
 
 # Handle command line arguments
@@ -387,6 +553,7 @@ if [ "$1" = "--debug" ] || [ "$1" = "-d" ]; then
     exit 0
 elif [ "$1" = "--stop" ] || [ "$1" = "-s" ]; then
     set_platform_vars
+    stop_app
     stop_daemon
     exit $?
 elif [ "$1" = "--help" ] || [ "$1" = "-h" ]; then

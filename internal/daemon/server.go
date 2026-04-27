@@ -9,9 +9,25 @@ import (
 	"github.com/hcp-uw/mosaic/internal/cli/protocol"
 	"github.com/hcp-uw/mosaic/internal/cli/shared"
 	"github.com/hcp-uw/mosaic/internal/daemon/handlers"
+	"github.com/hcp-uw/mosaic/internal/daemon/handlers/helpers"
 )
 
 func StartServer() error {
+	// If a session file exists but the key file is gone (e.g. after a reinstall
+	// without logging out), clear the stale session so the user isn't shown as
+	// logged in to a key they can no longer use.
+	if _, err := helpers.LoadSession(); err == nil {
+		if _, keyErr := os.Stat(shared.UserKeyPath()); os.IsNotExist(keyErr) {
+			_ = helpers.ClearSession()
+			_ = helpers.ClearLoginKey()
+			fmt.Println("Daemon: cleared stale session (key file missing).")
+		} else {
+			// Already logged in — sync any network manifest files that don't
+			// have local stubs yet (e.g. files uploaded from another machine).
+			go handlers.SyncUserStubs()
+		}
+	}
+
 	// remove old socket if present
 	if _, err := os.Stat(shared.SocketPath); err == nil {
 		os.Remove(shared.SocketPath)
@@ -60,6 +76,9 @@ func handleConn(conn net.Conn) {
 	case "statusAccount":
 		var accountReq protocol.StatusAccountRequest
 		handleWith(enc, req.Data, &accountReq, handlers.StatusAccount, "Status account request failed.")
+	case "loginStatus":
+		var statusReq protocol.LoginStatusRequest
+		handleWith(enc, req.Data, &statusReq, handlers.LoginStatus, "Login status request failed.")
 	case "loginKey":
 		var loginReq protocol.LoginKeyRequest
 		handleWith(enc, req.Data, &loginReq, handlers.LoginKey, "Login request failed.")
@@ -81,6 +100,9 @@ func handleConn(conn net.Conn) {
 	case "listFiles":
 		var listFilesReq protocol.ListFilesRequest
 		handleWith(enc, req.Data, &listFilesReq, handlers.ListFiles, "List files request failed.")
+	case "listManifest":
+		var listManifestReq protocol.ListManifestRequest
+		handleWith(enc, req.Data, &listManifestReq, handlers.ListManifest, "List manifest request failed.")
 	case "uploadFile":
 		var uploadReq protocol.UploadFileRequest
 		handleWith(enc, req.Data, &uploadReq, handlers.UploadFile, "Upload file request failed.")
@@ -96,9 +118,15 @@ func handleConn(conn net.Conn) {
 	case "deleteFile":
 		var deleteReq protocol.DeleteFileRequest
 		handleWith(enc, req.Data, &deleteReq, handlers.DeleteFile, "Delete file request failed.")
+	case "deleteStub":
+		var deleteStubReq protocol.DeleteStubRequest
+		handleWith(enc, req.Data, &deleteStubReq, handlers.DeleteStub, "Delete stub request failed.")
 	case "deleteFolder":
 		var deleteFolderReq protocol.DeleteFolderRequest
 		handleWith(enc, req.Data, &deleteFolderReq, handlers.DeleteFolder, "Delete folder request failed.")
+	case "renameFile":
+		var renameReq protocol.RenameFileRequest
+		handleWith(enc, req.Data, &renameReq, handlers.RenameFile, "Rename file request failed.")
 	case "fileInfo":
 		var fileInfoReq protocol.FileInfoRequest
 		handleWith(enc, req.Data, &fileInfoReq, handlers.GetFileInfo, "File info request failed.")
@@ -146,84 +174,3 @@ func toStruct(input interface{}, out interface{}) error {
 	}
 	return json.Unmarshal(raw, out)
 }
-
-/*
-func handleConn(conn net.Conn) {
-	defer conn.Close()
-
-	dec := json.NewDecoder(conn)
-	enc := json.NewEncoder(conn)
-
-	var req protocol.Request
-	if err := dec.Decode(&req); err != nil {
-		enc.Encode(&protocol.Response{Ok: false, Message: "invalid JSON request"})
-		return
-	}
-
-	switch req.Command {
-
-	case "uploadFile":
-		var up protocol.UploadRequest
-		if err := toStruct(req.Data, &up); err != nil {
-			enc.Encode(&protocol.Response{Ok: false, Message: "Upload request failed."})
-			return
-		}
-		resp := handlers.HandleUpload(up)
-		enc.Encode(&protocol.Response{Ok: true, Message: "", Data: resp})
-
-	case "statusNetwork":
-		var up protocol.NetworkStatusRequest
-		if err := toStruct(req.Data, &up); err != nil {
-			enc.Encode(&protocol.Response{Ok: false, Message: "Network status request failed."})
-			return
-		}
-		resp := handlers.StatusNetwork(up)
-		enc.Encode(&protocol.Response{Ok: true, Message: "", Data: resp})
-
-	case "joinNetwork":
-		var up protocol.JoinRequest
-		if err := toStruct(req.Data, &up); err != nil {
-			enc.Encode(&protocol.Response{Ok: false, Message: "Join request failed."})
-			return
-		}
-		resp := handlers.HandleJoin(up)
-		enc.Encode(&protocol.Response{Ok: true, Message: "", Data: resp})
-
-	case "statusNode":
-		var up protocol.NodeStatusRequest
-		if err := toStruct(req.Data, &up); err != nil {
-			enc.Encode(&protocol.Response{Ok: false, Message: "Node status request failed."})
-			return
-		}
-		resp := handlers.StatusNode(up)
-		enc.Encode(&protocol.Response{Ok: true, Message: "", Data: resp})
-	case "loginKey":
-		var up protocol.LoginKeyRequest
-		if err := toStruct(req.Data, &up); err != nil {
-			enc.Encode(&protocol.Response{Ok: false, Message: "Login request failed."})
-			return
-		}
-		resp := handlers.LoginKey(up)
-		enc.Encode(&protocol.Response{Ok: true, Message: "", Data: resp})
-	case "statusAccount":
-		var up protocol.StatusAccountRequest
-		if err := toStruct(req.Data, &up); err != nil {
-			enc.Encode(&protocol.Response{Ok: false, Message: "Login request failed."})
-			return
-		}
-		resp := handlers.StatusAccount(up)
-		enc.Encode(&protocol.Response{Ok: true, Message: "", Data: resp})
-	default:
-		enc.Encode(&protocol.Response{Ok: false, Message: "unknown command"})
-	}
-}
-
-// toStruct safely converts interface{} into a target struct using JSON round-tripping.
-func toStruct(input interface{}, out interface{}) error {
-	raw, err := json.Marshal(input)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(raw, out)
-}
-*/
