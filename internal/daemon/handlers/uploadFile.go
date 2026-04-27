@@ -29,6 +29,13 @@ func IngestLocalFile(path string) protocol.UploadFileResponse {
 }
 
 func uploadFile(path string, keepLocal bool) protocol.UploadFileResponse {
+	if !helpers.IsLoggedIn() {
+		return protocol.UploadFileResponse{
+			Success: false,
+			Details: "not logged in — run 'mos login <key>' before uploading",
+		}
+	}
+
 	filename := removePath(path)
 
 	originalSize := 0

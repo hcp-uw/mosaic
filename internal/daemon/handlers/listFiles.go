@@ -2,6 +2,8 @@ package handlers
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/hcp-uw/mosaic/internal/cli/protocol"
 	"github.com/hcp-uw/mosaic/internal/cli/shared"
@@ -10,7 +12,7 @@ import (
 )
 
 // Lists files by reading the manifest (source of truth for all network files).
-func ListFiles(req protocol.ListFilesRequest) protocol.ListFilesResponse {
+func ListFiles(_ protocol.ListFilesRequest) protocol.ListFilesResponse {
 	fmt.Println("Daemon: listing files.")
 
 	mosaicDir := shared.MosaicDir()
@@ -20,13 +22,23 @@ func ListFiles(req protocol.ListFilesRequest) protocol.ListFilesResponse {
 			Success:  false,
 			Details:  fmt.Sprintf("could not read manifest: %v", err),
 			Username: helpers.GetUsername(),
-			Files:    []string{},
+			Files:    []protocol.LocalFileEntry{},
 		}
 	}
 
-	files := make([]string, 0, len(entries))
-	for name := range entries {
-		files = append(files, name)
+	files := make([]protocol.LocalFileEntry, 0, len(entries))
+	for _, entry := range entries {
+		realPath := filepath.Join(mosaicDir, entry.Name)
+		stubPath := filepath.Join(mosaicDir, entry.Name+".mosaic")
+		_, realErr := os.Stat(realPath)
+		_, stubErr := os.Stat(stubPath)
+		if realErr != nil && stubErr != nil {
+			continue // no physical file on disk — skip
+		}
+		files = append(files, protocol.LocalFileEntry{
+			Name:   entry.Name,
+			Cached: entry.Cached,
+		})
 	}
 
 	return protocol.ListFilesResponse{

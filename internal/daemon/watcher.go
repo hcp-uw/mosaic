@@ -137,6 +137,14 @@ func (w *DirWatcher) onDisappeared(logicalName string) {
 		return
 	}
 
+	// If cached=false the daemon already marked this file as uncached before
+	// removing the local copy (deleteStub, logout). Don't treat it as a
+	// user-initiated network delete.
+	if !entry.Cached {
+		fmt.Printf("[watcher] skipping delete for %s — already marked uncached\n", logicalName)
+		return
+	}
+
 	// Check if a CREATE already arrived for a different name (CREATE before RENAME).
 	var matchedNew string
 	var matchedRC *recentCreate

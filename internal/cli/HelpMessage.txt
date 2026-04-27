@@ -20,15 +20,17 @@ Storage:
   empty storage                           Delete all stored data from the network.
 
 Files:
-  list file                               List all files stored on the network.
+  list file                               List files with a local stub or cached copy on this machine.
+  list manifest                           List all files in your network manifest (cross-machine view).
   upload file <path>                      Upload a file to the network.
   upload folder <path>                    Upload a folder to the network.
   download file <name>                    Download a file from the network.
   download folder <name>                  Download a folder from the network.
-  info file <path>                        Display information about a specific file.
-  info folder <path>                      Display information about a specific folder.
-  delete file <path>                      Delete a file from the network.
-  delete folder <path>                    Delete a folder from the network.
+  info file <name>                        Display information about a specific file.
+  info folder <name>                      Display information about a specific folder.
+  delete file <name>                      Delete a file from the network and manifest.
+  delete file -s <name>                   Remove the local stub only (file stays in manifest).
+  delete folder <name>                    Delete a folder from the network.
   rename file <oldname> <newname>         Rename a file on the network.
 
 Other:

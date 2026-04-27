@@ -58,14 +58,14 @@ func handleFiles(w http.ResponseWriter, r *http.Request) {
 	mosaicDir := shared.MosaicDir()
 
 	files := make([]FileWithStatus, 0, len(resp.Files))
-	for _, name := range resp.Files {
-		info := handlers.GetFileInfo(protocol.FileInfoRequest{FilePath: name})
+	for _, f := range resp.Files {
+		info := handlers.GetFileInfo(protocol.FileInfoRequest{FilePath: f.Name})
 		files = append(files, FileWithStatus{
-			Name:      name,
+			Name:      f.Name,
 			Size:      info.Size,
 			NodeID:    info.NodeID,
 			DateAdded: info.DateAdded,
-			IsCached:  filesystem.IsCached(mosaicDir, name),
+			IsCached:  filesystem.IsCached(mosaicDir, f.Name),
 		})
 	}
 
@@ -134,7 +134,7 @@ func handleFileByName(w http.ResponseWriter, r *http.Request) {
 			}
 			_ = os.Remove(stubPath)
 
-			filesystem.MarkCachedInManifest(mosaicDir, name)
+			_ = filesystem.MarkCachedInManifest(mosaicDir, name)
 		}
 		writeJSON(w, http.StatusOK, resp)
 

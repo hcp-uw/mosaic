@@ -1,14 +1,21 @@
 package helpers
 
-// GetUsername returns a short display identifier derived from the public key.
+import (
+	"crypto/sha256"
+	"encoding/hex"
+)
+
+// GetUsername returns the 8-char SHA-256 fingerprint of the user's public key.
 // Returns "" if not logged in.
 func GetUsername() string {
 	s, err := LoadSession()
 	if err != nil {
 		return ""
 	}
-	if len(s.PublicKey) >= 8 {
-		return s.PublicKey[:8]
+	raw, err := hex.DecodeString(s.PublicKey)
+	if err != nil || len(raw) == 0 {
+		return ""
 	}
-	return s.PublicKey
+	h := sha256.Sum256(raw)
+	return hex.EncodeToString(h[:])[:8]
 }

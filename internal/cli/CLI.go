@@ -1,8 +1,8 @@
 package cli
 
 import (
-	_ "embed"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -167,12 +167,15 @@ func Run(Args []string) {
 	case "list":
 		if len(args) != 3 {
 			fmt.Println("Usage:")
-			fmt.Println("- mos list file    List all files on the network.")
+			fmt.Println("- mos list file        List files tracked on this machine.")
+			fmt.Println("- mos list manifest    List all files in your network manifest.")
 			os.Exit(1)
 		}
 		switch args[2] {
 		case "file":
 			listFile()
+		case "manifest":
+			listManifest()
 		default:
 			fmt.Println("Unknown argument:", args[2])
 			os.Exit(1)
@@ -240,19 +243,18 @@ func Run(Args []string) {
 		}
 		renameFile()
 	case "delete":
-		if len(args) != 4 {
-			fmt.Println("Usage:")
-			fmt.Println("- mos delete file <path>    Delete a file.")
-			fmt.Println("- mos delete folder <path>  Delete a folder.")
-			os.Exit(1)
-		}
-		switch args[2] {
-		case "file":
+		switch {
+		case len(args) == 4 && args[2] == "file":
 			deleteFile()
-		case "folder":
+		case len(args) == 5 && args[2] == "file" && args[3] == "-s":
+			deleteStub()
+		case len(args) == 4 && args[2] == "folder":
 			deleteFolder()
 		default:
-			fmt.Println("Unknown argument:", args[2])
+			fmt.Println("Usage:")
+			fmt.Println("- mos delete file <name>       Delete a file from the network.")
+			fmt.Println("- mos delete file -s <name>    Remove local stub only (keeps file in manifest).")
+			fmt.Println("- mos delete folder <name>     Delete a folder.")
 			os.Exit(1)
 		}
 	case "shutdown":
@@ -497,11 +499,47 @@ func listFile() {
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
-	message := "\nFiles on Network:\n"
-	for _, file := range cmdResp.Files {
-		message += fmt.Sprintf("- %s\n", file)
+	if len(cmdResp.Files) == 0 {
+		fmt.Println("\nNo local files.")
+		return
 	}
-	fmt.Println(message)
+	fmt.Println("\nLocal Files:")
+	for _, f := range cmdResp.Files {
+		status := "stub"
+		if f.Cached {
+			status = "cached"
+		}
+		fmt.Printf("- %-30s [%s]\n", f.Name, status)
+	}
+	fmt.Println()
+}
+
+// Lists all files in the user's network manifest (cross-machine view)
+func listManifest() {
+	resp, err := client.SendRequest("listManifest", protocol.ListManifestRequest{})
+	exitOnErr(err, "Error listing manifest.")
+
+	var cmdResp protocol.ListManifestResponse
+	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
+		exitOnErr(err, "Error parsing response.")
+	}
+	if !cmdResp.Success {
+		fmt.Println("\nError:", cmdResp.Details)
+		os.Exit(1)
+	}
+	if len(cmdResp.Files) == 0 {
+		fmt.Println("\nNo files in network manifest.")
+		return
+	}
+	fmt.Println("\nNetwork Manifest:")
+	for _, f := range cmdResp.Files {
+		cached := "stub"
+		if f.Cached {
+			cached = "cached"
+		}
+		fmt.Printf("- %-30s  %d KB  added %s  [%s]\n", f.Name, f.Size/1024, f.DateAdded, cached)
+	}
+	fmt.Println()
 }
 
 // Uploads a file to the network
@@ -610,6 +648,23 @@ func downloadFolder() {
 	fmt.Println(message)
 }
 
+// Removes only the local stub/cache without touching the manifest
+func deleteStub() {
+	filePath := args[4]
+	resp, err := client.SendRequest("deleteStub", protocol.DeleteStubRequest{FilePath: filePath})
+	exitOnErr(err, "Error deleting stub for "+filePath+": ")
+
+	var cmdResp protocol.DeleteStubResponse
+	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
+		exitOnErr(err, "Error parsing response.")
+	}
+	if !cmdResp.Success {
+		fmt.Println("\nError:", cmdResp.Details)
+		os.Exit(1)
+	}
+	fmt.Printf("\n%s\n", cmdResp.Details)
+}
+
 // Deletes a file from the network
 func deleteFile() {
 	filePath := args[3]
@@ -677,9 +732,10 @@ func fileInfo() {
 		exitOnErr(err, "Error parsing response.")
 	}
 	message := fmt.Sprintf("\nFile '%v' info retrieved successfully from network.\n"+
-		"- NodeID: %s@node-%v\n"+
+		"- Owner:      %s\n"+
+		"- Node:       %d\n"+
 		"- Date Added: %v\n"+
-		"- Size: %v GB\n", cmdResp.FileName, cmdResp.Username, cmdResp.NodeID, cmdResp.DateAdded, cmdResp.Size)
+		"- Size:       %d KB\n", cmdResp.FileName, cmdResp.Username, cmdResp.NodeID, cmdResp.DateAdded, cmdResp.Size/1024)
 	fmt.Println(message)
 }
 

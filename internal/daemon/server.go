@@ -21,6 +21,10 @@ func StartServer() error {
 			_ = helpers.ClearSession()
 			_ = helpers.ClearLoginKey()
 			fmt.Println("Daemon: cleared stale session (key file missing).")
+		} else {
+			// Already logged in — sync any network manifest files that don't
+			// have local stubs yet (e.g. files uploaded from another machine).
+			go handlers.SyncUserStubs()
 		}
 	}
 
@@ -96,6 +100,9 @@ func handleConn(conn net.Conn) {
 	case "listFiles":
 		var listFilesReq protocol.ListFilesRequest
 		handleWith(enc, req.Data, &listFilesReq, handlers.ListFiles, "List files request failed.")
+	case "listManifest":
+		var listManifestReq protocol.ListManifestRequest
+		handleWith(enc, req.Data, &listManifestReq, handlers.ListManifest, "List manifest request failed.")
 	case "uploadFile":
 		var uploadReq protocol.UploadFileRequest
 		handleWith(enc, req.Data, &uploadReq, handlers.UploadFile, "Upload file request failed.")
@@ -111,6 +118,9 @@ func handleConn(conn net.Conn) {
 	case "deleteFile":
 		var deleteReq protocol.DeleteFileRequest
 		handleWith(enc, req.Data, &deleteReq, handlers.DeleteFile, "Delete file request failed.")
+	case "deleteStub":
+		var deleteStubReq protocol.DeleteStubRequest
+		handleWith(enc, req.Data, &deleteStubReq, handlers.DeleteStub, "Delete stub request failed.")
 	case "deleteFolder":
 		var deleteFolderReq protocol.DeleteFolderRequest
 		handleWith(enc, req.Data, &deleteFolderReq, handlers.DeleteFolder, "Delete folder request failed.")

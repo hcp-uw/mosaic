@@ -51,6 +51,9 @@ func LoginKey(req protocol.LoginKeyRequest) protocol.LoginKeyResponse {
 
 	fmt.Printf("Daemon: logged in (identity: %s...)\n", fp)
 
+	// Sync stubs for any files in the network manifest that aren't present locally.
+	go SyncUserStubs()
+
 	return protocol.LoginKeyResponse{
 		Success: true,
 		Details: fmt.Sprintf("Logged in successfully. Your identity: %s...", fp),
