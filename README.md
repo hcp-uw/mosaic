@@ -11,11 +11,11 @@
 
 ## What Is Mosaic
 
-Mosaic is a distributed file storage system built on direct peer-to-peer connections. When you upload a file, it is broken into shards and distributed across other nodes on the network. Anyone can join and contribute storage capacity. The more you share, the more you get back.
+Mosaic is a distributed file storage system built using P2P connections. When someone uploads a file, it's broken into shards and distributed among the other nodes in the network. Mosaic is free to use, meaning anyone can join and contribute their storage. Mosaic is built upon the security of your files, both from big authorities and also from data loss. 
 
-There is no central server that holds your files. The only server in the picture is a lightweight STUN coordinator that helps two nodes behind different routers find each other — once connected, all file transfer and metadata sync happen directly between peers.
+There is no central server that holds your files. The only server Mosaic has is a lightweight STUN server which helps connect two nodes to each other, however once connected, all file transfer and interactions happen directly between the peers.
 
-**The network manifest is a blockchain.** Every user maintains a personal append-only chain of signed file operation blocks. Any peer can verify your chain's integrity using your public key alone — no trusted authority required. This makes Mosaic a fully public, permissionless network: anyone can join, contribute, and participate without asking permission.
+**The network manifest is a blockchain.** Every user maintains a personal append only chain of signed file operation blocks. Any peer can verify your chain's integrity using your public key alone, no trusted authority required. This makes Mosaic a fully public, permissionless network: anyone can join, contribute, and participate without asking permission.
 
 ---
 
@@ -35,27 +35,27 @@ There is no central server that holds your files. The only server in the picture
 │  │  Finder /    │    │  Menu Bar    │    │   mos (CLI)      │   │
 │  │  Finder Sync │    │  App (Swift) │    │                  │   │
 │  └──────┬───────┘    └──────┬───────┘    └────────┬─────────┘   │
-│         │                  │ HTTP :7777            │ Unix socket │
-│         │            ┌─────▼───────────────────────▼────────┐   │
+│         │                   │ localhost:7777      │ Unix socket │
+│         │            ┌──────▼─────────────────────▼─────────┐   │
 │         └───badges──▶│          mosaic-node (daemon)        │   │
-│                       │  • manifest read/write               │   │
-│                       │  • blockchain block signing          │   │
-│                       │  • file watcher (fsnotify)           │   │
-│                       │  • P2P client (WebRTC/DTLS)          │   │
-│                       └─────────────────┬────────────────────┘   │
-└─────────────────────────────────────────┼───────────────────────┘
-                                          │ UDP (WebRTC)
-                              ┌───────────▼───────────┐
-                              │     STUN/TURN Server  │
-                              │  (hole punching only) │
-                              └───────────┬───────────┘
-                                          │
-                              ┌───────────▼───────────┐
-                              │      Peer Nodes        │
-                              │  • hold your shards    │
-                              │  • sync manifests      │
-                              │  • relay transfers     │
-                              └────────────────────────┘
+│                      │  • manifest read/write               │   │
+│                      │  • blockchain block signing          │   │
+│                      │  • file watcher (fsnotify)           │   │
+│                      │  • P2P client (WebRTC/DTLS)          │   │
+│                      └─────────────────┬────────────────────┘   │
+└────────────────────────────────────────┼────────────────────────┘
+                                         │ UDP
+                             ┌───────────▼───────────┐
+                             │     STUN/TURN Server  │
+                             │  (hole punching only) │
+                             └───────────┬───────────┘
+                                         │
+                            ┌────────────▼───────────┐
+                            │      Peer Nodes        │
+                            │  • hold your shards    │
+                            │  • sync manifests      │
+                            │  • relay transfers     │
+                            └────────────────────────┘
 ```
 
 ### The Blockchain Manifest
