@@ -34,13 +34,14 @@ func DeleteFile(req protocol.DeleteFileRequest) protocol.DeleteFileResponse {
 		fmt.Println("Warning: could not update manifest for", filename, "-", err)
 	}
 
-	// Update the network manifest: decrypt own section, mutate, encrypt+sign, write, broadcast.
+	// Update the network manifest: append "remove" block, write, broadcast.
 	if aesKey, err := filesystem.LoadOrCreateNetworkKey(shared.NetworkKeyPath()); err == nil {
 		if kp, kerr := filesystem.LoadOrCreateUserKey(shared.UserKeyPath()); kerr == nil {
-			if nm, err := filesystem.ReadAndDecryptNetworkManifest(mosaicDir, aesKey, helpers.GetAccountID(), kp.Private); err == nil {
-				nm = filesystem.RemoveFileFromNetwork(nm, helpers.GetAccountID(), filename)
-				if werr := filesystem.EncryptSignAndWriteNetworkManifest(mosaicDir, aesKey, nm, helpers.GetAccountID(), kp); werr != nil {
-					fmt.Println("Warning: could not update network manifest for", filename, "-", werr)
+			if nm, err := filesystem.ReadNetworkManifest(mosaicDir, aesKey); err == nil {
+				if aerr := filesystem.AppendBlockRemove(&nm, helpers.GetAccountID(), filename, kp); aerr != nil {
+					fmt.Println("Warning: could not append remove block for", filename, "-", aerr)
+				} else if werr := filesystem.WriteNetworkManifestLocked(mosaicDir, aesKey, nm); werr != nil {
+					fmt.Println("Warning: could not write network manifest for", filename, "-", werr)
 				} else {
 					BroadcastNetworkManifest(nm)
 				}

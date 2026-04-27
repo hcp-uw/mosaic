@@ -152,7 +152,7 @@ func handleManifestSync(mosaicDir string, msg *api.Message) {
 		fmt.Println("handleManifestSync: could not write merged manifest:", err)
 		return
 	}
-	fmt.Printf("handleManifestSync: merged — %d user entries (changed=%v)\n", len(merged.Entries), changed)
+	fmt.Printf("handleManifestSync: merged — %d chains (changed=%v)\n", len(merged.Chains), changed)
 
 	// If the merge brought in new information, broadcast the combined result
 	// back to all peers so the network converges to the same state.
@@ -160,23 +160,14 @@ func handleManifestSync(mosaicDir string, msg *api.Message) {
 		go BroadcastNetworkManifest(merged)
 	}
 
-	// Decrypt our section and create stubs + local manifest entries for any
-	// files we don't already have locally.
-	kp, kerr := filesystem.LoadOrCreateUserKey(shared.UserKeyPath())
-	if kerr != nil {
-		fmt.Println("handleManifestSync: could not load user key:", kerr)
-		return
-	}
+	// Replay our chain and create stubs for any files we don't have locally.
 	accountID := helpers.GetAccountID()
-	idx := filesystem.FindUserIndex(merged, accountID)
+	idx := filesystem.FindChainIndex(merged, accountID)
 	if idx == -1 {
 		return // no files for this user yet
 	}
-	if err := filesystem.DecryptUserFiles(&merged.Entries[idx], kp.Private); err != nil {
-		fmt.Println("handleManifestSync: could not decrypt user files:", err)
-		return
-	}
-	for _, f := range merged.Entries[idx].Files {
+	files := filesystem.ChainToFiles(merged.Chains[idx])
+	for _, f := range files {
 		if filesystem.IsInManifest(mosaicDir, f.Name) {
 			continue
 		}
@@ -188,5 +179,5 @@ func handleManifestSync(mosaicDir string, msg *api.Message) {
 			fmt.Printf("handleManifestSync: could not write stub for %s: %v\n", f.Name, err)
 		}
 	}
-	fmt.Printf("handleManifestSync: synced %d files from network\n", len(merged.Entries[idx].Files))
+	fmt.Printf("handleManifestSync: synced %d files from network\n", len(files))
 }

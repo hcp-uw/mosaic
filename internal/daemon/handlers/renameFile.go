@@ -55,13 +55,14 @@ func RenameFile(req protocol.RenameFileRequest) protocol.RenameFileResponse {
 		}
 	}
 
-	// Update the network manifest: decrypt own section, mutate, encrypt+sign, write, broadcast.
+	// Update the network manifest: append "rename" block, write, broadcast.
 	if aesKey, err := filesystem.LoadOrCreateNetworkKey(shared.NetworkKeyPath()); err == nil {
 		if kp, kerr := filesystem.LoadOrCreateUserKey(shared.UserKeyPath()); kerr == nil {
-			if nm, err := filesystem.ReadAndDecryptNetworkManifest(mosaicDir, aesKey, helpers.GetAccountID(), kp.Private); err == nil {
-				nm = filesystem.RenameFileInNetwork(nm, helpers.GetAccountID(), oldName, newName)
-				if werr := filesystem.EncryptSignAndWriteNetworkManifest(mosaicDir, aesKey, nm, helpers.GetAccountID(), kp); werr != nil {
-					fmt.Println("Warning: could not update network manifest for", oldName, "-", werr)
+			if nm, err := filesystem.ReadNetworkManifest(mosaicDir, aesKey); err == nil {
+				if aerr := filesystem.AppendBlockRename(&nm, helpers.GetAccountID(), oldName, newName, kp); aerr != nil {
+					fmt.Println("Warning: could not append rename block for", oldName, "-", aerr)
+				} else if werr := filesystem.WriteNetworkManifestLocked(mosaicDir, aesKey, nm); werr != nil {
+					fmt.Println("Warning: could not write network manifest for", oldName, "-", werr)
 				} else {
 					BroadcastNetworkManifest(nm)
 				}

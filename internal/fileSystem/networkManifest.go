@@ -6,6 +6,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -31,42 +32,54 @@ type NetworkFileEntry struct {
 	ContentHash   string `json:"contentHash"` // SHA-256 hex of original file
 }
 
-// UserNetworkEntry groups all files owned by one user.
-//
-// Security model (two independent layers):
-//
-//  1. Per-user ECIES encryption: Files is encrypted using ECDH + AES-256-GCM
-//     with the user's ECDSA P-256 public key as the recipient key.
-//     EphemeralPubKey carries the sender's ephemeral public key so the owner
-//     can re-derive the shared secret and decrypt. No other node can read
-//     another user's file list — they don't have the private key.
-//
-//  2. Ciphertext signature: Signature is an ECDSA sig over
-//     SHA-256(EphemeralPubKey || EncryptedFiles), signed with the owner's
-//     private key. Any peer can verify this using the embedded PublicKey,
-//     without decrypting. Tampered ciphertext → invalid signature → dropped.
-//
-// Files is populated in memory after DecryptUserFiles; it is never serialized
-// (json:"-"). Peers holding this manifest see only opaque EncryptedFiles bytes.
-type UserNetworkEntry struct {
-	UserID          int    `json:"userID"`
-	Username        string `json:"username"`
-	PublicKey       []byte `json:"publicKey"`       // ECDSA P-256, PKIX DER
-	EphemeralPubKey []byte `json:"ephemeralPubKey"` // ECIES sender ephemeral public key
-	EncryptedFiles  []byte `json:"encryptedFiles"`  // ECIES ciphertext of json(Files)
-	Signature       []byte `json:"signature"`       // ECDSA r||s over SHA-256(EphemeralPubKey||EncryptedFiles)
-	UpdatedAt       string `json:"updatedAt"`       // RFC3339 UTC; set on each sign so merge can compare per-user
+// Block operation types.
+const (
+	BlockOpAdd    = "add"
+	BlockOpRemove = "remove"
+	BlockOpRename = "rename"
+)
 
-	// In-memory only. Populated by DecryptUserFiles; never written to disk.
+// ChainBlock is one signed, hash-linked operation in a user's file history.
+// Blocks are append-only and never modified after creation.
+//
+// Security model:
+//   - Each block is ECDSA-signed by the owner.  Any peer can verify the signature
+//     using the PublicKey embedded in the parent UserChain.
+//   - PrevHash links each block to its predecessor, making the chain tamper-evident:
+//     altering any past block invalidates every subsequent hash link.
+//   - Merge conflict resolution: the longer valid chain wins.  Equal-length forks
+//     resolve deterministically by choosing the chain with the lower hex hash at
+//     the first differing block.
+type ChainBlock struct {
+	Index     int              `json:"index"`             // 0-based position in chain
+	PrevHash  string           `json:"prevHash"`          // hex SHA-256 of previous block; "" for genesis
+	Op        string           `json:"op"`                // BlockOpAdd | BlockOpRemove | BlockOpRename
+	File      NetworkFileEntry `json:"file"`              // file affected by this operation
+	NewName   string           `json:"newName,omitempty"` // populated only for BlockOpRename
+	Timestamp string           `json:"timestamp"`         // RFC3339 UTC
+	Signature []byte           `json:"signature,omitempty"`
+}
+
+// UserChain is a user's append-only operation history.
+// The current file set is derived by replaying Blocks via ChainToFiles.
+type UserChain struct {
+	UserID    int          `json:"userID"`
+	Username  string       `json:"username"`
+	PublicKey []byte       `json:"publicKey"` // PKIX DER P-256; used for block verification
+
+	Blocks []ChainBlock `json:"blocks"`
+
+	// In-memory cache: populated by ChainToFiles; never serialized.
 	Files []NetworkFileEntry `json:"-"`
 }
 
-// NetworkManifest is the root structure written to disk after encryption.
-// Entries MUST remain sorted by UserID at all times.
+// NetworkManifest is the root structure: a collection of per-user chains,
+// encrypted at rest with the shared network AES key.
+// Chains MUST remain sorted by UserID at all times.
 type NetworkManifest struct {
-	Version   int                `json:"version"`
-	UpdatedAt string             `json:"updatedAt"`
-	Entries   []UserNetworkEntry `json:"entries"`
+	Version   int         `json:"version"`
+	UpdatedAt string      `json:"updatedAt"`
+	Chains    []UserChain `json:"chains"`
 }
 
 // networkManifestPath returns the path to the on-disk manifest file.
@@ -75,15 +88,232 @@ func networkManifestPath(mosaicDir string) string {
 }
 
 // ──────────────────────────────────────────────────────────
-// Disk I/O
+// Block hashing and signing
+// ──────────────────────────────────────────────────────────
+
+// blockHashBytes returns the SHA-256 of the block with Signature zeroed.
+// This is the canonical pre-image for signing and for chain linking.
+func blockHashBytes(b ChainBlock) ([]byte, error) {
+	b.Signature = nil
+	data, err := json.Marshal(b)
+	if err != nil {
+		return nil, fmt.Errorf("blockHash: marshal: %w", err)
+	}
+	h := sha256.Sum256(data)
+	return h[:], nil
+}
+
+// BlockHash returns the hex SHA-256 of the block (Signature excluded).
+func BlockHash(b ChainBlock) (string, error) {
+	h, err := blockHashBytes(b)
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h), nil
+}
+
+func signBlock(b *ChainBlock, priv *ecdsa.PrivateKey) error {
+	hash, err := blockHashBytes(*b)
+	if err != nil {
+		return err
+	}
+	r, s, err := ecdsa.Sign(rand.Reader, priv, hash)
+	if err != nil {
+		return fmt.Errorf("signBlock: ECDSA sign: %w", err)
+	}
+	sig := make([]byte, 64)
+	r.FillBytes(sig[:32])
+	s.FillBytes(sig[32:])
+	b.Signature = sig
+	return nil
+}
+
+func verifyBlock(b ChainBlock, pub *ecdsa.PublicKey) bool {
+	if len(b.Signature) != 64 {
+		return false
+	}
+	hash, err := blockHashBytes(b)
+	if err != nil {
+		return false
+	}
+	r := new(big.Int).SetBytes(b.Signature[:32])
+	s := new(big.Int).SetBytes(b.Signature[32:])
+	return ecdsa.Verify(pub, hash, r, s)
+}
+
+// ValidateChain checks every block's signature and every hash link.
+// An empty chain is valid.  Returns false on any integrity failure.
+func ValidateChain(chain UserChain) bool {
+	if len(chain.Blocks) == 0 {
+		return true
+	}
+	if len(chain.PublicKey) == 0 {
+		return false
+	}
+	pub, err := ParsePublicKeyBytes(chain.PublicKey)
+	if err != nil {
+		return false
+	}
+
+	prevHash := ""
+	for i, b := range chain.Blocks {
+		if b.Index != i {
+			return false
+		}
+		if b.PrevHash != prevHash {
+			return false
+		}
+		if !verifyBlock(b, pub) {
+			return false
+		}
+		h, err := BlockHash(b)
+		if err != nil {
+			return false
+		}
+		prevHash = h
+	}
+	return true
+}
+
+// ──────────────────────────────────────────────────────────
+// Chain mutation and replay
+// ──────────────────────────────────────────────────────────
+
+// AppendBlock creates a new signed block and appends it to chain.
+// kp must be the owner's keypair.
+func AppendBlock(chain *UserChain, op string, file NetworkFileEntry, newName string, kp UserKeyPair) error {
+	prevHash := ""
+	if len(chain.Blocks) > 0 {
+		last := chain.Blocks[len(chain.Blocks)-1]
+		h, err := BlockHash(last)
+		if err != nil {
+			return fmt.Errorf("AppendBlock: hash last block: %w", err)
+		}
+		prevHash = h
+	}
+
+	b := ChainBlock{
+		Index:     len(chain.Blocks),
+		PrevHash:  prevHash,
+		Op:        op,
+		File:      file,
+		NewName:   newName,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := signBlock(&b, kp.Private); err != nil {
+		return err
+	}
+	chain.Blocks = append(chain.Blocks, b)
+	return nil
+}
+
+// ChainToFiles replays all blocks to compute the current set of files.
+func ChainToFiles(chain UserChain) []NetworkFileEntry {
+	files := make(map[string]NetworkFileEntry)
+	for _, b := range chain.Blocks {
+		switch b.Op {
+		case BlockOpAdd:
+			files[b.File.Name] = b.File
+		case BlockOpRemove:
+			delete(files, b.File.Name)
+		case BlockOpRename:
+			if f, ok := files[b.File.Name]; ok {
+				delete(files, b.File.Name)
+				f.Name = b.NewName
+				files[b.NewName] = f
+			}
+		}
+	}
+	result := make([]NetworkFileEntry, 0, len(files))
+	for _, f := range files {
+		result = append(result, f)
+	}
+	return result
+}
+
+// ──────────────────────────────────────────────────────────
+// Manifest-level helpers (sorted chain list)
+// ──────────────────────────────────────────────────────────
+
+// FindChainIndex returns the index in m.Chains where UserID == userID, or -1.
+func FindChainIndex(m NetworkManifest, userID int) int {
+	n := len(m.Chains)
+	i := sort.Search(n, func(i int) bool { return m.Chains[i].UserID >= userID })
+	if i < n && m.Chains[i].UserID == userID {
+		return i
+	}
+	return -1
+}
+
+func insertChainSorted(chains []UserChain, c UserChain) []UserChain {
+	i := sort.Search(len(chains), func(i int) bool { return chains[i].UserID >= c.UserID })
+	chains = append(chains, UserChain{})
+	copy(chains[i+1:], chains[i:])
+	chains[i] = c
+	return chains
+}
+
+// AppendBlockAdd appends an "add" block to userID's chain in the manifest.
+func AppendBlockAdd(m *NetworkManifest, userID int, username string, file NetworkFileEntry, kp UserKeyPair) error {
+	i := FindChainIndex(*m, userID)
+	if i == -1 {
+		pubBytes, err := PublicKeyBytes(kp.Public)
+		if err != nil {
+			return fmt.Errorf("AppendBlockAdd: serialize public key: %w", err)
+		}
+		m.Chains = insertChainSorted(m.Chains, UserChain{
+			UserID:    userID,
+			Username:  username,
+			PublicKey: pubBytes,
+		})
+		i = FindChainIndex(*m, userID)
+	}
+	return AppendBlock(&m.Chains[i], BlockOpAdd, file, "", kp)
+}
+
+// AppendBlockRemove appends a "remove" block to userID's chain.
+func AppendBlockRemove(m *NetworkManifest, userID int, filename string, kp UserKeyPair) error {
+	i := FindChainIndex(*m, userID)
+	if i == -1 {
+		return fmt.Errorf("AppendBlockRemove: user %d not in manifest", userID)
+	}
+	file := NetworkFileEntry{Name: filename}
+	return AppendBlock(&m.Chains[i], BlockOpRemove, file, "", kp)
+}
+
+// AppendBlockRename appends a "rename" block to userID's chain.
+func AppendBlockRename(m *NetworkManifest, userID int, oldName, newName string, kp UserKeyPair) error {
+	i := FindChainIndex(*m, userID)
+	if i == -1 {
+		return fmt.Errorf("AppendBlockRename: user %d not in manifest", userID)
+	}
+	file := NetworkFileEntry{Name: oldName}
+	return AppendBlock(&m.Chains[i], BlockOpRename, file, newName, kp)
+}
+
+// GetUserFiles returns the current file list for userID by replaying the chain.
+// Returns nil if the user has no chain in the manifest.
+func GetUserFiles(m NetworkManifest, userID int) []NetworkFileEntry {
+	i := FindChainIndex(m, userID)
+	if i == -1 {
+		return nil
+	}
+	return ChainToFiles(m.Chains[i])
+}
+
+// UserExistsInNetwork reports whether userID has a chain in the manifest.
+func UserExistsInNetwork(m NetworkManifest, userID int) bool {
+	return FindChainIndex(m, userID) != -1
+}
+
+// ──────────────────────────────────────────────────────────
+// Disk I/O (outer AES-256-GCM at-rest encryption)
 // ──────────────────────────────────────────────────────────
 
 // ReadNetworkManifest decrypts and deserializes the manifest from disk.
-// Returns an empty manifest if the file does not exist.
-// Note: Files fields are empty for all entries — call DecryptUserFiles to
-// populate your own entry before mutating.
+// Returns an empty v2 manifest if the file does not exist.
 func ReadNetworkManifest(mosaicDir string, key [32]byte) (NetworkManifest, error) {
-	empty := NetworkManifest{Version: 1, Entries: []UserNetworkEntry{}}
+	empty := NetworkManifest{Version: 2, Chains: []UserChain{}}
 
 	data, err := os.ReadFile(networkManifestPath(mosaicDir))
 	if os.IsNotExist(err) {
@@ -103,12 +333,15 @@ func ReadNetworkManifest(mosaicDir string, key [32]byte) (NetworkManifest, error
 		return empty, fmt.Errorf("could not parse network manifest: %w", err)
 	}
 
+	// Treat old v1 manifests as empty — they used a different schema.
+	if m.Version < 2 {
+		return empty, nil
+	}
+
 	return m, nil
 }
 
 // WriteNetworkManifest serializes, encrypts, and atomically writes the manifest.
-// Sets UpdatedAt to current UTC time before writing.
-// Files fields are intentionally excluded from JSON (json:"-").
 func WriteNetworkManifest(mosaicDir string, key [32]byte, m NetworkManifest) error {
 	m.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 
@@ -130,266 +363,48 @@ func WriteNetworkManifest(mosaicDir string, key [32]byte, m NetworkManifest) err
 	return os.Rename(tmp, networkManifestPath(mosaicDir))
 }
 
-// ReadAndDecryptNetworkManifest is a convenience wrapper: reads the manifest
-// from disk and decrypts the given user's Files section in one call.
-func ReadAndDecryptNetworkManifest(mosaicDir string, aesKey [32]byte, userID int, priv *ecdsa.PrivateKey) (NetworkManifest, error) {
-	m, err := ReadNetworkManifest(mosaicDir, aesKey)
-	if err != nil {
-		return m, err
-	}
-	i := FindUserIndex(m, userID)
-	if i != -1 {
-		if derr := DecryptUserFiles(&m.Entries[i], priv); derr != nil {
-			// Non-fatal: entry may be new and have no ciphertext yet.
-			m.Entries[i].Files = []NetworkFileEntry{}
-		}
-	}
-	return m, nil
-}
-
-// EncryptSignAndWriteNetworkManifest encrypts the user's Files, signs, and
-// writes the manifest to disk atomically.
-func EncryptSignAndWriteNetworkManifest(mosaicDir string, aesKey [32]byte, m NetworkManifest, userID int, kp UserKeyPair) error {
+// WriteNetworkManifestLocked is WriteNetworkManifest with the shared mutex held.
+// Use this for any read-modify-write cycle that must be atomic.
+func WriteNetworkManifestLocked(mosaicDir string, key [32]byte, m NetworkManifest) error {
 	networkManifestMu.Lock()
 	defer networkManifestMu.Unlock()
-
-	i := FindUserIndex(m, userID)
-	if i != -1 {
-		if err := EncryptAndSignUserEntry(&m.Entries[i], kp); err != nil {
-			return fmt.Errorf("could not encrypt/sign entry: %w", err)
-		}
-	}
-	return WriteNetworkManifest(mosaicDir, aesKey, m)
-}
-
-// ──────────────────────────────────────────────────────────
-// Binary search helpers
-// ──────────────────────────────────────────────────────────
-
-// FindUserIndex returns the index in m.Entries where UserID == userID, or -1.
-func FindUserIndex(m NetworkManifest, userID int) int {
-	n := len(m.Entries)
-	i := sort.Search(n, func(i int) bool { return m.Entries[i].UserID >= userID })
-	if i < n && m.Entries[i].UserID == userID {
-		return i
-	}
-	return -1
-}
-
-func insertSorted(entries []UserNetworkEntry, e UserNetworkEntry) []UserNetworkEntry {
-	i := sort.Search(len(entries), func(i int) bool { return entries[i].UserID >= e.UserID })
-	entries = append(entries, UserNetworkEntry{})
-	copy(entries[i+1:], entries[i:])
-	entries[i] = e
-	return entries
-}
-
-// GetUserFiles returns the in-memory Files for userID, or nil if not present.
-// Only populated after DecryptUserFiles has been called for that entry.
-func GetUserFiles(m NetworkManifest, userID int) []NetworkFileEntry {
-	i := FindUserIndex(m, userID)
-	if i == -1 {
-		return nil
-	}
-	return m.Entries[i].Files
-}
-
-// UserExistsInNetwork reports whether userID has an entry in the manifest.
-func UserExistsInNetwork(m NetworkManifest, userID int) bool {
-	return FindUserIndex(m, userID) != -1
-}
-
-// ──────────────────────────────────────────────────────────
-// Pure mutation functions (operate on in-memory Files)
-// ──────────────────────────────────────────────────────────
-
-// AddFileToNetwork adds or replaces a NetworkFileEntry for the given user.
-// Requires DecryptUserFiles to have been called first for this user's entry.
-func AddFileToNetwork(m NetworkManifest, userID int, username string, entry NetworkFileEntry) NetworkManifest {
-	i := FindUserIndex(m, userID)
-	if i == -1 {
-		m.Entries = insertSorted(m.Entries, UserNetworkEntry{
-			UserID:   userID,
-			Username: username,
-			Files:    []NetworkFileEntry{entry},
-		})
-		return m
-	}
-	for j, f := range m.Entries[i].Files {
-		if f.Name == entry.Name {
-			m.Entries[i].Files[j] = entry
-			return m
-		}
-	}
-	m.Entries[i].Files = append(m.Entries[i].Files, entry)
-	return m
-}
-
-// RemoveFileFromNetwork removes the named file from userID's entry.
-// Requires DecryptUserFiles to have been called first.
-func RemoveFileFromNetwork(m NetworkManifest, userID int, filename string) NetworkManifest {
-	i := FindUserIndex(m, userID)
-	if i == -1 {
-		return m
-	}
-	files := m.Entries[i].Files
-	for j, f := range files {
-		if f.Name == filename {
-			m.Entries[i].Files = append(files[:j], files[j+1:]...)
-			break
-		}
-	}
-	if len(m.Entries[i].Files) == 0 {
-		m.Entries = append(m.Entries[:i], m.Entries[i+1:]...)
-	}
-	return m
-}
-
-// RenameFileInNetwork renames a file within userID's entry.
-// Requires DecryptUserFiles to have been called first.
-func RenameFileInNetwork(m NetworkManifest, userID int, oldName, newName string) NetworkManifest {
-	i := FindUserIndex(m, userID)
-	if i == -1 {
-		return m
-	}
-	for j, f := range m.Entries[i].Files {
-		if f.Name == oldName {
-			m.Entries[i].Files[j].Name = newName
-			return m
-		}
-	}
-	return m
-}
-
-// ──────────────────────────────────────────────────────────
-// Per-user ECIES encryption + ECDSA signing
-// ──────────────────────────────────────────────────────────
-
-// ciphertextPayloadHash returns SHA-256(EphemeralPubKey || EncryptedFiles).
-// This is the canonical bytes over which the ECDSA signature is computed.
-// Signing the ciphertext means any peer can verify integrity without decrypting.
-func ciphertextPayloadHash(entry UserNetworkEntry) []byte {
-	h := sha256.New()
-	h.Write(entry.EphemeralPubKey)
-	h.Write(entry.EncryptedFiles)
-	return h.Sum(nil)
-}
-
-// EncryptAndSignUserEntry encrypts entry.Files with ECIES (using the user's
-// own public key as recipient) and signs the resulting ciphertext.
-// After this call: EphemeralPubKey, EncryptedFiles, Signature, and PublicKey
-// are all populated. Files is unchanged in memory but will not be serialized.
-func EncryptAndSignUserEntry(entry *UserNetworkEntry, kp UserKeyPair) error {
-	// Serialize the plaintext file list.
-	plain, err := json.Marshal(entry.Files)
-	if err != nil {
-		return fmt.Errorf("could not marshal files: %w", err)
-	}
-
-	ephPub, ciphertext, err := eciesEncrypt(kp.Public, plain)
-	if err != nil {
-		return fmt.Errorf("could not encrypt files: %w", err)
-	}
-	entry.EphemeralPubKey = ephPub
-	entry.EncryptedFiles = ciphertext
-	entry.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-
-	// Sign SHA-256(EphemeralPubKey || EncryptedFiles).
-	hash := ciphertextPayloadHash(*entry)
-	r, s, err := ecdsa.Sign(rand.Reader, kp.Private, hash)
-	if err != nil {
-		return fmt.Errorf("could not sign entry: %w", err)
-	}
-	sig := make([]byte, 64)
-	r.FillBytes(sig[:32])
-	s.FillBytes(sig[32:])
-	entry.Signature = sig
-
-	pubBytes, err := PublicKeyBytes(kp.Public)
-	if err != nil {
-		return fmt.Errorf("could not serialize public key: %w", err)
-	}
-	entry.PublicKey = pubBytes
-	return nil
-}
-
-// DecryptUserFiles decrypts entry.EncryptedFiles using the owner's private key
-// and populates entry.Files. Returns an error if decryption or parsing fails.
-func DecryptUserFiles(entry *UserNetworkEntry, priv *ecdsa.PrivateKey) error {
-	if len(entry.EncryptedFiles) == 0 {
-		entry.Files = []NetworkFileEntry{}
-		return nil
-	}
-	plain, err := eciesDecrypt(priv, entry.EphemeralPubKey, entry.EncryptedFiles)
-	if err != nil {
-		return fmt.Errorf("could not decrypt files: %w", err)
-	}
-	var files []NetworkFileEntry
-	if err := json.Unmarshal(plain, &files); err != nil {
-		return fmt.Errorf("could not parse decrypted files: %w", err)
-	}
-	entry.Files = files
-	return nil
-}
-
-// VerifyUserEntry verifies the ECDSA signature on entry.
-// Any peer can call this — no private key required.
-// Returns false if the signature is missing, malformed, or invalid.
-func VerifyUserEntry(entry UserNetworkEntry) bool {
-	if len(entry.Signature) != 64 || len(entry.PublicKey) == 0 {
-		return false
-	}
-	if len(entry.EncryptedFiles) == 0 || len(entry.EphemeralPubKey) == 0 {
-		return false
-	}
-
-	pub, err := ParsePublicKeyBytes(entry.PublicKey)
-	if err != nil {
-		return false
-	}
-
-	hash := ciphertextPayloadHash(entry)
-	r := new(big.Int).SetBytes(entry.Signature[:32])
-	s := new(big.Int).SetBytes(entry.Signature[32:])
-	return ecdsa.Verify(pub, hash, r, s)
+	return WriteNetworkManifest(mosaicDir, key, m)
 }
 
 // ──────────────────────────────────────────────────────────
 // Merge (P2P sync)
 // ──────────────────────────────────────────────────────────
 
-// MergeNetworkManifest merges a remote manifest received from a peer into
-// the local one. Every remote entry is signature-verified before being
-// accepted. Tampered or unsigned entries are silently dropped.
+// MergeNetworkManifest merges a remote manifest into the local one.
 //
-// Merge strategy per user entry (independent of global manifest timestamp):
-//   - Remote entry fails signature verification → drop, keep local
-//   - Remote entry not in local manifest → add it
-//   - Both exist → keep whichever has the newer per-entry UpdatedAt
+// Per-user merge strategy:
+//   - Remote chain fails ValidateChain → silently dropped
+//   - Remote chain not in local manifest → accepted
+//   - Both exist → longer valid chain wins
+//   - Same length but divergent → deterministic fork resolution: the chain
+//     whose first differing block has the lexicographically lower hash wins
 //
 // Returns the merged manifest and whether anything actually changed.
 func MergeNetworkManifest(local, remote NetworkManifest) (NetworkManifest, bool) {
 	merged := local
 	changed := false
 
-	for _, remoteEntry := range remote.Entries {
-		if !VerifyUserEntry(remoteEntry) {
-			fmt.Printf("MergeNetworkManifest: dropping tampered/unverified entry for userID %d\n", remoteEntry.UserID)
+	for _, remoteChain := range remote.Chains {
+		if !ValidateChain(remoteChain) {
+			fmt.Printf("MergeNetworkManifest: dropping invalid chain for userID %d\n", remoteChain.UserID)
 			continue
 		}
 
-		i := FindUserIndex(merged, remoteEntry.UserID)
+		i := FindChainIndex(merged, remoteChain.UserID)
 		if i == -1 {
-			merged.Entries = insertSorted(merged.Entries, remoteEntry)
+			merged.Chains = insertChainSorted(merged.Chains, remoteChain)
 			changed = true
 			continue
 		}
 
-		// Both exist: compare per-entry timestamps and take the newer one.
-		localEntryTime, _ := time.Parse(time.RFC3339, merged.Entries[i].UpdatedAt)
-		remoteEntryTime, _ := time.Parse(time.RFC3339, remoteEntry.UpdatedAt)
-		if remoteEntryTime.After(localEntryTime) {
-			merged.Entries[i] = remoteEntry
+		winner := pickBetterChain(merged.Chains[i], remoteChain)
+		if len(winner.Blocks) != len(merged.Chains[i].Blocks) || chainHeadHash(winner) != chainHeadHash(merged.Chains[i]) {
+			merged.Chains[i] = winner
 			changed = true
 		}
 	}
@@ -397,9 +412,39 @@ func MergeNetworkManifest(local, remote NetworkManifest) (NetworkManifest, bool)
 	return merged, changed
 }
 
+// pickBetterChain returns whichever chain should be the canonical one.
+// Longer valid chain wins; equal-length forks resolve by first differing block hash.
+func pickBetterChain(a, b UserChain) UserChain {
+	if len(a.Blocks) > len(b.Blocks) {
+		return a
+	}
+	if len(b.Blocks) > len(a.Blocks) {
+		return b
+	}
+	// Same length: find first differing block and take the one with the lower hash.
+	for i := range a.Blocks {
+		ha, _ := BlockHash(a.Blocks[i])
+		hb, _ := BlockHash(b.Blocks[i])
+		if ha != hb {
+			if ha < hb {
+				return a
+			}
+			return b
+		}
+	}
+	return a // identical chains
+}
+
+// chainHeadHash returns the hash of the last block, or "" for an empty chain.
+func chainHeadHash(c UserChain) string {
+	if len(c.Blocks) == 0 {
+		return ""
+	}
+	h, _ := BlockHash(c.Blocks[len(c.Blocks)-1])
+	return h
+}
+
 // ManifestToJSON serializes the manifest to JSON bytes for P2P transmission.
-// Each user's Files is excluded (json:"-"); only opaque EncryptedFiles is sent.
-// This is intentional — peers receive encrypted sections they cannot read.
 func ManifestToJSON(m NetworkManifest) ([]byte, error) {
 	return json.Marshal(m)
 }
@@ -409,81 +454,6 @@ func ManifestFromJSON(data []byte) (NetworkManifest, error) {
 	var m NetworkManifest
 	err := json.Unmarshal(data, &m)
 	return m, err
-}
-
-// ──────────────────────────────────────────────────────────
-// ECIES (ECDH + AES-256-GCM)
-// ──────────────────────────────────────────────────────────
-
-// eciesEncrypt encrypts plaintext for the given ECDSA P-256 recipient public key.
-// Uses ECDH to derive a per-message AES-256 key (SHA-256 of the shared secret).
-// Returns (serialized ephemeral public key, AES-GCM ciphertext).
-func eciesEncrypt(recipientPub *ecdsa.PublicKey, plaintext []byte) (ephPubBytes []byte, ciphertext []byte, err error) {
-	// Generate ephemeral keypair.
-	ephPriv, err := ecdsa.GenerateKey(recipientPub.Curve, rand.Reader)
-	if err != nil {
-		return nil, nil, fmt.Errorf("ecies: generate ephemeral key: %w", err)
-	}
-
-	// ECDH: convert both keys to crypto/ecdh, derive shared secret.
-	ephECDH, err := ephPriv.ECDH()
-	if err != nil {
-		return nil, nil, fmt.Errorf("ecies: convert ephemeral key: %w", err)
-	}
-	recipientECDH, err := recipientPub.ECDH()
-	if err != nil {
-		return nil, nil, fmt.Errorf("ecies: convert recipient key: %w", err)
-	}
-	sharedSecret, err := ephECDH.ECDH(recipientECDH)
-	if err != nil {
-		return nil, nil, fmt.Errorf("ecies: ECDH: %w", err)
-	}
-
-	// KDF: SHA-256 of the shared secret bytes.
-	aesKey := sha256.Sum256(sharedSecret)
-
-	// Encrypt with AES-256-GCM.
-	ct, err := encryptAESGCM(aesKey, plaintext)
-	if err != nil {
-		return nil, nil, fmt.Errorf("ecies: encrypt: %w", err)
-	}
-
-	// Serialize the ephemeral public key.
-	ephPubBytes, err = PublicKeyBytes(&ephPriv.PublicKey)
-	if err != nil {
-		return nil, nil, fmt.Errorf("ecies: serialize ephemeral pub key: %w", err)
-	}
-
-	return ephPubBytes, ct, nil
-}
-
-// eciesDecrypt decrypts ciphertext produced by eciesEncrypt using the
-// recipient's ECDSA private key and the sender's ephemeral public key bytes.
-func eciesDecrypt(recipientPriv *ecdsa.PrivateKey, ephPubBytes []byte, ciphertext []byte) ([]byte, error) {
-	// Parse the ephemeral public key.
-	ephPub, err := ParsePublicKeyBytes(ephPubBytes)
-	if err != nil {
-		return nil, fmt.Errorf("ecies: parse ephemeral pub key: %w", err)
-	}
-
-	// ECDH: convert to crypto/ecdh keys.
-	recipientECDH, err := recipientPriv.ECDH()
-	if err != nil {
-		return nil, fmt.Errorf("ecies: convert recipient priv key: %w", err)
-	}
-	ephECDH, err := ephPub.ECDH()
-	if err != nil {
-		return nil, fmt.Errorf("ecies: convert ephemeral pub key: %w", err)
-	}
-	sharedSecret, err := recipientECDH.ECDH(ephECDH)
-	if err != nil {
-		return nil, fmt.Errorf("ecies: ECDH: %w", err)
-	}
-
-	// KDF: SHA-256 of shared secret.
-	aesKey := sha256.Sum256(sharedSecret)
-
-	return decryptAESGCM(aesKey, ciphertext)
 }
 
 // ──────────────────────────────────────────────────────────

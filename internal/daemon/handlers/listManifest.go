@@ -32,15 +32,7 @@ func ListManifest(_ protocol.ListManifestRequest) protocol.ListManifestResponse 
 		}
 	}
 
-	kp, err := filesystem.LoadOrCreateUserKey(shared.UserKeyPath())
-	if err != nil {
-		return protocol.ListManifestResponse{
-			Success: false,
-			Details: fmt.Sprintf("could not load user key: %v", err),
-		}
-	}
-
-	m, err := filesystem.ReadAndDecryptNetworkManifest(mosaicDir, aesKey, accountID, kp.Private)
+	m, err := filesystem.ReadNetworkManifest(mosaicDir, aesKey)
 	if err != nil {
 		return protocol.ListManifestResponse{
 			Success: false,
@@ -48,7 +40,7 @@ func ListManifest(_ protocol.ListManifestRequest) protocol.ListManifestResponse 
 		}
 	}
 
-	idx := filesystem.FindUserIndex(m, accountID)
+	idx := filesystem.FindChainIndex(m, accountID)
 	if idx == -1 {
 		return protocol.ListManifestResponse{
 			Success: true,
@@ -57,10 +49,11 @@ func ListManifest(_ protocol.ListManifestRequest) protocol.ListManifestResponse 
 		}
 	}
 
+	networkFiles := filesystem.ChainToFiles(m.Chains[idx])
 	localEntries, _ := filesystem.ReadManifest(mosaicDir)
 
-	files := make([]protocol.ManifestFileEntry, 0, len(m.Entries[idx].Files))
-	for _, f := range m.Entries[idx].Files {
+	files := make([]protocol.ManifestFileEntry, 0, len(networkFiles))
+	for _, f := range networkFiles {
 		cached := false
 		if e, ok := localEntries[f.Name]; ok {
 			cached = e.Cached

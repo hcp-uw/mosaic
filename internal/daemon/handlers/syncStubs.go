@@ -8,9 +8,9 @@ import (
 	filesystem "github.com/hcp-uw/mosaic/internal/fileSystem"
 )
 
-// SyncUserStubs reads the network manifest, decrypts the logged-in user's
-// section, and creates local stubs for any files that aren't already tracked
-// in the local manifest. Safe to call when not logged in — exits silently.
+// SyncUserStubs reads the network manifest, replays the logged-in user's chain,
+// and creates local stubs for any files not already tracked in the local manifest.
+// Safe to call when not logged in — exits silently.
 //
 // Called on: daemon startup, login, and after each manifest sync from a peer.
 func SyncUserStubs() {
@@ -22,24 +22,23 @@ func SyncUserStubs() {
 		return
 	}
 
-	kp, err := filesystem.LoadOrCreateUserKey(shared.UserKeyPath())
-	if err != nil {
+	if !helpers.IsLoggedIn() {
 		return // not logged in — nothing to sync
 	}
 
 	accountID := helpers.GetAccountID()
-	m, err := filesystem.ReadAndDecryptNetworkManifest(mosaicDir, aesKey, accountID, kp.Private)
+	m, err := filesystem.ReadNetworkManifest(mosaicDir, aesKey)
 	if err != nil {
 		fmt.Println("syncUserStubs: could not read network manifest:", err)
 		return
 	}
 
-	idx := filesystem.FindUserIndex(m, accountID)
+	idx := filesystem.FindChainIndex(m, accountID)
 	if idx == -1 {
 		return // user has no files in the network manifest yet
 	}
 
-	for _, f := range m.Entries[idx].Files {
+	for _, f := range filesystem.ChainToFiles(m.Chains[idx]) {
 		if filesystem.IsInManifest(mosaicDir, f.Name) {
 			continue
 		}

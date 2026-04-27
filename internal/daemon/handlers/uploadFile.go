@@ -56,10 +56,10 @@ func uploadFile(path string, keepLocal bool) protocol.UploadFileResponse {
 		fmt.Println("Warning: could not update manifest for", filename, "-", err)
 	}
 
-	// Update the network manifest: decrypt own section, mutate, encrypt+sign, write, broadcast.
+	// Update the network manifest: append "add" block, write, broadcast.
 	if aesKey, err := filesystem.LoadOrCreateNetworkKey(shared.NetworkKeyPath()); err == nil {
 		if kp, kerr := filesystem.LoadOrCreateUserKey(shared.UserKeyPath()); kerr == nil {
-			if nm, err := filesystem.ReadAndDecryptNetworkManifest(mosaicDir, aesKey, helpers.GetAccountID(), kp.Private); err == nil {
+			if nm, err := filesystem.ReadNetworkManifest(mosaicDir, aesKey); err == nil {
 				entry := filesystem.NetworkFileEntry{
 					Name:          filename,
 					Size:          originalSize,
@@ -67,9 +67,10 @@ func uploadFile(path string, keepLocal bool) protocol.UploadFileResponse {
 					DateAdded:     time.Now().Format("01-02-2006"),
 					ContentHash:   contentHash,
 				}
-				nm = filesystem.AddFileToNetwork(nm, helpers.GetAccountID(), helpers.GetUsername(), entry)
-				if werr := filesystem.EncryptSignAndWriteNetworkManifest(mosaicDir, aesKey, nm, helpers.GetAccountID(), kp); werr != nil {
-					fmt.Println("Warning: could not update network manifest for", filename, "-", werr)
+				if aerr := filesystem.AppendBlockAdd(&nm, helpers.GetAccountID(), helpers.GetUsername(), entry, kp); aerr != nil {
+					fmt.Println("Warning: could not append block for", filename, "-", aerr)
+				} else if werr := filesystem.WriteNetworkManifestLocked(mosaicDir, aesKey, nm); werr != nil {
+					fmt.Println("Warning: could not write network manifest for", filename, "-", werr)
 				} else {
 					BroadcastNetworkManifest(nm)
 					go transfer.UploadFile(path, GetP2PClient())

@@ -46,7 +46,7 @@ Key functions:
 > Stubs are temporary. Once a file is fetched, the stub is deleted and the manifest becomes the only metadata record.
 
 ### manifest.go
-The manifest is the authoritative record of every file on the network. Unlike stubs, it persists even after a file is cached locally (when the stub is gone).
+The manifest is the authoritative record of every file on the network for this node. Unlike stubs, it persists even after a file is cached locally (when the stub is gone).
 
 **Location:** `~/Mosaic/.mosaic-manifest.json`
 
@@ -79,6 +79,25 @@ Key functions:
 - `ReadManifest` — returns all entries; used by the status bar menu to list files
 
 **Concurrency:** All manifest reads and writes go through a `sync.Mutex`. Writes use an atomic rename pattern — data is written to `.mosaic-manifest.json.tmp` first, then renamed over the real file in a single syscall. This prevents corruption if the daemon crashes mid-write.
+
+### networkManifest.go
+The network manifest is the distributed, tamper-evident index shared between peers. It uses a personal hash chain (blockchain) model — each user has their own append-only chain of signed file operation blocks.
+
+**Location:** `~/Mosaic/.mosaic-network-manifest` (binary: AES-256-GCM envelope around chain JSON)
+
+**Key types:**
+- `ChainBlock` — one signed file operation (add / remove / rename) linked to the previous block via SHA-256 hash
+- `UserChain` — a user's complete operation history; replayed via `ChainToFiles` to get current file state
+- `NetworkManifest` — collection of all user chains, sorted by UserID
+
+**Key functions:**
+- `AppendBlockAdd / AppendBlockRemove / AppendBlockRename` — the only way to mutate a chain; signs each block with the user's ECDSA key
+- `ChainToFiles` — replays all blocks to produce current file list
+- `ValidateChain` — verifies every block signature and every hash link; called on all peer data before acceptance
+- `MergeNetworkManifest` — merges a remote manifest using "longer valid chain wins" with deterministic fork resolution
+- `ReadNetworkManifest / WriteNetworkManifestLocked` — disk I/O with outer AES-GCM at-rest encryption
+
+See [manifest-blockchain.md](manifest-blockchain.md) for a full explanation of the design.
 
 ---
 

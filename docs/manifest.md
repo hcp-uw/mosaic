@@ -2,6 +2,8 @@
 
 This document explains the full manifest system — what it is, why it exists, how it works technically, and how every piece connects together.
 
+> **Version note:** The network manifest was redesigned as a per-user blockchain in v2. The old v1 format (ECIES-encrypted `UserNetworkEntry` blobs) is no longer used. On first read, any v1 manifest is treated as empty and rebuilt from scratch.
+
 ---
 
 ## Why a Manifest Exists
@@ -15,10 +17,11 @@ There are two separate manifests with different scopes and different security pr
 | | Local Manifest | Network Manifest |
 |---|---|---|
 | **Scope** | Your files, on this node | All users, all nodes |
-| **Format** | Plaintext JSON | Encrypted binary |
+| **Format** | Plaintext JSON | Blockchain chains, encrypted at rest |
 | **Location** | `~/Mosaic/.mosaic-manifest.json` | `~/Mosaic/.mosaic-network-manifest` |
-| **Who can read it** | Anyone with disk access | Only you (per-user encryption) |
-| **Purpose** | Fast local lookups, Finder integration | P2P sync, cross-node access |
+| **Who can read it** | Anyone with disk access | Any peer (file names are visible; content is not) |
+| **Tamper protection** | None (local-only) | Per-block ECDSA signatures + hash chain |
+| **Purpose** | Fast local lookups, Finder integration | P2P sync, cross-node access, public permissionless network |
 
 ---
 
@@ -55,13 +58,13 @@ The local manifest is a JSON file at `~/Mosaic/.mosaic-manifest.json`. It is a f
 - `nodeID` — which node holds the primary shard set
 - `dateAdded` — when the file was uploaded (`MM-DD-YYYY`)
 - `cached` — whether the real file bytes are currently on this machine
-- `contentHash` — SHA-256 hex of the original file bytes, used for integrity verification on download; empty for files uploaded before hashing was implemented
+- `contentHash` — SHA-256 hex of the original file bytes, used for integrity verification on download
 
 ### The Cached Flag vs. File Presence
 
 `cached: true` means the file bytes exist at `~/Mosaic/<filename>`. `cached: false` means only a stub placeholder exists at `~/Mosaic/<filename>.mosaic`.
 
-The `~/Mosaic/` folder is the source of truth for what you have on the network. **Deleting anything from `~/Mosaic/` — whether a real cached file or a stub — deletes the file from the network and removes it from the manifest.** The FSEvents watcher detects the deletion and calls `DeleteFile`, which removes the entry from both the local manifest and the network manifest and broadcasts the change to peers.
+The `~/Mosaic/` folder is the source of truth for what you have locally. **Deleting anything from `~/Mosaic/` — whether a real cached file or a stub — deletes the file from the network.** The FSEvents watcher detects the deletion and calls `DeleteFile`, which removes the entry from both the local manifest and the network manifest and broadcasts the change to peers.
 
 ### How It Gets Written
 
@@ -75,7 +78,7 @@ manifestMu.Lock()
 manifestMu.Unlock()
 ```
 
-**Atomic writes:** `writeManifestLocked` never writes directly to `.mosaic-manifest.json`. It writes to `.mosaic-manifest.json.tmp` first, then calls `os.Rename` to swap it in. `os.Rename` is atomic at the OS level — either the old file or the new file exists, never a half-written file. If the process crashes mid-write, the original manifest is intact.
+**Atomic writes:** `writeManifestLocked` never writes directly to `.mosaic-manifest.json`. It writes to `.mosaic-manifest.json.tmp` first, then calls `os.Rename` to swap it in. `os.Rename` is atomic at the OS level — either the old file or the new file exists, never a half-written file.
 
 ### API
 
@@ -90,13 +93,11 @@ All functions in `manifest.go`:
 | `RenameInManifest(mosaicDir, oldName, newName)` | Move an entry to a new key, preserving all fields |
 | `MarkCachedInManifest(mosaicDir, name)` | Flip `cached` to `true` |
 | `IsInManifest(mosaicDir, name)` | Check existence without returning the full entry |
-| `RestoreManifestEntry(mosaicDir, entry)` | Re-insert a previously removed entry exactly as-is (used for undo) |
+| `RestoreManifestEntry(mosaicDir, entry)` | Re-insert a previously removed entry exactly as-is |
 
 ---
 
 ## Part 2: Stub Files
-
-Before understanding the network manifest, it helps to understand stubs because they are how the local manifest and the file system stay in sync visually.
 
 ### What a Stub Is
 
@@ -123,7 +124,7 @@ When you double-click the stub, the Finder extension triggers a fetch. The daemo
 Upload notes.md (not keeping local copy)
   → ~/Mosaic/notes.md.mosaic       created  (stub)
   → .mosaic-manifest.json          updated  (cached: false)
-  → .mosaic-network-manifest       updated + broadcast to peers
+  → .mosaic-network-manifest       "add" block appended + broadcast to peers
 
 Double-click stub / mos download file notes.md
   → ~/Mosaic/notes.md              created  (real file)
@@ -135,32 +136,28 @@ Delete notes.md.mosaic or notes.md from Finder
   → ~/Mosaic/notes.md.mosaic       deleted  (if stub existed)
   → ~/Mosaic/notes.md              deleted  (if cached copy existed)
   → .mosaic-manifest.json          entry removed
-  → .mosaic-network-manifest       updated + broadcast to peers
+  → .mosaic-network-manifest       "remove" block appended + broadcast to peers
 ```
-
-Deleting either form of the file — the stub or the real cached copy — has the same outcome: the file is gone from the network. The `~/Mosaic/` folder mirrors the network exactly.
-
-The stub carries `contentHash` so that integrity verification is available for remote-only files without needing to decrypt the network manifest.
 
 ---
 
-## Part 3: The Network Manifest
+## Part 3: The Network Manifest (v2 — Blockchain)
 
 ### Why It Exists
 
 The local manifest only tracks your files on your node. When you join the network from a different machine, or when a peer needs to know what you have, the local manifest is useless — it only lives on one machine.
 
-The network manifest is a shared, distributed index that travels across the network via P2P sync. Every node that connects to you receives a copy. It contains entries for every user on the network, organized so that each user can only read their own section.
+The network manifest is a shared, distributed index that travels across the network via P2P sync. Every node that connects to you receives a copy. It is designed for a **public, permissionless network** — any node can join and contribute, and the manifest's integrity does not depend on trusting anyone.
 
 ### File Location and Format
 
-The network manifest lives at `~/Mosaic/.mosaic-network-manifest`. Unlike the local manifest, this is not human-readable JSON. It is a binary file containing:
+The network manifest lives at `~/Mosaic/.mosaic-network-manifest`. It is a binary file containing:
 
 ```
 [12-byte random nonce] || [AES-256-GCM ciphertext of the full manifest JSON]
 ```
 
-The outer AES-256-GCM layer protects the file at rest on disk. The key for this layer comes from `~/.mosaic-network.key` — a 32-byte random key generated once per node on first run.
+The outer AES-256-GCM layer protects the file at rest on disk. The key for this layer comes from `~/.mosaic-network.key`. When the manifest is sent over P2P, the outer encryption is stripped and peers receive the inner JSON; each node re-wraps it with its own AES key on receipt.
 
 ### Structure
 
@@ -168,108 +165,130 @@ Inside the AES-GCM envelope, the JSON looks like:
 
 ```json
 {
-  "version": 1,
-  "updatedAt": "2026-04-15T14:23:01Z",
-  "entries": [
+  "version": 2,
+  "updatedAt": "2026-04-27T09:15:00Z",
+  "chains": [
     {
       "userID": 12304938,
       "username": "a3f9b21c",
-      "publicKey": "<PKIX DER bytes, base64>",
-      "ephemeralPubKey": "<ECDH ephemeral key bytes, base64>",
-      "encryptedFiles": "<ECIES ciphertext of this user's file list, base64>",
-      "signature": "<64-byte ECDSA r||s, base64>"
+      "publicKey": "<PKIX DER P-256, base64>",
+      "blocks": [
+        {
+          "index": 0,
+          "prevHash": "",
+          "op": "add",
+          "file": {
+            "name": "notes.md",
+            "size": 4096,
+            "primaryNodeID": 10,
+            "dateAdded": "04-15-2026",
+            "contentHash": "a3f9c2d1e8b74f..."
+          },
+          "timestamp": "2026-04-15T10:00:00Z",
+          "signature": "<64-byte ECDSA r||s, base64>"
+        },
+        {
+          "index": 1,
+          "prevHash": "7e2b91f4c3a05d...",
+          "op": "add",
+          "file": { "name": "photo.jpg", ... },
+          "timestamp": "2026-04-15T10:05:00Z",
+          "signature": "<64-byte ECDSA r||s, base64>"
+        }
+      ]
     },
     {
       "userID": 99182734,
-      ...
+      "username": "c7f2d893",
+      "publicKey": "...",
+      "blocks": [ ... ]
     }
   ]
 }
 ```
 
-**The entries array is always sorted ascending by `userID`.** This is required for binary search — lookups are O(log n) using `sort.Search`.
+**The chains array is always sorted ascending by `userID`.** This allows binary search — `FindChainIndex` is O(log n).
 
-Notice what is **not** visible: the actual list of files. That lives inside `encryptedFiles`, which only the owner of `userID: 12304938` can decrypt. A peer receiving this manifest sees opaque bytes for every user's file list.
+Each user has exactly one chain. The current set of files is derived by **replaying the chain** — every block is an operation (add/remove/rename), and replaying them in order gives you the current file state. This is described in detail in [manifest-blockchain.md](manifest-blockchain.md).
 
 ---
 
-## Part 4: The Two Security Layers
+## Part 4: The Security Model
 
-Each `UserNetworkEntry` has two independent security mechanisms. Understanding why both are needed requires understanding what each one protects against.
+### Block Signatures (Integrity)
 
-### Layer 1 — ECIES Per-User Encryption (Confidentiality)
+Every block in a chain is individually signed by the owner with their ECDSA P-256 private key. The signature covers the block's content hash (all fields except the signature itself):
 
-**Problem it solves:** A malicious peer receiving the manifest should not be able to read anyone else's file list. Users also need the same keypair on every machine they log in from.
+```
+hash = SHA-256(json(block with Signature=nil))
+signature = ECDSA_Sign(private_key, hash)
+```
 
-**How it works:**
+Any peer receiving a chain can verify every block using only the `PublicKey` embedded in the `UserChain` — no private key needed. A block with an invalid signature causes the entire chain to be rejected by `ValidateChain`.
 
-ECIES stands for Elliptic Curve Integrated Encryption Scheme. The idea is to use public-key cryptography to establish a secret that is then used for symmetric encryption.
+### Hash Chain (Tamper Evidence)
 
-Every user has an ECDSA P-256 keypair derived deterministically from their login key. The derivation uses HKDF-SHA256:
+Each block includes `prevHash`, the SHA-256 of the previous block's content. This links every block to its predecessor:
+
+```
+block[0].prevHash = ""                    ← genesis
+block[1].prevHash = SHA-256(block[0])
+block[2].prevHash = SHA-256(block[1])
+...
+```
+
+If any historical block is altered — even one bit — its hash changes, which invalidates the `prevHash` of every subsequent block. An attacker cannot rewrite history without invalidating the entire chain from the point of modification forward.
+
+### User Identity
+
+Every user's identity is their ECDSA P-256 keypair, derived deterministically from their login key using HKDF-SHA256:
 
 ```
 HKDF(hash=SHA-256, ikm=loginKey, salt=nil, info="mosaic-user-key") → 32-byte seed
-32-byte seed → P-256 private scalar → keypair
+32-byte seed → P-256 private scalar via ecdh.P256().NewPrivateKey(seed)
 ```
 
-Because the derivation is deterministic, the same login key on any machine always produces the same keypair. A user logging in on a second machine with `mos login key <key>` gets the exact same private key, and can therefore decrypt their own manifest entries written from the first machine.
+The same login key on any machine always produces the same keypair. This means:
+- A user logging in on a second machine gets the exact same private key
+- They can append new blocks to their chain from any machine
+- Their `userID` (a fingerprint of the public key) is consistent everywhere
 
-The derived private key is cached at `~/.mosaic-user.key` (PEM, 0600) so the daemon does not need the login key in memory after startup. Re-logging-in overwrites the cache with a freshly derived (identical) key. The public key is embedded in the manifest entry so any peer can verify signatures without knowing the private key.
+The derived private key is cached at `~/.mosaic-user.key` (PEM, 0600). The public key is embedded in the `UserChain` so any peer can verify blocks without knowing the private key.
 
-When you write your file list to the manifest:
+### Merge and Fork Resolution
 
-1. **Generate an ephemeral keypair** — a fresh, one-time-use P-256 key pair created just for this write
-2. **ECDH** — perform Diffie-Hellman between the ephemeral private key and your own public key to produce a shared secret
-3. **KDF** — run `SHA-256(shared_secret)` to derive a 32-byte AES key
-4. **Encrypt** — use AES-256-GCM with that key to encrypt `json(Files)`
-5. **Store** the ephemeral public key in `EphemeralPubKey` so you can redo the ECDH later
-
-When you want to read your own file list back:
-
-1. Parse `EphemeralPubKey` from the manifest entry
-2. **ECDH** — perform Diffie-Hellman between your private key and the ephemeral public key (this produces the exact same shared secret because ECDH is commutative: `a·B = b·A`)
-3. **KDF** — `SHA-256(shared_secret)` gives the same AES key
-4. **Decrypt** AES-256-GCM → `json(Files)` → parse into `[]NetworkFileEntry`
-
-A peer who receives this manifest has the `EphemeralPubKey` but not your private key, so they cannot compute the shared secret. Their only option is to try to break P-256 ECDH, which is computationally infeasible.
-
-**Why encrypt to yourself?** Because you are also the recipient whenever you roam to a new node. The manifest travels across the network; anyone holding it can see the `encryptedFiles` bytes, but only the rightful owner can decrypt them.
-
-### Layer 2 — ECDSA Ciphertext Signature (Integrity)
-
-**Problem it solves:** A malicious peer could flip bits in someone else's `encryptedFiles` section. Even though they cannot decrypt it or produce valid new ciphertext, flipping bits could corrupt the data or cause a crash on the owner's next decrypt.
-
-**How it works:**
-
-After encryption, compute:
-```
-hash = SHA-256(EphemeralPubKey || EncryptedFiles)
-```
-
-Sign this hash with your ECDSA private key to produce a 64-byte signature `(r, s)` stored in `Signature`.
-
-Any peer receiving the manifest can verify this signature using only the embedded `PublicKey` — no private key needed:
+When two peers connect, each pushes their manifest to the other. `MergeNetworkManifest` merges the two:
 
 ```
-ecdsa.Verify(publicKey, SHA-256(EphemeralPubKey || EncryptedFiles), r, s)
+for each chain in remote.chains:
+    if ValidateChain(chain) fails:
+        drop it (invalid signature or broken hash link)
+    
+    if userID not in local:
+        insert the chain (new user discovered)
+    else:
+        winner = pickBetterChain(local_chain, remote_chain)
+        replace local with winner if different
 ```
 
-If the bytes in `EncryptedFiles` or `EphemeralPubKey` have been modified, the hash changes and the signature check fails. The receiving node calls `MergeNetworkManifest`, which calls `VerifyUserEntry` on every remote entry before accepting it. **Entries that fail verification are silently dropped** — they never touch your local manifest.
+`pickBetterChain` uses two tiebreakers in order:
+1. **Longer chain wins** — more blocks means more operations, which reflects more history
+2. **Deterministic fork resolution** — if two chains have the same length but diverge, find the first differing block and pick the chain with the lexicographically lower block hash
 
-**Why sign the ciphertext, not the plaintext?** Two reasons:
-1. The verifier does not have your private key to decrypt, so they cannot verify a plaintext signature
-2. Signing the ciphertext gives equal protection — any modification to the encrypted bytes is caught before decryption is even attempted
+The second rule ensures that even a true fork (two users both offline, making different operations, then reconnecting) resolves the same way on every peer in the network. The outcome is deterministic and does not require coordination.
 
-### Why Two Layers
+### What Peers Can and Cannot Do
 
-These two mechanisms protect different things:
-
-| Attack | Defeated by |
+| Action | Can a random peer do this? |
 |---|---|
-| Peer reads your file list | ECIES encryption |
-| Peer modifies your file list bytes | ECDSA signature |
-| Peer replays an old version of your entry | Timestamp + signature (old sig is valid but timestamp is stale, newer local copy wins) |
-| Peer modifies another user's file list | ECDSA signature (they don't have that user's private key to re-sign) |
+| Read your file list | Yes — file names and sizes are visible in the chain |
+| Modify your chain | No — they don't have your private key to re-sign blocks |
+| Delete your blocks | No — any truncation breaks the hash chain |
+| Insert a block into the middle of your chain | No — would invalidate all subsequent prevHash links |
+| Fork your chain | Yes — but the deterministic merge rules resolve it consistently |
+| Spam fake blocks for a new user | No — blocks must be signed with the claimed user's key; `PublicKey` in the chain is the ground truth |
+
+File *content* is never stored in the manifest. Only metadata (name, size, node, date, content hash) is visible. The actual bytes are distributed as encrypted shards across the network.
 
 ---
 
@@ -281,14 +300,7 @@ These two mechanisms protect different things:
 
 1. `ManifestEntry.ContentHash` — in the local manifest
 2. `StubMeta.ContentHash` — in the `.mosaic` stub file
-3. `NetworkFileEntry.ContentHash` — inside your encrypted section of the network manifest
-
-### Why It Matters
-
-When you download a file, the bytes travel from a peer node across the network to your machine. Without a hash check, you have no way to know whether:
-- The data was corrupted in transit
-- A storage node returned wrong bytes
-- A malicious actor tampered with the shard
+3. `NetworkFileEntry.ContentHash` — in the chain block's `file` field
 
 ### How Verification Works
 
@@ -306,9 +318,7 @@ In `downloadFile.go`, after the bytes are written to disk:
 5. Return success
 ```
 
-If the hash check fails, the corrupted file is deleted immediately. The user sees an error. This prevents a corrupted or tampered file from silently sitting on disk passing as legitimate.
-
-Files uploaded before ContentHash was implemented have an empty `contentHash` field and are skipped by the verification step — they pass through as before.
+If the hash check fails, the corrupted file is deleted immediately.
 
 ---
 
@@ -319,36 +329,16 @@ Files uploaded before ContentHash was implemented have an empty `contentHash` fi
 When a node joins the network and connects to a peer:
 
 1. **On peer connect** — `joinNetwork.go` calls `pushManifestToPeer`, which reads the local network manifest and sends it wrapped in a `ManifestSync` message over UDP
-2. **On manifest received** — the `OnMessageReceived` callback fires, `handleManifestSync` is called in a goroutine
-3. **On any local write** (upload, delete, rename) — the handler calls `BroadcastNetworkManifest` after successfully writing, sending the updated manifest to all connected peers
+2. **On manifest received** — `handleManifestSync` is called in a goroutine
+3. **On any local write** (upload, delete, rename) — the handler calls `BroadcastNetworkManifest` after successfully writing
 
-### The Merge Algorithm
+### Convergence
 
-`MergeNetworkManifest(local, remote)` is called whenever a manifest arrives from a peer. It never blindly replaces the local manifest — it merges entry by entry:
+Because the merge is deterministic (both peers run the same `pickBetterChain` logic on the same inputs), the network converges to a single canonical state even in the presence of concurrent writes and network partitions. When the merge brings in new data (`changed == true`), the node re-broadcasts the merged result so the update propagates to all connected peers.
 
-```
-for each entry in remote.entries:
-    if VerifyUserEntry(entry) fails:
-        drop it, log a warning, continue
-    
-    if userID not in local:
-        insert the remote entry (new user discovered)
-    else:
-        if remote.updatedAt is strictly newer than local.updatedAt:
-            replace the local entry with the remote entry
-        else:
-            keep the local entry
-```
+### The Outer AES Key
 
-The result is then written atomically to disk. The key property: **a tampered entry can never enter your local manifest**, because `VerifyUserEntry` is called on every remote entry before it is accepted.
-
-### The Outer AES Key Problem
-
-The outer AES-256-GCM layer (the `~/.mosaic-network.key` file) is currently per-node — each node generates its own key independently. This means two different nodes cannot decrypt each other's on-disk manifest file.
-
-However, this is not a problem for P2P sync. When the manifest is sent over the network via `ManifestToJSON`, it is serialized as plain JSON — **not** AES-encrypted. The individual user sections remain ECIES-encrypted (so file lists are still private), but the outer envelope is removed for transit. The receiving node re-wraps it in their own AES key before writing to disk.
-
-The outer AES layer only protects the file at rest on each node's local disk.
+The outer AES-256-GCM layer is per-node — each node generates its own `~/.mosaic-network.key` independently. This means two nodes cannot decrypt each other's on-disk manifest file. This is fine: when a manifest is transmitted via P2P, it is sent as plain JSON (`ManifestToJSON` removes the outer envelope). The individual chain data is already protected by per-block ECDSA signatures. Each node re-wraps the received JSON with its own AES key before writing to disk.
 
 ---
 
@@ -356,11 +346,11 @@ The outer AES layer only protects the file at rest on each node's local disk.
 
 ```
 ~/.mosaic-login.key      Raw login key string (0600); source material for all key derivation
-~/.mosaic-network.key    32-byte random AES-256 key, protects the network manifest on disk
+~/.mosaic-network.key    32-byte random AES-256 key, protects the network manifest at rest
 ~/.mosaic-user.key       ECDSA P-256 private key (PEM), derived from login key via HKDF
 ~/Mosaic/
   .mosaic-manifest.json          Local manifest (plaintext JSON, human-readable)
-  .mosaic-network-manifest       Network manifest (binary: nonce || AES-GCM ciphertext)
+  .mosaic-network-manifest       Network manifest (binary: nonce || AES-GCM ciphertext of chain JSON)
   <filename>                     Real cached file
   <filename>.mosaic              Stub file (JSON, exists only when file is not cached locally)
 ```
@@ -371,8 +361,6 @@ Both key files are created with `0600` permissions — readable only by your use
 
 ## Part 8: Full Upload → Download Lifecycle
 
-Here is the complete flow for a file, showing every manifest touch point:
-
 ### Upload (`mos upload file notes.md`)
 
 ```
@@ -380,18 +368,18 @@ Here is the complete flow for a file, showing every manifest touch point:
 2. Compute SHA-256(notes.md) → contentHash
 3. AddToManifest(mosaicDir, "notes.md", size, nodeID, contentHash)
      → writes to .mosaic-manifest.json atomically
-4. ReadAndDecryptNetworkManifest
-     → AES-GCM decrypt .mosaic-network-manifest
-     → ECIES decrypt your UserNetworkEntry.EncryptedFiles → Files in memory
-5. AddFileToNetwork(manifest, userID, username, NetworkFileEntry{...})
-     → mutates Files in memory
-6. EncryptSignAndWriteNetworkManifest
-     → ECIES encrypt Files → EncryptedFiles
-     → ECDSA sign SHA-256(EphemeralPubKey || EncryptedFiles) → Signature
-     → AES-GCM encrypt full manifest JSON
+4. ReadNetworkManifest(mosaicDir, aesKey)
+     → AES-GCM decrypt .mosaic-network-manifest → NetworkManifest{chains: [...]}
+5. AppendBlockAdd(&manifest, userID, username, NetworkFileEntry{...}, kp)
+     → compute prevHash = SHA-256(last block in user's chain)
+     → create ChainBlock{index, prevHash, op:"add", file, timestamp}
+     → sign with private key → Signature
+     → append to chain
+6. WriteNetworkManifestLocked(mosaicDir, aesKey, manifest)
+     → AES-GCM encrypt updated manifest JSON
      → write atomically to .mosaic-network-manifest
 7. BroadcastNetworkManifest
-     → ManifestToJSON (outer AES removed, ECIES sections stay)
+     → ManifestToJSON (outer AES removed, chain data stays plaintext)
      → SendToAllPeers via UDP
 8. WriteStub(mosaicDir, "notes.md", size, nodeID, contentHash)
      → creates notes.md.mosaic
@@ -417,9 +405,11 @@ Here is the complete flow for a file, showing every manifest touch point:
 1. RemoveStub (if exists)
 2. Delete ~/Mosaic/notes.md (if cached)
 3. RemoveFromManifest → entry gone from .mosaic-manifest.json
-4. ReadAndDecryptNetworkManifest
-5. RemoveFileFromNetwork → removes entry from Files in memory
-6. EncryptSignAndWriteNetworkManifest → re-sign, re-encrypt, write
+4. ReadNetworkManifest
+5. AppendBlockRemove(&manifest, userID, "notes.md", kp)
+     → create ChainBlock{op:"remove", file:{name:"notes.md"}, ...}
+     → sign and append
+6. WriteNetworkManifestLocked → write to disk
 7. BroadcastNetworkManifest → peers update their copy
 ```
 
@@ -429,9 +419,11 @@ Here is the complete flow for a file, showing every manifest touch point:
 1. Rename ~/Mosaic/notes.md → ~/Mosaic/notes2.md (if cached)
 2. Rename ~/Mosaic/notes.md.mosaic → ~/Mosaic/notes2.md.mosaic (if stub)
 3. RenameInManifest → key moves from "notes.md" to "notes2.md", Name field updated
-4. ReadAndDecryptNetworkManifest
-5. RenameFileInNetwork → mutates Name field in Files in memory
-6. EncryptSignAndWriteNetworkManifest → re-sign, re-encrypt, write
+4. ReadNetworkManifest
+5. AppendBlockRename(&manifest, userID, "notes.md", "notes2.md", kp)
+     → create ChainBlock{op:"rename", file:{name:"notes.md"}, newName:"notes2.md", ...}
+     → sign and append
+6. WriteNetworkManifestLocked → write to disk
 7. BroadcastNetworkManifest → peers update their copy
 ```
 
@@ -439,18 +431,17 @@ Here is the complete flow for a file, showing every manifest touch point:
 
 ## Part 9: Thread Safety
 
-The local manifest uses a package-level `sync.Mutex` (`manifestMu`). Every exported function acquires the lock before reading or writing. The private `readManifestLocked` and `writeManifestLocked` functions are called only with the lock already held.
+The local manifest uses a package-level `sync.Mutex` (`manifestMu`). Every exported function acquires the lock before reading or writing.
 
-The network manifest uses a separate `sync.Mutex` (`networkManifestMu`) that is acquired inside `EncryptSignAndWriteNetworkManifest`. Read operations (`ReadNetworkManifest`, `ReadAndDecryptNetworkManifest`) do not acquire this lock — they are safe to call concurrently because the write is atomic at the OS level (tmp file + rename). The mutex only prevents two concurrent writes from racing.
+The network manifest uses a separate `sync.Mutex` (`networkManifestMu`) that is acquired inside `WriteNetworkManifestLocked`. Read operations (`ReadNetworkManifest`) do not acquire this lock — they are safe to call concurrently because the write is atomic at the OS level (tmp file + rename). The mutex only prevents two concurrent writes from racing.
 
-The P2P broadcast in `BroadcastNetworkManifest` is best-effort: if no peer is connected, it returns immediately. If the send fails, it logs but does not propagate the error, because a failed broadcast does not affect the correctness of the local write that just succeeded.
+The P2P broadcast in `BroadcastNetworkManifest` is best-effort: if no peer is connected, it returns immediately. A failed broadcast does not affect the correctness of the local write that just succeeded.
 
 ---
 
 ## Part 10: What Is Not Yet Implemented
 
-To give an accurate picture of the current state:
-
 - **Shard distribution** — `FetchFileBytes` and the `TODO: distribute file shards to peers` comment in `uploadFile.go` are stubs. Files are not actually split and distributed yet. The manifest infrastructure is complete and ready; the network transport layer is the missing piece.
-- **Proof of Storage** — the `Tapestry` protobuf definition exists in `internal/tapestry/` and is designed for this. It will allow the network to verify that storage nodes actually hold the shards they claim to hold, without requiring file owners to have the bytes cached locally.
-- **Key distribution** — `~/.mosaic-network.key` is generated independently per node. There is no auth server. Nodes that belong to the same account share the same derived ECDSA keypair (because it is deterministically derived from the login key), but the outer AES disk-encryption key is still per-node. On-disk manifests from two different machines cannot directly decrypt each other; they exchange manifests as plain JSON over P2P and each node re-encrypts with its own AES key on receipt.
+- **Proof of Storage** — the `Tapestry` protobuf definition exists in `internal/tapestry/` and is designed for this. It will allow the network to verify that storage nodes actually hold the shards they claim to hold.
+- **File name privacy for public networks** — chain blocks currently store file names in plaintext. This is suitable for a public permissionless network but means any peer can see your file names. Per-block ECIES encryption of the file metadata field can be layered on top without changing the chain structure.
+- **Chain compaction** — long-lived chains with many add/remove cycles accumulate dead blocks. A compaction step (folding the chain to a single "add" block per active file) would be useful once chain length becomes a concern.
