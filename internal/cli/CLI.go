@@ -2,6 +2,8 @@ package cli
 
 import (
 	_ "embed"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -373,7 +375,10 @@ func loginStatus() {
 	if cmdResp.HasKeyPair {
 		keyStatus = "present"
 	}
-	fmt.Printf("\nLogged in.\n- Identity:  %s...\n- Key pair:  %s\n", cmdResp.PublicKey[:8], keyStatus)
+	raw, _ := hex.DecodeString(cmdResp.PublicKey)
+	h := sha256.Sum256(raw)
+	fp := hex.EncodeToString(h[:])[:8]
+	fmt.Printf("\nLogged in.\n- Identity:  %s...\n- Key pair:  %s\n", fp, keyStatus)
 	if !cmdResp.HasKeyPair {
 		fmt.Println("\nWarning: key pair file is missing. Try logging out and back in.")
 	}

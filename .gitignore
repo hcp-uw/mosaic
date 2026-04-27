@@ -3,3 +3,4 @@ output
 bin/
 *.log
 *.pid
+MosaicApp/DerivedData/

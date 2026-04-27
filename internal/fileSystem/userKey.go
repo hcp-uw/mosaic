@@ -1,15 +1,15 @@
 package fileSystem
 
 import (
+	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/hkdf"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
-	"io"
+	"math/big"
 	"os"
 )
 
@@ -26,35 +26,38 @@ type UserKeyPair struct {
 //
 // Derivation:
 //   HKDF(hash=SHA-256, ikm=loginKey, salt=nil, info="mosaic-user-key") → 32 bytes
-//   Those 32 bytes seed the P-256 key generation as a private scalar.
+//   Those 32 bytes are used directly as the P-256 private scalar via ecdh.P256().
 //
 // Same login key on any machine → same 32-byte seed → same private key → same
 // public key → can decrypt your own manifest entries and sign new ones.
 //
-// The derived key is cached to keyPath (0600) so the daemon does not need the
-// login key in memory after startup. If keyPath already exists it is
-// overwritten — this is intentional: re-logging-in refreshes the derived key.
+// Note: ecdsa.GenerateKey in Go 1.22+ ignores the caller-supplied io.Reader and
+// uses its own internal CSPRNG, making a deterministic reader approach non-functional.
+// We use ecdh.P256().NewPrivateKey(seed) instead, which accepts raw scalar bytes
+// and is guaranteed to be deterministic.
 func DeriveUserKeyFromLoginKey(loginKey string, keyPath string) (UserKeyPair, error) {
 	if loginKey == "" {
-		return UserKeyPair{}, fmt.Errorf("login key is empty: user must log in first (mos login account <username> <key>)")
+		return UserKeyPair{}, fmt.Errorf("login key is empty: user must log in first (mos login <key>)")
 	}
 
-	// HKDF: extract + expand from the login key.
-	// info string "mosaic-user-key" domain-separates this derivation from any
-	// other keys we might derive from the same login key in future.
 	seed, err := hkdf.Key(sha256.New, []byte(loginKey), nil, "mosaic-user-key", 32)
 	if err != nil {
 		return UserKeyPair{}, fmt.Errorf("HKDF derivation failed: %w", err)
 	}
 
-	// Use the 32-byte seed as the private scalar for P-256.
-	// ecdsa.GenerateKey with a deterministic reader produces a deterministic key.
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), newDeterministicReader(seed))
+	// NewPrivateKey accepts the raw 32-byte scalar and validates it is in [1, N-1].
+	// HKDF output is uniformly random so the probability of an out-of-range value
+	// is ~2^-128 — effectively impossible.
+	ecdhKey, err := ecdh.P256().NewPrivateKey(seed)
 	if err != nil {
-		return UserKeyPair{}, fmt.Errorf("could not derive keypair from seed: %w", err)
+		return UserKeyPair{}, fmt.Errorf("derived key scalar is invalid: %w", err)
 	}
 
-	// Cache the derived key to disk so handlers can load it without the login key.
+	priv, err := ecdhKeyToECDSA(ecdhKey)
+	if err != nil {
+		return UserKeyPair{}, err
+	}
+
 	pemData, err := marshalPrivateKeyPEM(priv)
 	if err != nil {
 		return UserKeyPair{}, err
@@ -64,6 +67,23 @@ func DeriveUserKeyFromLoginKey(loginKey string, keyPath string) (UserKeyPair, er
 	}
 
 	return UserKeyPair{Private: priv, Public: &priv.PublicKey}, nil
+}
+
+// ecdhKeyToECDSA converts an *ecdh.PrivateKey to *ecdsa.PrivateKey by
+// extracting the raw scalar and public key coordinates.
+func ecdhKeyToECDSA(key *ecdh.PrivateKey) (*ecdsa.PrivateKey, error) {
+	pub := key.PublicKey().Bytes() // uncompressed: 04 || X (32B) || Y (32B)
+	if len(pub) != 65 || pub[0] != 0x04 {
+		return nil, fmt.Errorf("unexpected ECDH public key encoding (len=%d)", len(pub))
+	}
+	return &ecdsa.PrivateKey{
+		PublicKey: ecdsa.PublicKey{
+			Curve: elliptic.P256(),
+			X:     new(big.Int).SetBytes(pub[1:33]),
+			Y:     new(big.Int).SetBytes(pub[33:65]),
+		},
+		D: new(big.Int).SetBytes(key.Bytes()),
+	}, nil
 }
 
 // LoadOrCreateUserKey loads the cached ECDSA keypair from keyPath.
@@ -126,30 +146,3 @@ func parsePrivateKeyPEM(data []byte) (UserKeyPair, error) {
 	return UserKeyPair{Private: priv, Public: &priv.PublicKey}, nil
 }
 
-// deterministicReader satisfies io.Reader by returning a fixed seed repeatedly.
-// Used to make ecdsa.GenerateKey deterministic without exposing the seed
-// directly as a private scalar (which would bypass P-256 validation checks).
-type deterministicReader struct {
-	data   []byte
-	offset int
-}
-
-func newDeterministicReader(seed []byte) io.Reader {
-	// Repeat the seed so ecdsa.GenerateKey always has enough bytes, regardless
-	// of how many internal retries P-256 key generation needs.
-	repeated := make([]byte, 512)
-	for i := range repeated {
-		repeated[i] = seed[i%len(seed)]
-	}
-	return &deterministicReader{data: repeated}
-}
-
-func (r *deterministicReader) Read(p []byte) (int, error) {
-	if r.offset >= len(r.data) {
-		// Fallback to crypto/rand if we somehow exhaust the buffer.
-		return rand.Read(p)
-	}
-	n := copy(p, r.data[r.offset:])
-	r.offset += n
-	return n, nil
-}

@@ -9,9 +9,21 @@ import (
 	"github.com/hcp-uw/mosaic/internal/cli/protocol"
 	"github.com/hcp-uw/mosaic/internal/cli/shared"
 	"github.com/hcp-uw/mosaic/internal/daemon/handlers"
+	"github.com/hcp-uw/mosaic/internal/daemon/handlers/helpers"
 )
 
 func StartServer() error {
+	// If a session file exists but the key file is gone (e.g. after a reinstall
+	// without logging out), clear the stale session so the user isn't shown as
+	// logged in to a key they can no longer use.
+	if _, err := helpers.LoadSession(); err == nil {
+		if _, keyErr := os.Stat(shared.UserKeyPath()); os.IsNotExist(keyErr) {
+			_ = helpers.ClearSession()
+			_ = helpers.ClearLoginKey()
+			fmt.Println("Daemon: cleared stale session (key file missing).")
+		}
+	}
+
 	// remove old socket if present
 	if _, err := os.Stat(shared.SocketPath); err == nil {
 		os.Remove(shared.SocketPath)
