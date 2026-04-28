@@ -35,8 +35,8 @@ There is no central server that holds your files. The only server Mosaic has is 
 │  │  Finder /    │    │  Menu Bar    │    │   mos (CLI)      │   │
 │  │  Finder Sync │    │  App (Swift) │    │                  │   │
 │  └──────┬───────┘    └──────┬───────┘    └────────┬─────────┘   │
-│         │                   │ HTTP :7777          │ Unix socket │
-│         │            ┌─────▼───────────────────────▼────────┐   │
+│         │                   │ localhost:7777      │ Unix socket │
+│         │            ┌──────▼─────────────────────▼─────────┐   │
 │         └───badges──▶│          mosaic-node (daemon)        │   │
 │                      │  • manifest read/write               │   │
 │                      │  • blockchain block signing          │   │
