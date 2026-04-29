@@ -294,7 +294,41 @@ Because this key is per-node, two nodes cannot decrypt each other's on-disk file
 
 ---
 
-## Comparison with Alternatives
+## Security Model: Benefits and Liabilities
+
+### What the chain protects against
+
+**Impersonation.** Every block in your chain is signed with your ECDSA private key. A peer cannot forge a block on your behalf — they don't have your private key, and any block they construct will fail `verifyBlock` when checked against the public key embedded in your `UserChain`. This is verified on every peer before any chain is accepted via `ValidateChain`.
+
+**History tampering.** The hash chain makes every block dependent on every block before it. If a peer modifies any historical block — changing a filename, a size, a timestamp — every subsequent `PrevHash` link becomes invalid. `ValidateChain` catches this at the first broken link. You cannot rewrite the past without invalidating the present.
+
+**Retroactive chain shortening.** Once your chain has propagated to peers, you cannot present a shorter version to override it. The longer-chain-wins rule means any peer who has seen your full history will broadcast it back, and your shorter version will lose the merge comparison. History, once distributed, sticks.
+
+**Invalid chains from untrusted peers.** `MergeNetworkManifest` runs `ValidateChain` on every incoming chain before touching the local state. A chain with a broken signature, a broken hash link, or a wrong index is dropped silently. A malicious peer cannot inject garbage into your manifest by sending a malformed chain.
+
+**Identity recovery after device loss.** Your signing key is derived deterministically from your login key via HKDF-SHA256. Losing a device does not compromise your chain identity — re-running `mos login <key>` on any machine produces the exact same keypair, and new blocks you sign continue to validate against the `PublicKey` already embedded in your chain.
+
+---
+
+### What the chain does not protect against
+
+**Lying about having files.** The manifest records file names and content hashes, but there is no cryptographic proof that the actual bytes exist anywhere on the network. A user can append `add "secret_data.txt"` blocks for files they never uploaded. Peers will believe the file exists, stubs will be created on their machines, and download attempts will silently fail. There is currently no storage proof — the chain is a claim ledger, not a verified storage ledger.
+
+**Manifest spam.** There is no rate limiting or block cap per user. Nothing prevents someone from appending thousands of `add`/`remove` blocks in a loop. Every peer stores and gossips the entire manifest, so a determined attacker can bloat the manifest for every node on the network. The chain structure itself gives no defence here.
+
+**Sybil attacks.** Your identity is any string passed to `mos login <key>`. There is no proof-of-work, no stake, and no authority that limits how many identities a single person can create. One person can generate thousands of keypairs, each with their own chain, and flood the manifest with arbitrary user entries and fake file histories.
+
+**Strategic fork manipulation.** Fork resolution is deterministic, but the outcome depends on which chain is longer when two peers first exchange manifests. A node that stays online continuously and keeps appending blocks will always win a fork against a node that was offline. A malicious peer that controls the introduction point between two partitioned regions can also delay manifest propagation to influence which version reaches which peer first.
+
+**No file namespace ownership.** There is no rule that prevents two users from both claiming the same filename in their respective chains. Both are valid — they belong to different chains. The result is two separate files with the same name owned by different users. The current UX does not handle this collision explicitly.
+
+**Compromised private key — no revocation.** If your private key leaks, an attacker can append to your chain forever. The network has no mechanism to signal that a key has been revoked. Any block signed by the leaked key is indistinguishable from a legitimate block. The only recovery path is to abandon the identity and create a new one, losing the history associated with the old chain.
+
+**File name privacy.** Chain blocks store file metadata in plaintext. Every peer who receives the manifest can read your file names, sizes, dates, and content hashes. File bytes never appear in the manifest, but the names alone can be sensitive. This is a deliberate trade-off for the current design: encrypting the metadata would prevent peers from verifying the chain (you cannot hash what you cannot read). Per-block encryption is architecturally possible in a future version without changing the chain structure.
+
+---
+
+
 
 | Approach | Tamper detection | History | Fork resolution | Complexity |
 |---|---|---|---|---|
