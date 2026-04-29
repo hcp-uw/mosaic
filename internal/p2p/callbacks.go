@@ -28,12 +28,26 @@ func (c *Client) OnMessageReceived(callback func([]byte)) {
 	c.messageCallbacks = append(c.messageCallbacks, callback)
 }
 
-// setState updates the client state and notifies callbacks
+// setState updates the client state and notifies callbacks. The caller
+// MUST NOT already hold c.mutex (this method takes it).
 func (c *Client) setState(newState ClientState) {
+	c.mutex.Lock()
+	oldState := c.state
+	c.state = newState
+	cbs := append([]func(ClientState){}, c.stateCallbacks...)
+	c.mutex.Unlock()
 
-    oldState := c.state
-    c.state = newState
+	if oldState != newState {
+		for _, callback := range cbs {
+			go callback(newState)
+		}
+	}
+}
 
+// setStateLocked is used when the caller already holds c.mutex (Lock).
+func (c *Client) setStateLocked(newState ClientState) {
+	oldState := c.state
+	c.state = newState
 	if oldState != newState {
 		for _, callback := range c.stateCallbacks {
 			go callback(newState)

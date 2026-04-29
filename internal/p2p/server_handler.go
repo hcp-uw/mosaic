@@ -31,7 +31,7 @@ func (c *Client) ConnectToStun() error {
 	}
 
 	c.serverConn = conn
-	c.setState(StateConnecting)
+	c.setStateLocked(StateConnecting)
 
 	// Start message handling
 	go c.handleMessages()
@@ -59,7 +59,7 @@ func (c *Client) DisconnectFromStun() error {
 	// Note: peerConn is the same as serverConn, so don't close it twice
 	c.peers = make(map[string]*PeerInfo)
 
-	c.setState(StateDisconnected)
+	c.setStateLocked(StateDisconnected)
 
 	return nil
 }

@@ -24,6 +24,8 @@ type Client struct {
 	peerCallbacks    []func(*PeerInfo)
 	errorCallbacks   []func(error)
 	messageCallbacks []func([]byte)
+
+	dataOps *dataOpsState
 }
 
 // ClientConfig holds client configuration
@@ -65,6 +67,7 @@ func NewClient(config *ClientConfig) (*Client, error) {
 		peerCallbacks:    make([]func(*PeerInfo), 0),
 		errorCallbacks:   make([]func(error), 0),
 		messageCallbacks: make([]func([]byte), 0),
+		dataOps:          newDataOpsState(),
 	}, nil
 }
 
@@ -121,9 +124,12 @@ func (c *Client) sendToServer(msg *api.Message) error {
 	return nil
 }
 
-// handleMessages processes incoming messages and routes them between server and peer
+// handleMessages processes incoming messages and routes them between server and peer.
+// The buffer must hold the largest single datagram we send; messages above
+// MaxFrameBytes are split via the chunked transport (see chunked.go).
+// We allocate 16 KB so there is comfortable headroom over MaxFrameBytes.
 func (c *Client) handleMessages() {
-	buffer := make([]byte, 1024)
+	buffer := make([]byte, 16*1024)
 
 	for {
 		select {
@@ -241,6 +247,20 @@ func (c *Client) processPeerMessage(data []byte) {
 
 			}
 
+		case api.PeerStoreRequest:
+			c.handleStoreRequest(msg)
+		case api.PeerStoreAck:
+			c.handleStoreAck(msg)
+		case api.PeerGetRequest:
+			c.handleGetRequest(msg)
+		case api.PeerGetResponse:
+			c.handleGetResponse(msg)
+		case api.PeerDeleteRequest:
+			c.handleDeleteRequest(msg)
+		case api.PeerManifestUpdate:
+			c.handleManifestUpdate(msg)
+		case api.PeerChunkedFrame:
+			c.handleChunkedFrame(msg)
 		}
 
 		// If it's another type of STUN message, don't add to channel

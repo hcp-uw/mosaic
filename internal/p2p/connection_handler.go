@@ -113,7 +113,7 @@ func (c *Client) pingRoutine(id string) {
 					delete(c.peers, peerInfo.ID)
 					peerInfo = nil
 					if len(c.GetConnectedPeers()) == 0 {
-						c.setState(StateWaiting)
+						c.setStateLocked(StateWaiting)
 						if err := c.register(); err != nil {
 							c.notifyError(fmt.Errorf("failed to re-register after peer timeout: %w", err))
 						} else {

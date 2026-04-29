@@ -7,19 +7,19 @@ import (
 )
 
 func (c *Client) leaderHandleJoiner(joiner *PeerInfo) {
-
-	currentMembers := make(map[string]*net.UDPAddr)
-
+	c.mutex.RLock()
+	currentMembers := make(map[string]*net.UDPAddr, len(c.peers))
 	for id, info := range c.peers {
-		if info.ID != joiner.ID {
+		if info != nil && info.ID != joiner.ID {
 			currentMembers[id] = info.Address
 		}
 	}
+	id := c.id
+	c.mutex.RUnlock()
 
-	currentMembersMsg := api.NewCurrentMembersMessage(currentMembers, c.id)
-	newJoinerMsg := api.NewNewPeerJoinerMessage(c.id, joiner.ID, joiner.Address.String())
+	currentMembersMsg := api.NewCurrentMembersMessage(currentMembers, id)
+	newJoinerMsg := api.NewNewPeerJoinerMessage(id, joiner.ID, joiner.Address.String())
 
-	c.SendToAllPeers(newJoinerMsg)
-	c.SendToPeer(joiner.ID, currentMembersMsg)
-
+	_ = c.SendToAllPeers(newJoinerMsg)
+	_ = c.SendToPeer(joiner.ID, currentMembersMsg)
 }

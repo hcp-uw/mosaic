@@ -186,7 +186,11 @@ type DeleteFolderResponse struct {
 	AvailableStorage int    `json:"availableStorage"`
 }
 type DownloadFileRequest struct {
+	// FilePath is the absolute destination on the local filesystem.
 	FilePath string `json:"filePath"`
+	// Filename is the logical name of the file in the manifest. If
+	// empty, the daemon falls back to filepath.Base(FilePath).
+	Filename string `json:"filename,omitempty"`
 }
 
 type DownloadFileResponse struct {

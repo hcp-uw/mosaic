@@ -11,9 +11,9 @@ import (
 )
 
 func SendRequest(command string, data interface{}) (*protocol.Response, error) {
-	conn, err := net.DialTimeout("unix", shared.SocketPath, 2*time.Second)
+	conn, err := net.DialTimeout("unix", shared.SocketPath(), 2*time.Second)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to daemon (%s): %w", shared.SocketPath, err)
+		return nil, fmt.Errorf("failed to connect to daemon (%s): %w", shared.SocketPath(), err)
 	}
 	defer conn.Close()
 

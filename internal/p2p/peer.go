@@ -16,22 +16,37 @@ type PeerInfo struct {
 	LastPeerPong time.Time
 }
 
-// SendToPeer sends data to the connected peer
+// SendToPeer sends data to the connected peer.
+//
+// Conn and Address are snapshotted under the read lock so the send path
+// is safe against concurrent ConnectToPeer mutations. peerId may be
+// either an IP:port key or an ed25519 pubkey hex — the latter is
+// resolved via the pubkeyToPeerID mapping before the peers lookup.
 func (c *Client) SendToPeer(peerId string, message *api.Message) error {
+	// Resolve pubkey hex → IP:port if needed (dataOps.mu released before c.mutex).
+	c.dataOps.mu.Lock()
+	if resolved, ok := c.dataOps.pubkeyToPeerID[peerId]; ok {
+		peerId = resolved
+	}
+	c.dataOps.mu.Unlock()
+
 	c.mutex.RLock()
-	peerInfo := c.GetPeerById(peerId)
+	peerInfo := c.peers[peerId]
 	state := c.state
+	var conn *net.UDPConn
+	var addr *net.UDPAddr
+	if peerInfo != nil {
+		conn = peerInfo.Conn
+		addr = peerInfo.Address
+	}
 	c.mutex.RUnlock()
 
 	if peerInfo == nil {
 		return fmt.Errorf("no peer information available")
 	}
-
-	if peerInfo.Conn == nil {
+	if conn == nil {
 		return fmt.Errorf("not connected to peer")
 	}
-
-	// Block sending only in truly disconnected state
 	if state == StateDisconnected {
 		return fmt.Errorf("client disconnected")
 	}
@@ -40,22 +55,33 @@ func (c *Client) SendToPeer(peerId string, message *api.Message) error {
 	if err != nil {
 		return err
 	}
+	return chunkAndSend(func(b []byte) error {
+		_, werr := conn.WriteToUDP(b, addr)
+		return werr
+	}, c.id, data)
+}
 
-	_, err = peerInfo.Conn.WriteToUDP(data, peerInfo.Address)
-	return err
+// peerSnapshot is a (Conn, Address) pair captured under the lock for safe
+// concurrent dispatch.
+type peerSnapshot struct {
+	conn *net.UDPConn
+	addr *net.UDPAddr
 }
 
 func (c *Client) SendToAllPeers(message *api.Message) error {
 	c.mutex.RLock()
-	allPeers := c.GetConnectedPeers()
 	state := c.state
+	snaps := make([]peerSnapshot, 0, len(c.peers))
+	for _, p := range c.peers {
+		if p != nil && p.Conn != nil {
+			snaps = append(snaps, peerSnapshot{conn: p.Conn, addr: p.Address})
+		}
+	}
 	c.mutex.RUnlock()
 
-	if len(allPeers) == 0 {
+	if len(snaps) == 0 {
 		return fmt.Errorf("no peer information available")
 	}
-
-	// Block sending only in truly disconnected state
 	if state == StateDisconnected {
 		return fmt.Errorf("client disconnected")
 	}
@@ -64,10 +90,12 @@ func (c *Client) SendToAllPeers(message *api.Message) error {
 	if err != nil {
 		return err
 	}
-
-	for _, peer := range allPeers {
-		_, err := peer.Conn.WriteToUDP(data, peer.Address)
-		if err != nil {
+	for _, s := range snaps {
+		s := s
+		if err := chunkAndSend(func(b []byte) error {
+			_, werr := s.conn.WriteToUDP(b, s.addr)
+			return werr
+		}, c.id, data); err != nil {
 			return err
 		}
 	}
@@ -101,7 +129,7 @@ func (c *Client) ConnectToPeer(peer *PeerInfo) error {
 	c.peers[peer.ID].Conn = c.serverConn
 	c.peers[peer.ID].LastPeerPong = time.Now() // Initialize peer connection time
 	if c.state != StateLeader {
-		c.setState(StateConnectedToPeer)
+		c.setStateLocked(StateConnectedToPeer)
 	}
 
 	// Start UDP hole punching - send initial packet to peer to establish connection
