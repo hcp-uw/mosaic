@@ -197,10 +197,10 @@ func Run(Args []string) {
 			os.Exit(1)
 		}
 	case "download":
-		if len(args) != 4 {
+		if len(args) != 4 && len(args) != 5 {
 			fmt.Println("Usage:")
-			fmt.Println("- mos download file <path>    Download a file.")
-			fmt.Println("- mos download folder <path>  Download a folder.")
+			fmt.Println("- mos download file <name> [destpath]   Download a file (defaults to ./<name>).")
+			fmt.Println("- mos download folder <name> [destdir]  Download a folder.")
 			os.Exit(1)
 		}
 		switch args[2] {
@@ -280,8 +280,8 @@ func statusNetwork() {
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
-	message := fmt.Sprintf("\nNetwork Status:\n- Total Network Storage: %d GB\n- Your Available Storage: %d GB\n- Number of Peers: %d\n",
-		cmdResp.NetworkStorage, cmdResp.AvailableStorage, cmdResp.Peers)
+	message := fmt.Sprintf("\nNetwork Status:\n- Total Network Storage: %s\n- Your Available Storage: %s\n- Number of Peers: %d\n",
+		formatBytes(cmdResp.NetworkStorage), formatBytes(cmdResp.AvailableStorage), cmdResp.Peers)
 	fmt.Println(message)
 }
 
@@ -295,7 +295,7 @@ func statusNode() {
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
-	message := fmt.Sprintf("\nNode status processed successfully.\n- Node ID: %s@node-%v\n- Storage Shared: %d GB\n", cmdResp.Username, cmdResp.ID, cmdResp.StorageShare)
+	message := fmt.Sprintf("\nNode status processed successfully.\n- Node ID: %s@node-%v\n- Storage Shared: %s\n", cmdResp.Username, cmdResp.ID, formatBytes(cmdResp.StorageShare))
 	fmt.Println(message)
 }
 
@@ -308,8 +308,17 @@ func statusAccount() {
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
-	message := fmt.Sprintf("\nAccount status processed successfully.\n- Username: %s\n- Nodes: %v\n- Given Storage: %d GB\n"+
-		"- Network Reserved Storage: %d GB\n- Available Storage: %d GB\n- Used Storage: %d GB\n", cmdResp.Username, cmdResp.Nodes, cmdResp.GivenStorage, cmdResp.GivenStorage-cmdResp.AvailableStorage, cmdResp.AvailableStorage, cmdResp.UsedStorage)
+	given := formatBytes(cmdResp.GivenStorage)
+	if cmdResp.GivenStorage == 0 {
+		given = "(unset)"
+	}
+	reserved := "n/a"
+	if cmdResp.AvailableStorage >= 0 {
+		reserved = formatBytes(cmdResp.GivenStorage - cmdResp.AvailableStorage)
+	}
+	message := fmt.Sprintf("\nAccount status processed successfully.\n- Username: %s\n- Nodes: %v\n- Given Storage: %s\n"+
+		"- Network Reserved Storage: %s\n- Available Storage: %s\n- Used Storage: %s\n",
+		cmdResp.Username, cmdResp.Nodes, given, reserved, formatBytes(cmdResp.AvailableStorage), formatBytes(cmdResp.UsedStorage))
 	fmt.Println(message)
 }
 
@@ -357,29 +366,27 @@ func peersNetwork() {
 	fmt.Println(message)
 }
 
-// Sets the amount of storage allocated to the current node
+// Sets the amount of storage allocated to the current node.
+// Accepts a byte size with optional suffix: "10GB", "500MB", "1024", "2.5G".
+// Without a suffix the value is interpreted as GB for backwards
+// compatibility with the prior CLI behavior.
 func setStorage() {
-	amountStr := args[3]
-	amount, err := strconv.Atoi(amountStr)
+	bytes, err := parseSize(args[3])
 	if err != nil {
-		fmt.Println("Please enter a valid integer amount (in GB).")
-		os.Exit(1)
-	}
-	total := helpers.UserStorageUsed()
-	if amount > total {
-		fmt.Printf("Error: cannot set storage to %d GB, exceeds total capacity of %d GB.\n", amount, total)
+		fmt.Printf("Invalid size %q: %v\n", args[3], err)
+		fmt.Println("Examples: 10GB, 500MB, 1024 (=1024 GB by default).")
 		os.Exit(1)
 	}
 
-	resp, err := client.SendRequest("setStorage", protocol.SetStorageRequest{Amount: amount, Node: helpers.GetNodeID()})
+	resp, err := client.SendRequest("setStorage", protocol.SetStorageRequest{Amount: int(bytes), Node: 0})
 	exitOnErr(err, "Error setting storage.")
 
 	var cmdResp protocol.SetStorageResponse
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
-	message := fmt.Sprintf("\nStorage set successfully.\n- Current Node: %v@node-%d\n- Node Storage: %d GB\n- Available Storage: %d GB\n",
-		cmdResp.Username, cmdResp.CurrentNode, cmdResp.NodeStorage, cmdResp.AvailableStorage)
+	message := fmt.Sprintf("\nStorage set successfully.\n- Current Node: %v\n- Node Storage: %s\n- Available Storage: %s\n",
+		cmdResp.Username, formatBytes(cmdResp.NodeStorage), formatBytes(cmdResp.AvailableStorage))
 	fmt.Println(message)
 }
 
@@ -392,8 +399,8 @@ func emptyStorage() {
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
-	message := fmt.Sprintf("\nStorage emptied successfully.\n- Username: %s\n- Storage Deleted: %d GB\n- Available Storage: %d GB\n",
-		cmdResp.Username, cmdResp.StorageDeleted, cmdResp.AvailableStorage)
+	message := fmt.Sprintf("\nStorage emptied successfully.\n- Username: %s\n- Storage Deleted: %s\n- Available Storage: %s\n",
+		cmdResp.Username, formatBytes(cmdResp.StorageDeleted), formatBytes(cmdResp.AvailableStorage))
 	fmt.Println(message)
 }
 
@@ -430,7 +437,8 @@ func listFile() {
 
 // Uploads a file to the network
 func uploadFile() {
-	filePath := args[3]
+	filePath, err := resolvePath(args[3])
+	exitOnErr(err, "Error resolving file path:")
 
 	fileInfo, err := os.Stat(filePath)
 	if os.IsNotExist(err) {
@@ -444,8 +452,7 @@ func uploadFile() {
 		os.Exit(1)
 	}
 
-	fileSize := fileInfo.Size() / 1024
-	fmt.Printf("Uploading file: %s (%d KB)\n", fileInfo.Name(), fileSize)
+	fmt.Printf("Uploading file: %s (%s)\n", fileInfo.Name(), formatBytes(int(fileInfo.Size())))
 	resp, uploadErr := client.SendRequest("uploadFile", protocol.UploadFileRequest{
 		Path: filePath,
 	})
@@ -455,8 +462,12 @@ func uploadFile() {
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
-	message := fmt.Sprintf("\nFile '%v' uploaded successfully to network.\n- Available storage remaining: %d GB.\n",
-		cmdResp.FileName, cmdResp.AvailableStorage)
+	if !cmdResp.Success {
+		fmt.Printf("Upload failed: %s\n", cmdResp.Details)
+		os.Exit(1)
+	}
+	message := fmt.Sprintf("\nFile '%v' uploaded successfully to network.\n- Available storage remaining: %s.\n",
+		cmdResp.FileName, formatBytes(cmdResp.AvailableStorage))
 	fmt.Println(message)
 }
 
@@ -501,18 +512,35 @@ func uploadFolder() {
 
 }
 
-// Downloads a file from the network
+// Downloads a file from the network. Accepts:
+//
+//	mos download file <name>             // writes ./<name>
+//	mos download file <name> <destpath>  // writes <destpath>
 func downloadFile() {
-	filePath := args[3]
-	resp, err := client.SendRequest("downloadFile", protocol.DownloadFileRequest{FilePath: filePath})
-	exitOnErr(err, "Error downloading "+filePath+": ")
+	name := filepath.Base(args[3])
+	dest := args[3]
+	if len(args) == 5 {
+		dest = args[4]
+	}
+	destAbs, err := resolvePath(dest)
+	exitOnErr(err, "Error resolving destination path:")
+	// If the destination is a directory, place the file under it.
+	if info, err := os.Stat(destAbs); err == nil && info.IsDir() {
+		destAbs = filepath.Join(destAbs, name)
+	}
+	resp, err := client.SendRequest("downloadFile", protocol.DownloadFileRequest{FilePath: destAbs, Filename: name})
+	exitOnErr(err, "Error downloading "+name+": ")
 
 	var cmdResp protocol.DownloadFileResponse
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
-	message := fmt.Sprintf("\nFile '%v' downloaded successfully from network.\n"+
-		"- Storage Remaining: %d GB\n", cmdResp.FileName, cmdResp.AvailableStorage)
+	if !cmdResp.Success {
+		fmt.Printf("Download failed: %s\n", cmdResp.Details)
+		os.Exit(1)
+	}
+	message := fmt.Sprintf("\nFile '%v' downloaded to %s.\n"+
+		"- Storage Remaining: %s\n", cmdResp.FileName, destAbs, formatBytes(cmdResp.AvailableStorage))
 	fmt.Println(message)
 }
 
@@ -541,8 +569,12 @@ func deleteFile() {
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
+	if !cmdResp.Success {
+		fmt.Printf("Delete failed: %s\n", cmdResp.Details)
+		os.Exit(1)
+	}
 	message := fmt.Sprintf("\nFile '%v' deleted successfully from network.\n"+
-		"- Storage Remaining: %v GB\n", cmdResp.FileName, cmdResp.AvailableStorage)
+		"- Storage Remaining: %s\n", cmdResp.FileName, formatBytes(cmdResp.AvailableStorage))
 	fmt.Println(message)
 }
 
@@ -573,10 +605,14 @@ func fileInfo() {
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
+	if !cmdResp.Success {
+		fmt.Printf("Info failed: %s\n", cmdResp.Details)
+		os.Exit(1)
+	}
 	message := fmt.Sprintf("\nFile '%v' info retrieved successfully from network.\n"+
-		"- NodeID: %s@node-%v\n"+
+		"- Owner: %s\n"+
 		"- Date Added: %v\n"+
-		"- Size: %v GB\n", cmdResp.FileName, cmdResp.Username, cmdResp.NodeID, cmdResp.DateAdded, cmdResp.Size)
+		"- Size: %s\n", cmdResp.FileName, cmdResp.Username, cmdResp.DateAdded, formatBytes(cmdResp.Size))
 	fmt.Println(message)
 }
 
@@ -618,6 +654,75 @@ func version() {
 // help prints the help message
 func help() {
 	fmt.Println(helpMessage)
+}
+
+// formatBytes turns a byte count into a human-readable string. The
+// sentinel -1 means "unlimited".
+func formatBytes(n int) string {
+	if n < 0 {
+		return "unlimited"
+	}
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	suffixes := []string{"KB", "MB", "GB", "TB", "PB", "EB"}
+	v := float64(n) / unit
+	exp := 0
+	for v >= unit && exp < len(suffixes)-1 {
+		v /= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %s", v, suffixes[exp])
+}
+
+// parseSize parses sizes like "10GB", "500MB", "1024", "2.5G". Without a
+// suffix the value is interpreted as GB to keep `mos set storage 10`
+// behaving like the original CLI.
+func parseSize(s string) (uint64, error) {
+	s = strings.TrimSpace(strings.ToUpper(s))
+	if s == "" {
+		return 0, fmt.Errorf("empty size")
+	}
+	// Ordered longest-first so "GB" matches before "B".
+	suffixes := []struct {
+		s    string
+		mult uint64
+	}{
+		{"TB", 1 << 40}, {"GB", 1 << 30}, {"MB", 1 << 20}, {"KB", 1 << 10},
+		{"T", 1 << 40}, {"G", 1 << 30}, {"M", 1 << 20}, {"K", 1 << 10},
+		{"B", 1},
+	}
+	multiplier := uint64(1 << 30) // GB default if no suffix
+	for _, s2 := range suffixes {
+		if strings.HasSuffix(s, s2.s) {
+			s = strings.TrimSuffix(s, s2.s)
+			multiplier = s2.mult
+			break
+		}
+	}
+	s = strings.TrimSpace(s)
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, err
+	}
+	if v < 0 {
+		return 0, fmt.Errorf("negative size")
+	}
+	return uint64(v * float64(multiplier)), nil
+}
+
+// resolvePath returns the absolute form of path, expanding the leading
+// "~" and resolving against the current working directory.
+func resolvePath(path string) (string, error) {
+	if strings.HasPrefix(path, "~") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		path = filepath.Join(home, path[1:])
+	}
+	return filepath.Abs(path)
 }
 
 // ExitOnErr prints the message and error and exits if err is not nil

@@ -134,7 +134,7 @@ func (s *Server) handleMessages(enableLogging bool) {
 		s.done <- true
 	}()
 
-	buffer := make([]byte, 1024)
+	buffer := make([]byte, 16*1024)
 
 	for {
 		select {

@@ -89,6 +89,9 @@ func TestClientPairingWithServer(t *testing.T) {
 	if err := client1.ConnectToStun(); err != nil {
 		t.Fatalf("Failed to connect client 1: %v", err)
 	}
+	// Give client1 a beat to be registered as leader before client2
+	// joins; without this, the server can race-assign leader to client2.
+	time.Sleep(100 * time.Millisecond)
 	if err := client2.ConnectToStun(); err != nil {
 		t.Fatalf("Failed to connect client 2: %v", err)
 	}
