@@ -12,12 +12,23 @@ import (
 )
 
 // HandleLogout clears all local identity state and cleans up account-specific
-// resources: leaves the P2P network, converts cached files back to stubs (so
-// manifest entries survive but local bytes are removed), then wipes key files.
+// resources: broadcasts the final network manifest, leaves the P2P network,
+// removes all local file data and stubs, clears the local manifest, then wipes
+// key files. The next account to log in starts with a completely clean slate.
 func HandleLogout(req protocol.LogoutRequest) protocol.LogoutResponse {
 	fmt.Println("Daemon: logging out.")
 
-	// Leave the P2P network gracefully before wiping identity.
+	mosaicDir := shared.MosaicDir()
+
+	// Broadcast the network manifest one final time before disconnecting so
+	// peers receive any pending changes before we drop off the network.
+	if aesKey, err := filesystem.LoadOrCreateNetworkKey(shared.NetworkKeyPath()); err == nil {
+		if nm, err := filesystem.ReadNetworkManifest(mosaicDir, aesKey); err == nil {
+			BroadcastNetworkManifest(nm)
+		}
+	}
+
+	// Leave the P2P network gracefully.
 	if client := GetP2PClient(); client != nil {
 		if err := client.DisconnectFromStun(); err != nil {
 			fmt.Printf("Daemon: warning — could not disconnect from network: %v\n", err)
@@ -25,26 +36,30 @@ func HandleLogout(req protocol.LogoutRequest) protocol.LogoutResponse {
 		SetP2PClient(nil)
 	}
 
-	// Convert locally cached files to stubs so the manifest entries survive
-	// the account switch but the file bytes are removed from disk.
-	//
-	// Order matters for the watcher:
-	//   1. Mark cached=false in manifest first — the watcher's REMOVE snapshot
-	//      will capture the updated entry, so the undo re-insert (triggered by
-	//      the stub CREATE) writes cached=false back, not cached=true.
-	//   2. Delete the real file — fires watcher REMOVE → parks as disappeared.
-	//   3. Write stub — fires watcher CREATE → matches disappeared → undo,
-	//      re-inserts entry (with cached=false). Manifest stays intact.
-	mosaicDir := shared.MosaicDir()
+	// Remove locally cached file bytes. For each cached file, go through the
+	// watcher-safe sequence before deleting the stub:
+	//   1. Mark cached=false — watcher REMOVE snapshot captures this state.
+	//   2. Delete the real file — watcher REMOVE fires, parks as disappeared.
+	//   3. Write stub — watcher CREATE fires, undoes the disappear.
+	// Then delete the stub immediately — next account must not see these files.
 	if entries, err := filesystem.ReadManifest(mosaicDir); err == nil {
 		for name, entry := range entries {
-			if !entry.Cached {
-				continue
+			if entry.Cached {
+				_ = filesystem.MarkUncachedInManifest(mosaicDir, name)
+				_ = os.Remove(filepath.Join(mosaicDir, name))
+				_ = filesystem.WriteStub(mosaicDir, name, entry.Size, entry.NodeID, entry.ContentHash)
 			}
-			_ = filesystem.MarkUncachedInManifest(mosaicDir, name)
-			_ = os.Remove(filepath.Join(mosaicDir, name))
-			_ = filesystem.WriteStub(mosaicDir, name, entry.Size, entry.NodeID, entry.ContentHash)
 		}
+	}
+
+	// Delete all stubs — the next account must not inherit this account's file list.
+	if err := filesystem.RemoveAllStubs(mosaicDir); err != nil {
+		fmt.Printf("Daemon: warning — could not remove stubs: %v\n", err)
+	}
+
+	// Clear the local manifest so the next account starts with an empty file list.
+	if err := filesystem.ClearManifest(mosaicDir); err != nil {
+		fmt.Printf("Daemon: warning — could not clear manifest: %v\n", err)
 	}
 
 	// Wipe all identity and key material.

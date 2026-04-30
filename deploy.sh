@@ -1,21 +1,29 @@
 #!/usr/bin/env bash
 # deploy.sh — push code to the DigitalOcean droplet and build all server binaries.
 # Run from the repo root on your Mac:
-#   ./deploy.sh <droplet-ip>
+#   ./deploy.sh [droplet-ip]
 #
-# Example:
-#   ./deploy.sh 178.128.151.84
+# If no IP is given, the address is read from internal/cli/shared/paths.go
+# (DefaultSTUNServer). Override by passing an explicit IP as the first argument.
 
 set -e
 
-DROPLET_IP="${1:-}"
+PATHS_FILE="internal/cli/shared/paths.go"
+
+# Extract the IP from DefaultServerIP = "..." if no arg provided.
+if [ -n "${1:-}" ]; then
+    DROPLET_IP="$1"
+else
+    DROPLET_IP=$(grep 'DefaultServerIP = ' "$PATHS_FILE" | grep -oE '"[^"]+"' | tr -d '"')
+fi
+
 SSH_KEY="${HOME}/.ssh/mosaic-droplet"
 REMOTE_USER="root"
 REMOTE_DIR="/root/mosaic"
 
 if [ -z "$DROPLET_IP" ]; then
-    echo "Usage: ./deploy.sh <droplet-ip>"
-    echo "Example: ./deploy.sh 178.128.151.84"
+    echo "Could not determine droplet IP from ${PATHS_FILE}."
+    echo "Usage: ./deploy.sh [droplet-ip]"
     exit 1
 fi
 

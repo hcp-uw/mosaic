@@ -651,6 +651,10 @@ func downloadFile() {
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
+	if !cmdResp.Success {
+		fmt.Printf("\nError downloading '%v': %s\n", cmdResp.FileName, cmdResp.Details)
+		os.Exit(1)
+	}
 	message := fmt.Sprintf("\nFile '%v' downloaded successfully from network.\n"+
 		"- Storage Remaining: %d GB\n", cmdResp.FileName, cmdResp.AvailableStorage)
 	fmt.Println(message)
@@ -665,6 +669,10 @@ func downloadFolder() {
 	var cmdResp protocol.DownloadFolderResponse
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
+	}
+	if !cmdResp.Success {
+		fmt.Printf("\nError downloading '%v': %s\n", cmdResp.FolderName, cmdResp.Details)
+		os.Exit(1)
 	}
 	message := fmt.Sprintf("\nFolder '%v' downloaded successfully from network.\n"+
 		"- Storage Remaining: %d GB\n", cmdResp.FolderName, cmdResp.AvailableStorage)

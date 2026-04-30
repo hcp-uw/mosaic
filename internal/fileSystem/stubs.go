@@ -74,6 +74,20 @@ func MarkCached(mosaicDir, filename string) error {
 	return os.WriteFile(stubPath, updated, 0644)
 }
 
+// RemoveAllStubs deletes every *.mosaic stub file in mosaicDir.
+func RemoveAllStubs(mosaicDir string) error {
+	matches, err := filepath.Glob(filepath.Join(mosaicDir, "*.mosaic"))
+	if err != nil {
+		return err
+	}
+	for _, path := range matches {
+		if rerr := os.Remove(path); rerr != nil && !os.IsNotExist(rerr) {
+			err = rerr
+		}
+	}
+	return err
+}
+
 // IsCached reports whether a stub exists and is marked as locally cached.
 func IsCached(mosaicDir, filename string) bool {
 	data, err := os.ReadFile(filepath.Join(mosaicDir, filename+".mosaic"))

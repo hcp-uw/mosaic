@@ -1,15 +1,23 @@
 #!/usr/bin/env bash
 # scripts/start.sh — start STUN and TURN servers on the droplet.
 # Run from the repo root on the droplet:
-#   ./scripts/start.sh <public-ip>
+#   ./scripts/start.sh [public-ip]
+#
+# If no IP is given, it is read from internal/cli/shared/paths.go (DefaultServerIP).
 
 set -e
 
-PUBLIC_IP="${1:-}"
+PATHS_FILE="internal/cli/shared/paths.go"
+
+if [ -n "${1:-}" ]; then
+    PUBLIC_IP="$1"
+else
+    PUBLIC_IP=$(grep 'DefaultServerIP = ' "$PATHS_FILE" | grep -oE '"[^"]+"' | tr -d '"')
+fi
 
 if [ -z "$PUBLIC_IP" ]; then
-    echo "Usage: ./scripts/start.sh <public-ip>"
-    echo "Example: ./scripts/start.sh 178.128.151.84"
+    echo "Could not determine public IP from ${PATHS_FILE}."
+    echo "Usage: ./scripts/start.sh [public-ip]"
     exit 1
 fi
 

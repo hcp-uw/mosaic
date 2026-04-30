@@ -170,6 +170,14 @@ func RestoreManifestEntry(mosaicDir string, entry ManifestEntry) error {
 	return writeManifestLocked(mosaicDir, entries)
 }
 
+// ClearManifest replaces the manifest with an empty map.
+// Call this on logout so the next account does not inherit the previous account's file list.
+func ClearManifest(mosaicDir string) error {
+	manifestMu.Lock()
+	defer manifestMu.Unlock()
+	return writeManifestLocked(mosaicDir, map[string]ManifestEntry{})
+}
+
 // IsInManifest reports whether the file is tracked on the network.
 func IsInManifest(mosaicDir, name string) bool {
 	manifestMu.Lock()
