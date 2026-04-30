@@ -118,6 +118,7 @@ func (c *Client) tickPeerPings(state ClientState) {
 			}
 			delete(c.peers, id)
 			c.notifyError(fmt.Errorf("peer %s timed out — evicted", id))
+			c.notifyPeerLeft(id)
 			continue
 		}
 

@@ -73,13 +73,22 @@ type UserChain struct {
 	Files []NetworkFileEntry `json:"-"`
 }
 
+// ShardLocations records which peers hold each shard for a given file.
+// This is a G-set per shard index: peer node IDs are only ever added, never removed.
+// Keyed by shard index (0-based); values are deduplicated node ID strings.
+type ShardLocations struct {
+	Holders map[int][]string `json:"holders"` // shardIndex → []nodeID
+}
+
 // NetworkManifest is the root structure: a collection of per-user chains,
 // encrypted at rest with the shared network AES key.
 // Chains MUST remain sorted by UserID at all times.
+// ShardMap tracks shard-to-peer assignments and is merged as a G-set.
 type NetworkManifest struct {
-	Version   int         `json:"version"`
-	UpdatedAt string      `json:"updatedAt"`
-	Chains    []UserChain `json:"chains"`
+	Version   int                        `json:"version"`
+	UpdatedAt string                     `json:"updatedAt"`
+	Chains    []UserChain                `json:"chains"`
+	ShardMap  map[string]*ShardLocations `json:"shardMap,omitempty"` // contentHash → shard locations
 }
 
 // networkManifestPath returns the path to the on-disk manifest file.
@@ -313,7 +322,7 @@ func UserExistsInNetwork(m NetworkManifest, userID int) bool {
 // ReadNetworkManifest decrypts and deserializes the manifest from disk.
 // Returns an empty v2 manifest if the file does not exist.
 func ReadNetworkManifest(mosaicDir string, key [32]byte) (NetworkManifest, error) {
-	empty := NetworkManifest{Version: 2, Chains: []UserChain{}}
+	empty := NetworkManifest{Version: 2, Chains: []UserChain{}, ShardMap: make(map[string]*ShardLocations)}
 
 	data, err := os.ReadFile(networkManifestPath(mosaicDir))
 	if os.IsNotExist(err) {
@@ -391,7 +400,7 @@ func MergeNetworkManifest(local, remote NetworkManifest) (NetworkManifest, bool)
 
 	for _, remoteChain := range remote.Chains {
 		if !ValidateChain(remoteChain) {
-			fmt.Printf("MergeNetworkManifest: dropping invalid chain for userID %d\n", remoteChain.UserID)
+			fmt.Printf("MergeNetworkManifest: dropping invalid chain for userID=%d\n", remoteChain.UserID)
 			continue
 		}
 
@@ -407,6 +416,12 @@ func MergeNetworkManifest(local, remote NetworkManifest) (NetworkManifest, bool)
 			merged.Chains[i] = winner
 			changed = true
 		}
+	}
+
+	// Merge shard location maps (G-set union).
+	if mergedMap, shardChanged := mergeShardMaps(merged.ShardMap, remote.ShardMap); shardChanged {
+		merged.ShardMap = mergedMap
+		changed = true
 	}
 
 	return merged, changed
@@ -442,6 +457,102 @@ func chainHeadHash(c UserChain) string {
 	}
 	h, _ := BlockHash(c.Blocks[len(c.Blocks)-1])
 	return h
+}
+
+// ──────────────────────────────────────────────────────────
+// Shard location tracking (G-set per shard index)
+// ──────────────────────────────────────────────────────────
+
+// RecordShardHolder adds nodeID to the holder set for shardIndex of the file
+// identified by contentHash. Returns true if the manifest was modified (i.e.
+// nodeID was not already recorded for that shard).
+func RecordShardHolder(m *NetworkManifest, contentHash string, shardIndex int, nodeID string) bool {
+	if m.ShardMap == nil {
+		m.ShardMap = make(map[string]*ShardLocations)
+	}
+	loc, ok := m.ShardMap[contentHash]
+	if !ok {
+		loc = &ShardLocations{Holders: make(map[int][]string)}
+		m.ShardMap[contentHash] = loc
+	}
+	for _, id := range loc.Holders[shardIndex] {
+		if id == nodeID {
+			return false // already recorded
+		}
+	}
+	loc.Holders[shardIndex] = append(loc.Holders[shardIndex], nodeID)
+	return true
+}
+
+// RemoveShardHolder removes nodeID from every shard holder list in the manifest.
+// Called when a peer is evicted so GetShardHolders stops routing to dead nodes.
+// Returns true if any entry was removed.
+func RemoveShardHolder(m *NetworkManifest, nodeID string) bool {
+	if m.ShardMap == nil {
+		return false
+	}
+	changed := false
+	for _, loc := range m.ShardMap {
+		for shardIdx, holders := range loc.Holders {
+			filtered := holders[:0]
+			for _, id := range holders {
+				if id != nodeID {
+					filtered = append(filtered, id)
+				} else {
+					changed = true
+				}
+			}
+			loc.Holders[shardIdx] = filtered
+		}
+	}
+	return changed
+}
+
+// GetShardHolders returns the list of node IDs that hold shardIndex for the
+// file with contentHash. Returns nil if unknown.
+func GetShardHolders(m NetworkManifest, contentHash string, shardIndex int) []string {
+	if m.ShardMap == nil {
+		return nil
+	}
+	loc, ok := m.ShardMap[contentHash]
+	if !ok {
+		return nil
+	}
+	return loc.Holders[shardIndex]
+}
+
+// mergeShardMaps unions the remote shard map into local. Returns true if any
+// new holder was added.
+func mergeShardMaps(local, remote map[string]*ShardLocations) (map[string]*ShardLocations, bool) {
+	changed := false
+	if local == nil {
+		local = make(map[string]*ShardLocations)
+	}
+	for hash, remoteLoc := range remote {
+		localLoc, ok := local[hash]
+		if !ok {
+			cp := &ShardLocations{Holders: make(map[int][]string)}
+			for idx, ids := range remoteLoc.Holders {
+				cp.Holders[idx] = append([]string(nil), ids...)
+			}
+			local[hash] = cp
+			changed = true
+			continue
+		}
+		for idx, remoteIDs := range remoteLoc.Holders {
+			existing := make(map[string]bool, len(localLoc.Holders[idx]))
+			for _, id := range localLoc.Holders[idx] {
+				existing[id] = true
+			}
+			for _, id := range remoteIDs {
+				if !existing[id] {
+					localLoc.Holders[idx] = append(localLoc.Holders[idx], id)
+					changed = true
+				}
+			}
+		}
+	}
+	return local, changed
 }
 
 // ManifestToJSON serializes the manifest to JSON bytes for P2P transmission.

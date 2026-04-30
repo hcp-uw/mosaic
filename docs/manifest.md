@@ -384,6 +384,12 @@ Both key files are created with `0600` permissions — readable only by your use
 8. WriteStub(mosaicDir, "notes.md", size, nodeID, contentHash)
      → creates notes.md.mosaic
    (or MarkCachedInManifest if keeping local copy)
+9. transfer.UploadFile runs concurrently:
+     Reed-Solomon encode → 10 data + 4 parity shards
+     Encrypt each shard (AES-256-GCM chunks) → store locally in ~/.shards/<hash>/
+     Fire shardStoredCb per shard → uploader recorded in ShardMap → broadcast
+     Send all 14 shards as binary frames to all connected peers
+     Peers receive → finalizeShard → recorded in ShardMap → broadcast
 ```
 
 ### Download (double-click stub / `mos download file notes.md`)
@@ -439,9 +445,60 @@ The P2P broadcast in `BroadcastNetworkManifest` is best-effort: if no peer is co
 
 ---
 
-## Part 10: What Is Not Yet Implemented
+## Part 10: ShardMap — Shard Location Tracking
 
-- **Shard distribution** — `FetchFileBytes` and the `TODO: distribute file shards to peers` comment in `uploadFile.go` are stubs. Files are not actually split and distributed yet. The manifest infrastructure is complete and ready; the network transport layer is the missing piece.
+The network manifest contains a second top-level field alongside `chains`: the `ShardMap`. It is a G-set CRDT that records which nodes hold which shards of each file.
+
+### Structure
+
+```json
+{
+  "version": 2,
+  "chains": [ ... ],
+  "shardMap": {
+    "<contentHash>": {
+      "holders": {
+        "0": ["nodeID-A", "nodeID-B"],
+        "1": ["nodeID-B"],
+        "2": ["nodeID-A"],
+        ...
+      }
+    }
+  }
+}
+```
+
+`shardMap` is keyed by `contentHash` (the SHA-256 of the original file). Each value maps shard indices to the list of node IDs that hold that shard.
+
+### How It Gets Written
+
+Every time a node stores a shard to disk — whether because it uploaded the file or received shards from a peer — it fires `shardStoredCb`, which calls `recordShardInManifest`. That function:
+
+1. Reads the current network manifest
+2. Calls `RecordShardHolder(&manifest, contentHash, shardIndex, nodeID)` — idempotent: duplicate entries are ignored
+3. Writes the updated manifest to disk
+4. Broadcasts the updated manifest to all peers
+
+### CRDT Merge
+
+When two manifests are merged, `mergeShardMaps` unions the holder lists for every shard of every file. Because holders are only ever added (never removed), the result is correct regardless of the order manifests arrive. This is the G-set (grow-only set) property.
+
+### How It Gets Used
+
+`FetchFileBytes` uses the ShardMap to decide where to request missing shards:
+
+```go
+holders := GetShardHolders(manifest, contentHash, shardIndex)
+// send ShardRequest to each holder
+```
+
+If no holders are recorded for a shard, the node cannot request it — the request is skipped and the shard must arrive via redistribution when a new peer joins.
+
+---
+
+## Part 11: What Is Not Yet Implemented
+
+- **Targeted shard routing on upload** — `UploadFile` currently uses `SendRawToAllPeers`, which sends all 14 shards to every peer. The correct behaviour is `shard[i] → peers[i % numPeers]`. Redistribution on peer join already uses the correct routing rule; upload-time routing is the remaining gap.
 - **Proof of Storage** — the `Tapestry` protobuf definition exists in `internal/tapestry/` and is designed for this. It will allow the network to verify that storage nodes actually hold the shards they claim to hold.
 - **File name privacy for public networks** — chain blocks currently store file names in plaintext. This is suitable for a public permissionless network but means any peer can see your file names. Per-block ECIES encryption of the file metadata field can be layered on top without changing the chain structure.
 - **Chain compaction** — long-lived chains with many add/remove cycles accumulate dead blocks. A compaction step (folding the chain to a single "add" block per active file) would be useful once chain length becomes a concern.

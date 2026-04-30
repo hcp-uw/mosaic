@@ -21,6 +21,14 @@ func (e *Encoder) EncodeFile(relativeFilePath string) error {
 		return err
 	}
 
+	// Compute block size from the actual file size so small files don't get
+	// padded to a fixed 20 MB shard size.
+	info, err := os.Stat(encodeFilePath)
+	if err != nil {
+		return err
+	}
+	e.blockSize = ComputeBlockSize(int(info.Size()), e.shards)
+
 	shardFiles := make([]*os.File, e.parity+e.shards)
 	for i := range shardFiles {
 		shardName := fmt.Sprintf("shard%d_%s.dat", i, fileName)

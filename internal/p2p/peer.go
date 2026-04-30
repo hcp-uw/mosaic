@@ -76,6 +76,24 @@ func (c *Client) SendToAllPeers(message *api.Message) error {
 	return nil
 }
 
+// SendRawToPeer sends raw bytes to a single peer by ID without JSON serialization.
+// Used to redistribute encrypted shard frames to a specific peer.
+func (c *Client) SendRawToPeer(peerID string, data []byte) error {
+	c.mutex.RLock()
+	peer := c.GetPeerById(peerID)
+	state := c.state
+	c.mutex.RUnlock()
+
+	if peer == nil || peer.Conn == nil {
+		return fmt.Errorf("peer %s not connected", peerID)
+	}
+	if state == StateDisconnected {
+		return fmt.Errorf("client disconnected")
+	}
+	_, err := peer.Conn.WriteTo(data, peer.Address)
+	return err
+}
+
 // SendRawToAllPeers sends raw bytes directly to all connected peers without
 // any JSON serialization. Used for binary shard frames.
 func (c *Client) SendRawToAllPeers(data []byte) error {

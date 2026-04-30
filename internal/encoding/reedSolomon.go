@@ -40,15 +40,35 @@ func NewEncoder(dataShards int, parityShards int, outPath string, inPath string)
 		encoder: encoder,
 		shards:  dataShards,
 		parity:  parityShards,
-		// essentially the maximum amount of bytes in one individual dataShards
-		// the total amount of bytes in ram will be #dataShard * blockSize
-		blockSize: 20 * 1024 * 1024,
+		// blockSize is 0 by default; EncodeFile computes the correct value
+		// from the actual file size before encoding begins.
+		blockSize: 0,
 
 		dirOut: outPath,
 		dirIn:  inPath,
 	}
 
 	return newEncoder, nil
+}
+
+// BlockSize returns the shard block size currently set on the encoder.
+// This is 0 until EncodeFile is called, which sets it based on file size.
+func (e *Encoder) BlockSize() int { return e.blockSize }
+
+// SetBlockSize overrides the block size. Call this before DecodeShards
+// using the value stored in ShardMeta.BlockSize.
+func (e *Encoder) SetBlockSize(n int) { e.blockSize = n }
+
+// ComputeBlockSize returns the appropriate shard block size for a file of
+// fileSize bytes split across dataShards data shards.
+// Formula: ceil(fileSize / dataShards), capped at 20 MB for very large files.
+func ComputeBlockSize(fileSize, dataShards int) int {
+	if fileSize <= 0 || dataShards <= 0 {
+		return 1
+	}
+	bs := (fileSize + dataShards - 1) / dataShards
+	const maxBlock = 20 * 1024 * 1024 // 20 MB cap for large files
+	return max(1, min(bs, maxBlock))
 }
 
 func checkDirectory(path string) error {

@@ -108,9 +108,9 @@ func Run(Args []string) {
 			}
 			statusNetwork()
 		case "node":
-			if len(args) != 4 {
+			if len(args) != 3 {
 				fmt.Println("Usage:")
-				fmt.Println("- mos status node <node_id>    View node status.")
+				fmt.Println("- mos status node    Scan for other nodes running under your account key.")
 				os.Exit(1)
 			}
 			statusNode()
@@ -333,15 +333,34 @@ func statusNetwork() {
 
 // Gets info about a specific node in the network
 func statusNode() {
-	nodeID := args[3]
-	resp, err := client.SendRequest("statusNode", protocol.NodeStatusRequest{ID: nodeID})
+	resp, err := client.SendRequest("statusNode", protocol.NodeStatusRequest{})
 	exitOnErr(err, "Error getting node status.")
 
 	var cmdResp protocol.NodeStatusResponse
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
-	message := fmt.Sprintf("\nNode status processed successfully.\n- Node ID: %s@node-%v\n- Storage Shared: %d GB\n", cmdResp.Username, cmdResp.ID, cmdResp.StorageShare)
+
+	if !cmdResp.Success {
+		fmt.Println("\nError:", cmdResp.Details)
+		os.Exit(1)
+	}
+
+	message := fmt.Sprintf("\nNode scan complete.\n- This node: %s (storage shared: %d GB)\n- %s\n",
+		cmdResp.Username, cmdResp.StorageShare, cmdResp.Details)
+
+	if len(cmdResp.SameKeyNodes) == 0 {
+		message += "- No other nodes running under this account were found.\n"
+	} else {
+		message += "- Same-account nodes found:\n"
+		for _, n := range cmdResp.SameKeyNodes {
+			status := "AUTHENTICATED"
+			if !n.Authenticated {
+				status = "FAILED (could not verify key)"
+			}
+			message += fmt.Sprintf("  • %s... [%s]\n", n.PeerID, status)
+		}
+	}
 	fmt.Println(message)
 }
 
@@ -428,6 +447,10 @@ func peersNetwork() {
 		exitOnErr(err, "Error parsing response.")
 	}
 
+	if !cmdResp.Success || len(cmdResp.Peers) == 0 {
+		fmt.Println("\nYou are not connected to anyone.")
+		return
+	}
 	message := "\nPeers in Network:\n"
 	for _, peer := range cmdResp.Peers {
 		message += fmt.Sprintf("- %s@node-%d | Shared: %d GB\n", peer.Username, peer.NodeID, peer.StorageShared)

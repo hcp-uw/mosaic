@@ -16,6 +16,49 @@ var (
 	p2pClientMu sync.RWMutex
 )
 
+// pendingChallenges maps a nonce hex string to the channel waiting for responses.
+// Used by mos status node: the handler registers a channel, broadcasts an
+// IdentityChallenge, and reads responses until the deadline.
+var (
+	pendingChallenges   = make(map[string]chan *api.Message)
+	pendingChallengesMu sync.Mutex
+)
+
+// RegisterChallenge creates a buffered channel for nonce and returns it.
+// The caller must call UnregisterChallenge when done.
+func RegisterChallenge(nonce string) chan *api.Message {
+	ch := make(chan *api.Message, 32)
+	pendingChallengesMu.Lock()
+	pendingChallenges[nonce] = ch
+	pendingChallengesMu.Unlock()
+	return ch
+}
+
+// UnregisterChallenge removes the channel registered for nonce.
+func UnregisterChallenge(nonce string) {
+	pendingChallengesMu.Lock()
+	delete(pendingChallenges, nonce)
+	pendingChallengesMu.Unlock()
+}
+
+// DeliverChallengeResponse routes an IdentityResponse message to the channel
+// waiting for its nonce. No-op if no handler is registered for that nonce.
+func DeliverChallengeResponse(msg *api.Message) {
+	d, err := msg.GetIdentityResponseData()
+	if err != nil {
+		return
+	}
+	pendingChallengesMu.Lock()
+	ch, ok := pendingChallenges[d.Nonce]
+	pendingChallengesMu.Unlock()
+	if ok {
+		select {
+		case ch <- msg:
+		default:
+		}
+	}
+}
+
 // GetP2PClient returns the active P2P client, or nil if not connected.
 func GetP2PClient() *p2p.Client {
 	p2pClientMu.RLock()

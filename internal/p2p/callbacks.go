@@ -14,6 +14,14 @@ func (c *Client) OnPeerAssigned(callback func(*PeerInfo)) {
 	c.peerCallbacks = append(c.peerCallbacks, callback)
 }
 
+// OnPeerLeft registers a callback invoked with the peer ID whenever a peer
+// is evicted after a pong timeout. Use this to trigger shard redistribution.
+func (c *Client) OnPeerLeft(callback func(peerID string)) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	c.peerLeftCallbacks = append(c.peerLeftCallbacks, callback)
+}
+
 // OnError registers a callback for errors
 func (c *Client) OnError(callback func(error)) {
 	c.mutex.Lock()
@@ -45,6 +53,13 @@ func (c *Client) setState(newState ClientState) {
 func (c *Client) notifyPeerAssigned(peerInfo *PeerInfo) {
 	for _, callback := range c.peerCallbacks {
 		go callback(peerInfo)
+	}
+}
+
+// notifyPeerLeft notifies callbacks that a peer has been evicted.
+func (c *Client) notifyPeerLeft(peerID string) {
+	for _, callback := range c.peerLeftCallbacks {
+		go callback(peerID)
 	}
 }
 

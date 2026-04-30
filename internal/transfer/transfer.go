@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -47,6 +48,7 @@ type ShardMeta struct {
 	FileSize        int    `json:"fileSize"`
 	TotalDataShards int    `json:"totalDataShards"`
 	TotalShards     int    `json:"totalShards"`
+	BlockSize       int    `json:"blockSize"` // shard block size used during encoding
 }
 
 type shardAssembly struct {
@@ -68,10 +70,33 @@ var (
 
 	sendLimiter = make(chan struct{}, 200)
 	initOnce    sync.Once
+
+	// shardStoredCb is called after a shard is successfully written to disk.
+	// The daemon registers this to update the network manifest and broadcast.
+	shardStoredCb   func(contentHash string, shardIndex int)
+	shardStoredCbMu sync.Mutex
+
+	// fileReadyChans allows FetchFileBytes to wait for autoReconstruct to finish.
+	fileReadyChans sync.Map // fileHash → chan struct{}
 )
+
+// SetShardStoredCallback registers a function that is called (in a goroutine)
+// each time a shard is fully assembled and written to disk. The daemon uses
+// this to record shard ownership in the network manifest and broadcast.
+func SetShardStoredCallback(fn func(contentHash string, shardIndex int)) {
+	shardStoredCbMu.Lock()
+	shardStoredCb = fn
+	shardStoredCbMu.Unlock()
+}
+
+// testShardsDir is overridden in tests to redirect shard I/O to a temp dir.
+var testShardsDir string
 
 // ShardsDir returns ~/Mosaic/.shards — the base directory for all stored shards.
 func ShardsDir() string {
+	if testShardsDir != "" {
+		return testShardsDir
+	}
 	return filepath.Join(shared.MosaicDir(), ".shards")
 }
 
@@ -347,116 +372,87 @@ func UploadFile(path string, client *p2p.Client) {
 		return
 	}
 
-	// Persist shards locally so the uploader can reconstruct its own files later.
-	shardDir := filepath.Join(ShardsDir(), fileHash)
-	if err := os.MkdirAll(shardDir, 0755); err == nil {
-		for i := 0; i < TotalShards; i++ {
-			src := filepath.Join(outDir, ".bin", filename, fmt.Sprintf("shard%d_%s.dat", i, nameNoExt))
-			dst := filepath.Join(shardDir, fmt.Sprintf("shard%d_%s.dat", i, fileHash))
-			_ = copyFile(src, dst)
+	// Build stable peer order: sort our ID + all connected peer IDs lexicographically.
+	// This gives a deterministic shard → node mapping every node can compute independently.
+	ourID := ""
+	if client != nil {
+		ourID = client.GetID()
+	}
+	var connectedPeers []*p2p.PeerInfo
+	if client != nil && client.IsPeerCommunicationAvailable() {
+		connectedPeers = client.GetConnectedPeers()
+	}
+	ids := make([]string, 0, len(connectedPeers)+1)
+	if ourID != "" {
+		ids = append(ids, ourID)
+	}
+	for _, p := range connectedPeers {
+		ids = append(ids, p.ID)
+	}
+	sort.Strings(ids)
+	if len(ids) == 0 {
+		ids = []string{ourID}
+	}
+	numNodes := len(ids)
+	ourIndex := 0
+	for i, id := range ids {
+		if id == ourID {
+			ourIndex = i
+			break
 		}
-		writeShardMeta(shardDir, ShardMeta{
-			FileName:        filename,
-			FileHash:        fileHash,
-			FileSize:        fileSize,
-			TotalDataShards: DataShards,
-			TotalShards:     TotalShards,
-		})
 	}
 
-	if client == nil || !client.IsPeerCommunicationAvailable() {
-		fmt.Println("[Transfer] No peers connected — shards saved locally only")
-		return
-	}
-
-	fmt.Println("[Transfer] Sending shards to peers…")
+	// Route each shard: store locally if it maps to us, send to the target peer otherwise.
+	shardDir := filepath.Join(ShardsDir(), fileHash)
+	_ = os.MkdirAll(shardDir, 0755)
 
 	var wg sync.WaitGroup
-	var sendErr error
-	var sendErrMu sync.Mutex
-	sem := make(chan struct{}, 1) // sequential: one shard at a time
+	sem := make(chan struct{}, 1) // sequential sends to avoid UDP packet loss
 
 	for i := 0; i < TotalShards; i++ {
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(shardIdx int) {
-			defer func() { <-sem }()
-			defer wg.Done()
+		srcPath := filepath.Join(outDir, ".bin", filename, fmt.Sprintf("shard%d_%s.dat", i, nameNoExt))
+		targetIndex := i % numNodes
 
-			shardPath := filepath.Join(outDir, ".bin", filename, fmt.Sprintf("shard%d_%s.dat", shardIdx, nameNoExt))
-			info, err := os.Stat(shardPath)
-			if err != nil {
-				sendErrMu.Lock()
-				sendErr = fmt.Errorf("cannot stat shard %d: %w", shardIdx, err)
-				sendErrMu.Unlock()
-				return
-			}
-			totalChunks := int((info.Size() + chunkSize - 1) / chunkSize)
-
-			sf, err := os.Open(shardPath)
-			if err != nil {
-				sendErrMu.Lock()
-				sendErr = fmt.Errorf("cannot open shard %d: %w", shardIdx, err)
-				sendErrMu.Unlock()
-				return
-			}
-			defer sf.Close()
-
-			buf := make([]byte, chunkSize)
-			chunkIndex := 0
-			for {
-				n, err := io.ReadFull(sf, buf)
-				if n > 0 {
-					encrypted, eerr := encryptChunk(netKey, buf[:n])
-					if eerr != nil {
-						sendErrMu.Lock()
-						sendErr = fmt.Errorf("encrypt failed shard %d chunk %d: %w", shardIdx, chunkIndex, eerr)
-						sendErrMu.Unlock()
-						return
+		if targetIndex == ourIndex {
+			// Our shard: encrypt and persist locally, register in ShardMap.
+			dst := filepath.Join(shardDir, fmt.Sprintf("shard%d_%s.dat", i, fileHash))
+			if chunks, err := encryptShardFileToChunks(srcPath, netKey); err == nil {
+				if writeErr := writeEncryptedShardFile(dst, chunks); writeErr == nil {
+					shardStoredCbMu.Lock()
+					cb := shardStoredCb
+					shardStoredCbMu.Unlock()
+					if cb != nil {
+						go cb(fileHash, i)
 					}
-					frame, ferr := encodeBinaryShardChunk(binaryShardChunk{
-						fileHash:        fileHash,
-						fileName:        filename,
-						fileSize:        fileSize,
-						shardIndex:      shardIdx,
-						chunkIndex:      chunkIndex,
-						totalChunks:     totalChunks,
-						totalDataShards: DataShards,
-						totalShards:     TotalShards,
-						data:            encrypted,
-					})
-					if ferr != nil {
-						sendErrMu.Lock()
-						sendErr = fmt.Errorf("encode frame shard %d chunk %d: %w", shardIdx, chunkIndex, ferr)
-						sendErrMu.Unlock()
-						return
-					}
-					<-sendLimiter
-					if werr := client.SendRawToAllPeers(frame); werr != nil {
-						sendErrMu.Lock()
-						sendErr = fmt.Errorf("send failed shard %d chunk %d: %w", shardIdx, chunkIndex, werr)
-						sendErrMu.Unlock()
-						return
-					}
-					chunkIndex++
-				}
-				if err == io.EOF || err == io.ErrUnexpectedEOF {
-					break
-				}
-				if err != nil {
-					sendErrMu.Lock()
-					sendErr = fmt.Errorf("read error shard %d: %w", shardIdx, err)
-					sendErrMu.Unlock()
-					return
 				}
 			}
-			fmt.Printf("[Transfer] Shard %d/%d sent (%d chunks)\n", shardIdx+1, TotalShards, chunkIndex)
-		}(i)
+		} else {
+			// Peer's shard: send directly without storing locally.
+			targetPeerID := ids[targetIndex]
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(shardIdx int, peerID string, src string) {
+				defer func() { <-sem }()
+				defer wg.Done()
+				if err := sendPlaintextShardToPeer(src, shardIdx, fileHash, filename, fileSize, netKey, peerID, client); err != nil {
+					fmt.Printf("[Transfer] Shard %d → peer %s failed: %v\n", shardIdx, peerID[:8], err)
+				}
+			}(i, targetPeerID, srcPath)
+		}
 	}
-
 	wg.Wait()
-	if sendErr != nil {
-		fmt.Printf("[Transfer] Upload incomplete: %v\n", sendErr)
+
+	writeShardMeta(shardDir, ShardMeta{
+		FileName:        filename,
+		FileHash:        fileHash,
+		FileSize:        fileSize,
+		TotalDataShards: DataShards,
+		TotalShards:     TotalShards,
+		BlockSize:       enc.BlockSize(),
+	})
+
+	if len(connectedPeers) == 0 {
+		fmt.Println("[Transfer] No peers connected — all shards saved locally")
 		return
 	}
 	fmt.Printf("[Transfer] Upload complete: %s\n", filename)
@@ -468,21 +464,12 @@ func UploadFile(path string, client *p2p.Client) {
 
 // HandleBinaryShardChunk processes a raw binary shard frame received from a peer.
 // Called directly from the message router when data[0] == binaryMagic.
+// The chunk data is stored encrypted — peers never decrypt; only the file owner
+// decrypts at reconstruction time (Option A blind-courier model).
 func HandleBinaryShardChunk(data []byte) {
 	c, err := decodeBinaryShardChunk(data)
 	if err != nil {
 		fmt.Printf("[Transfer] Bad binary frame: %v\n", err)
-		return
-	}
-
-	netKey, err := shardEncryptionKey()
-	if err != nil {
-		fmt.Printf("[Transfer] Cannot derive shard key: %v\n", err)
-		return
-	}
-	plain, err := decryptChunk(netKey, c.data)
-	if err != nil {
-		fmt.Printf("[Transfer] Cannot decrypt shard %d chunk %d: %v\n", c.shardIndex, c.chunkIndex, err)
 		return
 	}
 
@@ -506,7 +493,7 @@ func HandleBinaryShardChunk(data []byte) {
 	assemblyMu.Unlock()
 
 	asm.mu.Lock()
-	asm.chunks[c.chunkIndex] = plain
+	asm.chunks[c.chunkIndex] = c.data // store encrypted blob as-is
 	received := len(asm.chunks)
 	total := asm.totalChunks
 	asm.mu.Unlock()
@@ -531,27 +518,31 @@ func finalizeShard(asm *shardAssembly) {
 		return
 	}
 
-	shardPath := filepath.Join(shardDir, fmt.Sprintf("shard%d_%s.dat", asm.shardIndex, asm.fileHash))
-	sf, err := os.Create(shardPath)
-	if err != nil {
-		fmt.Printf("[Transfer] Cannot create shard file: %v\n", err)
-		return
-	}
+	// Collect chunks in order (they arrive encrypted; stored as-is).
+	orderedChunks := make([][]byte, asm.totalChunks)
 	for i := 0; i < asm.totalChunks; i++ {
 		chunk, ok := asm.chunks[i]
 		if !ok {
-			sf.Close()
 			fmt.Printf("[Transfer] Missing chunk %d for shard %d\n", i, asm.shardIndex)
 			return
 		}
-		if _, err := sf.Write(chunk); err != nil {
-			sf.Close()
-			fmt.Printf("[Transfer] Write failed at chunk %d: %v\n", i, err)
-			return
-		}
+		orderedChunks[i] = chunk
 	}
-	sf.Close()
+
+	shardPath := filepath.Join(shardDir, fmt.Sprintf("shard%d_%s.dat", asm.shardIndex, asm.fileHash))
+	if err := writeEncryptedShardFile(shardPath, orderedChunks); err != nil {
+		fmt.Printf("[Transfer] Cannot write shard %d: %v\n", asm.shardIndex, err)
+		return
+	}
 	fmt.Printf("[Transfer] Shard %d assembled → %s\n", asm.shardIndex, shardPath)
+
+	// Notify the daemon that this node now holds this shard.
+	shardStoredCbMu.Lock()
+	cb := shardStoredCb
+	shardStoredCbMu.Unlock()
+	if cb != nil {
+		go cb(asm.fileHash, asm.shardIndex)
+	}
 
 	writeShardMeta(shardDir, ShardMeta{
 		FileName:        asm.fileName,
@@ -559,6 +550,7 @@ func finalizeShard(asm *shardAssembly) {
 		FileSize:        asm.fileSize,
 		TotalDataShards: asm.totalDataShards,
 		TotalShards:     asm.totalShards,
+		BlockSize:       encoding.ComputeBlockSize(asm.fileSize, asm.totalDataShards),
 	})
 
 	count := 0
@@ -584,11 +576,39 @@ func autoReconstruct(asm *shardAssembly) {
 	}
 	defer os.RemoveAll(outDir)
 
-	enc, err := encoding.NewEncoder(asm.totalDataShards, asm.totalShards-asm.totalDataShards, outDir, ShardsDir())
+	key, err := shardEncryptionKey()
+	if err != nil {
+		fmt.Printf("[Transfer] Reconstruct: cannot derive shard key: %v\n", err)
+		reconstructed.Delete(asm.fileHash) // allow retry when key is available
+		return
+	}
+
+	// Decrypt encrypted shard blobs into a temp plaintext dir for the RS decoder.
+	plainDir, err := os.MkdirTemp("", "mosaic-plain-*")
+	if err != nil {
+		fmt.Printf("[Transfer] Reconstruct: cannot create plaintext dir: %v\n", err)
+		reconstructed.Delete(asm.fileHash)
+		return
+	}
+	defer os.RemoveAll(plainDir)
+	decrypted, err := decryptShardsToDir(asm.fileHash, asm.totalShards, key, plainDir)
+	if err != nil || decrypted == 0 {
+		// Zero decrypted shards means wrong key — this node is not the file owner.
+		reconstructed.Delete(asm.fileHash)
+		return
+	}
+
+	enc, err := encoding.NewEncoder(asm.totalDataShards, asm.totalShards-asm.totalDataShards, outDir, plainDir)
 	if err != nil {
 		fmt.Printf("[Transfer] Reconstruct: encoder init failed: %v\n", err)
 		return
 	}
+	// Use stored block size if available; fall back to computing from file size.
+	blockSize := encoding.ComputeBlockSize(asm.fileSize, asm.totalDataShards)
+	if m := FindShardMetaByHash(asm.fileHash); m != nil && m.BlockSize > 0 {
+		blockSize = m.BlockSize
+	}
+	enc.SetBlockSize(blockSize)
 	fmt.Printf("[Transfer] Reconstructing %s…\n", asm.fileHash[:12])
 	if err := enc.DecodeShards(asm.fileHash, asm.fileSize); err != nil {
 		fmt.Printf("[Transfer] Reconstruct: decode failed: %v\n", err)
@@ -607,27 +627,55 @@ func autoReconstruct(asm *shardAssembly) {
 		return
 	}
 	fmt.Printf("[Transfer] File ready: %s\n", destPath)
+
+	// Unblock any FetchFileBytes call that is waiting for this file.
+	if v, ok := fileReadyChans.Load(asm.fileHash); ok {
+		ch := v.(chan struct{})
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
 }
 
 // ──────────────────────────────────────────────────────────
 // Download
 // ──────────────────────────────────────────────────────────
 
-// FetchFileBytes reconstructs the original file bytes from locally stored shards.
-func FetchFileBytes(filename string) ([]byte, error) {
-	shardsBase := ShardsDir()
-
-	entries, err := os.ReadDir(shardsBase)
-	if err != nil {
-		return nil, fmt.Errorf("shards not available yet (no shards directory)")
+// EnsureShardMeta writes a meta.json for the given file if one does not already
+// exist. Call this when you have file info from the network manifest but no
+// shards have been received yet, so that FetchFileBytes can proceed to request
+// missing shards from peers rather than bailing out immediately.
+func EnsureShardMeta(fileHash, fileName string, fileSize int) {
+	if FindShardMetaByHash(fileHash) != nil {
+		return
 	}
+	shardDir := filepath.Join(ShardsDir(), fileHash)
+	if err := os.MkdirAll(shardDir, 0755); err != nil {
+		return
+	}
+	writeShardMeta(shardDir, ShardMeta{
+		FileName:        fileName,
+		FileHash:        fileHash,
+		FileSize:        fileSize,
+		TotalDataShards: DataShards,
+		TotalShards:     TotalShards,
+		BlockSize:       encoding.ComputeBlockSize(fileSize, DataShards),
+	})
+}
 
-	var meta *ShardMeta
+// FindShardMeta scans the local shard directory for a file matching filename
+// and returns its ShardMeta, or nil if not found.
+func FindShardMeta(filename string) *ShardMeta {
+	entries, err := os.ReadDir(ShardsDir())
+	if err != nil {
+		return nil
+	}
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(shardsBase, e.Name(), "meta.json"))
+		data, err := os.ReadFile(filepath.Join(ShardsDir(), e.Name(), "meta.json"))
 		if err != nil {
 			continue
 		}
@@ -636,20 +684,150 @@ func FetchFileBytes(filename string) ([]byte, error) {
 			continue
 		}
 		if m.FileName == filename {
-			meta = &m
-			break
+			return &m
 		}
 	}
+	return nil
+}
+
+// FindShardMetaByHash returns the ShardMeta for a given content hash, or nil.
+func FindShardMetaByHash(contentHash string) *ShardMeta {
+	data, err := os.ReadFile(filepath.Join(ShardsDir(), contentHash, "meta.json"))
+	if err != nil {
+		return nil
+	}
+	var m ShardMeta
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil
+	}
+	return &m
+}
+
+// missingDataShards returns the shard indices (0..totalDataShards-1) that are
+// not yet present on disk for the given file hash.
+func missingDataShards(fileHash string, totalDataShards int) []int {
+	shardDir := filepath.Join(ShardsDir(), fileHash)
+	var missing []int
+	for i := 0; i < totalDataShards; i++ {
+		p := filepath.Join(shardDir, fmt.Sprintf("shard%d_%s.dat", i, fileHash))
+		if _, err := os.Stat(p); err != nil {
+			missing = append(missing, i)
+		}
+	}
+	return missing
+}
+
+// StoreShardData writes raw shard bytes (received via ShardResponse) to the
+// local shard directory and triggers reconstruction if enough data shards are
+// now present. fileName, fileSize, totalDataShards, and totalShards must come
+// from the network manifest entry for this file.
+func StoreShardData(fileHash, fileName string, fileSize, shardIndex, totalDataShards, totalShards int, data []byte) {
+	shardDir := filepath.Join(ShardsDir(), fileHash)
+	if err := os.MkdirAll(shardDir, 0755); err != nil {
+		fmt.Printf("[Transfer] StoreShardData: cannot create shard dir: %v\n", err)
+		return
+	}
+
+	shardPath := filepath.Join(shardDir, fmt.Sprintf("shard%d_%s.dat", shardIndex, fileHash))
+	if err := os.WriteFile(shardPath, data, 0644); err != nil {
+		fmt.Printf("[Transfer] StoreShardData: cannot write shard %d: %v\n", shardIndex, err)
+		return
+	}
+	fmt.Printf("[Transfer] Stored received shard %d for %s\n", shardIndex, fileHash[:12])
+
+	// Preserve existing block size if we already have meta; otherwise compute it.
+	bs := encoding.ComputeBlockSize(fileSize, totalDataShards)
+	if existing := FindShardMetaByHash(fileHash); existing != nil && existing.BlockSize > 0 {
+		bs = existing.BlockSize
+	}
+	writeShardMeta(shardDir, ShardMeta{
+		FileName:        fileName,
+		FileHash:        fileHash,
+		FileSize:        fileSize,
+		TotalDataShards: totalDataShards,
+		TotalShards:     totalShards,
+		BlockSize:       bs,
+	})
+
+	// Notify manifest that we now hold this shard.
+	shardStoredCbMu.Lock()
+	cb := shardStoredCb
+	shardStoredCbMu.Unlock()
+	if cb != nil {
+		go cb(fileHash, shardIndex)
+	}
+
+	// Trigger reconstruction if we now have enough data shards.
+	count := totalDataShards - len(missingDataShards(fileHash, totalDataShards))
+	if count >= totalDataShards {
+		asm := &shardAssembly{
+			fileName:        fileName,
+			fileHash:        fileHash,
+			fileSize:        fileSize,
+			totalDataShards: totalDataShards,
+			totalShards:     totalShards,
+		}
+		if _, already := reconstructed.LoadOrStore(fileHash, true); !already {
+			go autoReconstruct(asm)
+		}
+	}
+}
+
+// FetchFileBytes reconstructs a file from locally stored shards. If shards
+// are missing and a P2P client + shard-holder lookup are provided, it requests
+// the missing shards from peers and waits up to 60 s for reconstruction.
+func FetchFileBytes(filename string, client *p2p.Client, getHolders func(contentHash string, shardIndex int) []string) ([]byte, error) {
+	meta := FindShardMeta(filename)
 	if meta == nil {
 		return nil, fmt.Errorf("shards for %q not found — file may not have been received yet", filename)
 	}
 
-	shardDir := filepath.Join(shardsBase, meta.FileHash)
-	for i := 0; i < meta.TotalDataShards; i++ {
-		p := filepath.Join(shardDir, fmt.Sprintf("shard%d_%s.dat", i, meta.FileHash))
-		if _, err := os.Stat(p); err != nil {
-			return nil, fmt.Errorf("shard %d missing — cannot reconstruct %s", i, filename)
+	missing := missingDataShards(meta.FileHash, meta.TotalDataShards)
+
+	if len(missing) > 0 && client != nil && getHolders != nil {
+		sign := api.NewSignature(client.GetID())
+		for _, idx := range missing {
+			holders := getHolders(meta.FileHash, idx)
+			if len(holders) == 0 {
+				fmt.Printf("[Transfer] No known holders for shard %d of %s\n", idx, filename)
+				continue
+			}
+			fmt.Printf("[Transfer] Requesting shard %d of %s from %d peer(s)\n", idx, filename, len(holders))
+			msg := api.NewShardRequestMessage(sign, api.ShardRequestData{
+				FileHash:   meta.FileHash,
+				ShardIndex: idx,
+			})
+			_ = client.SendToAllPeers(msg)
 		}
+
+		// Wait for autoReconstruct to signal that the file is ready.
+		ch := make(chan struct{}, 1)
+		fileReadyChans.Store(meta.FileHash, ch)
+		defer fileReadyChans.Delete(meta.FileHash)
+
+		select {
+		case <-ch:
+			// File written to ~/Mosaic/ by autoReconstruct — read it back.
+			destPath := filepath.Join(shared.MosaicDir(), filename)
+			return os.ReadFile(destPath)
+		case <-time.After(60 * time.Second):
+			return nil, fmt.Errorf("timed out waiting for shards of %q from peers", filename)
+		}
+	}
+
+	// All shards present locally — decrypt to a temp dir then reconstruct.
+	key, err := shardEncryptionKey()
+	if err != nil {
+		return nil, fmt.Errorf("cannot derive shard key: %w", err)
+	}
+
+	plainDir, err := os.MkdirTemp("", "mosaic-plain-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(plainDir)
+	if _, err := decryptShardsToDir(meta.FileHash, meta.TotalShards, key, plainDir); err != nil {
+		return nil, fmt.Errorf("decrypt shards: %w", err)
 	}
 
 	outDir, err := os.MkdirTemp("", "mosaic-fetch-*")
@@ -658,10 +836,16 @@ func FetchFileBytes(filename string) ([]byte, error) {
 	}
 	defer os.RemoveAll(outDir)
 
-	enc, err := encoding.NewEncoder(meta.TotalDataShards, meta.TotalShards-meta.TotalDataShards, outDir, shardsBase)
+	enc, err := encoding.NewEncoder(meta.TotalDataShards, meta.TotalShards-meta.TotalDataShards, outDir, plainDir)
 	if err != nil {
 		return nil, fmt.Errorf("encoder init: %w", err)
 	}
+	// Use stored block size if available; fall back to computing from file size.
+	blockSize := encoding.ComputeBlockSize(meta.FileSize, meta.TotalDataShards)
+	if meta.BlockSize > 0 {
+		blockSize = meta.BlockSize
+	}
+	enc.SetBlockSize(blockSize)
 	if err := enc.DecodeShards(meta.FileHash, meta.FileSize); err != nil {
 		return nil, fmt.Errorf("decode failed: %w", err)
 	}
@@ -671,6 +855,118 @@ func FetchFileBytes(filename string) ([]byte, error) {
 		return nil, fmt.Errorf("reconstructed file not found in %s", outDir)
 	}
 	return os.ReadFile(matches[0])
+}
+
+// ──────────────────────────────────────────────────────────
+// Shard redistribution
+// ──────────────────────────────────────────────────────────
+
+// sendPlaintextShardToPeer reads a plaintext shard file from the RS encoder's
+// temp directory, encrypts each chunk, and sends it as binary frames to one peer.
+// Used during upload so peer-bound shards are never written to the uploader's disk.
+func sendPlaintextShardToPeer(srcPath string, shardIndex int, fileHash, fileName string, fileSize int, key [32]byte, peerID string, client *p2p.Client) error {
+	info, err := os.Stat(srcPath)
+	if err != nil {
+		return fmt.Errorf("stat shard %d: %w", shardIndex, err)
+	}
+	totalChunks := int((info.Size() + chunkSize - 1) / chunkSize)
+
+	sf, err := os.Open(srcPath)
+	if err != nil {
+		return fmt.Errorf("open shard %d: %w", shardIndex, err)
+	}
+	defer sf.Close()
+
+	buf := make([]byte, chunkSize)
+	for chunkIndex := 0; ; chunkIndex++ {
+		n, err := io.ReadFull(sf, buf)
+		if n > 0 {
+			encrypted, eerr := encryptChunk(key, buf[:n])
+			if eerr != nil {
+				return fmt.Errorf("encrypt shard %d chunk %d: %w", shardIndex, chunkIndex, eerr)
+			}
+			frame, ferr := encodeBinaryShardChunk(binaryShardChunk{
+				fileHash:        fileHash,
+				fileName:        fileName,
+				fileSize:        fileSize,
+				shardIndex:      shardIndex,
+				chunkIndex:      chunkIndex,
+				totalChunks:     totalChunks,
+				totalDataShards: DataShards,
+				totalShards:     TotalShards,
+				data:            encrypted,
+			})
+			if ferr != nil {
+				return fmt.Errorf("encode frame shard %d chunk %d: %w", shardIndex, chunkIndex, ferr)
+			}
+			<-sendLimiter
+			if werr := client.SendRawToPeer(peerID, frame); werr != nil {
+				return fmt.Errorf("send shard %d chunk %d: %w", shardIndex, chunkIndex, werr)
+			}
+		}
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			fmt.Printf("[Transfer] Shard %d sent to %s (%d chunks)\n", shardIndex, peerID[:8], chunkIndex+1)
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read shard %d: %w", shardIndex, err)
+		}
+	}
+}
+
+// StreamShardToPeer reads a locally stored encrypted shard and forwards its
+// chunks to a specific peer using the binary wire protocol. The chunks are
+// sent as-is — no decryption or re-encryption needed (blind-courier model).
+func StreamShardToPeer(fileHash string, meta *ShardMeta, shardIndex int, peerID string, client *p2p.Client) {
+	shardPath := filepath.Join(ShardsDir(), fileHash, fmt.Sprintf("shard%d_%s.dat", shardIndex, fileHash))
+
+	f, err := os.Open(shardPath)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	var hdr [4]byte
+	if _, err := io.ReadFull(f, hdr[:]); err != nil {
+		return
+	}
+	totalChunks := int(binary.LittleEndian.Uint32(hdr[:]))
+
+	for chunkIdx := 0; chunkIdx < totalChunks; chunkIdx++ {
+		var lenBuf [4]byte
+		if _, err := io.ReadFull(f, lenBuf[:]); err != nil {
+			fmt.Printf("[Transfer] StreamShardToPeer: read chunk %d len failed: %v\n", chunkIdx, err)
+			return
+		}
+		n := int(binary.LittleEndian.Uint32(lenBuf[:]))
+		encryptedChunk := make([]byte, n)
+		if _, err := io.ReadFull(f, encryptedChunk); err != nil {
+			fmt.Printf("[Transfer] StreamShardToPeer: read chunk %d data failed: %v\n", chunkIdx, err)
+			return
+		}
+
+		frame, err := encodeBinaryShardChunk(binaryShardChunk{
+			fileHash:        fileHash,
+			fileName:        meta.FileName,
+			fileSize:        meta.FileSize,
+			shardIndex:      shardIndex,
+			chunkIndex:      chunkIdx,
+			totalChunks:     totalChunks,
+			totalDataShards: meta.TotalDataShards,
+			totalShards:     meta.TotalShards,
+			data:            encryptedChunk,
+		})
+		if err != nil {
+			return
+		}
+
+		<-sendLimiter
+		if err := client.SendRawToPeer(peerID, frame); err != nil {
+			fmt.Printf("[Transfer] StreamShardToPeer: shard %d chunk %d → %s failed: %v\n", shardIndex, chunkIdx, peerID[:8], err)
+			return
+		}
+	}
+	fmt.Printf("[Transfer] Redistributed shard %d of %s → peer %s\n", shardIndex, fileHash[:12], peerID[:8])
 }
 
 // ──────────────────────────────────────────────────────────
@@ -700,6 +996,136 @@ func HandleShardRequest(msg *api.Message, client *p2p.Client) {
 	_ = client.SendToAllPeers(api.NewShardResponseMessage(sign, api.ShardResponseData{
 		FileHash: d.FileHash, ShardIndex: d.ShardIndex, Found: true, Data: data,
 	}))
+}
+
+// ──────────────────────────────────────────────────────────
+// Encrypted shard file I/O
+//
+// On-disk format (all integers little-endian):
+//   [4 bytes] totalChunks
+//   for each chunk:
+//     [4 bytes] chunk length
+//     [N bytes] AES-GCM encrypted chunk data
+// ──────────────────────────────────────────────────────────
+
+// writeEncryptedShardFile writes pre-encrypted chunks to a shard file.
+func writeEncryptedShardFile(path string, chunks [][]byte) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	var hdr [4]byte
+	binary.LittleEndian.PutUint32(hdr[:], uint32(len(chunks)))
+	if _, err := f.Write(hdr[:]); err != nil {
+		return err
+	}
+	for _, chunk := range chunks {
+		var lenBuf [4]byte
+		binary.LittleEndian.PutUint32(lenBuf[:], uint32(len(chunk)))
+		if _, err := f.Write(lenBuf[:]); err != nil {
+			return err
+		}
+		if _, err := f.Write(chunk); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// decryptShardToPlaintext reads a length-prefixed encrypted shard file and
+// returns the concatenated plaintext.
+func decryptShardToPlaintext(path string, key [32]byte) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var hdr [4]byte
+	if _, err := io.ReadFull(f, hdr[:]); err != nil {
+		return nil, fmt.Errorf("read totalChunks: %w", err)
+	}
+	totalChunks := int(binary.LittleEndian.Uint32(hdr[:]))
+
+	var plain []byte
+	for i := 0; i < totalChunks; i++ {
+		var lenBuf [4]byte
+		if _, err := io.ReadFull(f, lenBuf[:]); err != nil {
+			return nil, fmt.Errorf("read chunk %d len: %w", i, err)
+		}
+		n := int(binary.LittleEndian.Uint32(lenBuf[:]))
+		encrypted := make([]byte, n)
+		if _, err := io.ReadFull(f, encrypted); err != nil {
+			return nil, fmt.Errorf("read chunk %d data: %w", i, err)
+		}
+		dec, err := decryptChunk(key, encrypted)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt chunk %d: %w", i, err)
+		}
+		plain = append(plain, dec...)
+	}
+	return plain, nil
+}
+
+// encryptShardFileToChunks reads a plaintext shard file and returns AES-GCM
+// encrypted slices, one per chunkSize window.
+func encryptShardFileToChunks(path string, key [32]byte) ([][]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var chunks [][]byte
+	buf := make([]byte, chunkSize)
+	for {
+		n, err := io.ReadFull(f, buf)
+		if n > 0 {
+			enc, eerr := encryptChunk(key, buf[:n])
+			if eerr != nil {
+				return nil, eerr
+			}
+			chunks = append(chunks, enc)
+		}
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	return chunks, nil
+}
+
+// decryptShardsToDir decrypts all locally stored shards for fileHash into
+// destDir/fileHash/ as flat plaintext files ready for the RS decoder.
+// Missing shards are skipped — RS handles them as erasures.
+// Returns the number of shards successfully decrypted.
+func decryptShardsToDir(fileHash string, totalShards int, key [32]byte, destDir string) (int, error) {
+	shardDir := filepath.Join(ShardsDir(), fileHash)
+	outDir := filepath.Join(destDir, fileHash)
+	if err := os.MkdirAll(outDir, 0755); err != nil {
+		return 0, err
+	}
+	decrypted := 0
+	for i := 0; i < totalShards; i++ {
+		src := filepath.Join(shardDir, fmt.Sprintf("shard%d_%s.dat", i, fileHash))
+		if _, err := os.Stat(src); err != nil {
+			continue
+		}
+		plain, err := decryptShardToPlaintext(src, key)
+		if err != nil {
+			continue // wrong key or corrupt — skip silently
+		}
+		dst := filepath.Join(outDir, fmt.Sprintf("shard%d_%s.dat", i, fileHash))
+		if err := os.WriteFile(dst, plain, 0644); err != nil {
+			return decrypted, err
+		}
+		decrypted++
+	}
+	return decrypted, nil
 }
 
 // ──────────────────────────────────────────────────────────

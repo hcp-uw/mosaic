@@ -59,16 +59,22 @@ type JoinResponse struct {
 	Details string `json:"details"`
 }
 
-type NodeStatusRequest struct {
-	ID string `json:"id"`
+type NodeStatusRequest struct{}
+
+// SameKeyNode describes a peer that claims the same account identity and whether
+// the claim was verified via ECDSA challenge-response.
+type SameKeyNode struct {
+	PeerID        string `json:"peerID"`
+	Authenticated bool   `json:"authenticated"`
 }
 
 type NodeStatusResponse struct {
-	Success      bool   `json:"success"`
-	Details      string `json:"details"`
-	Username     string `json:"username"`
-	ID           string `json:"id"`
-	StorageShare int    `json:"storageShare"`
+	Success      bool          `json:"success"`
+	Details      string        `json:"details"`
+	Username     string        `json:"username"`
+	ID           string        `json:"id"`
+	StorageShare int           `json:"storageShare"`
+	SameKeyNodes []SameKeyNode `json:"sameKeyNodes"`
 }
 
 type LoginStatusRequest struct{}

@@ -24,10 +24,11 @@ type Client struct {
 	mutex            sync.RWMutex
 	ctx              context.Context
 	cancel           context.CancelFunc
-	stateCallbacks   []func(ClientState)
-	peerCallbacks    []func(*PeerInfo)
-	errorCallbacks   []func(error)
-	messageCallbacks []func([]byte)
+	stateCallbacks    []func(ClientState)
+	peerCallbacks     []func(*PeerInfo)
+	peerLeftCallbacks []func(string) // called with peer ID when a peer is evicted
+	errorCallbacks    []func(error)
+	messageCallbacks  []func([]byte)
 
 	// STUN reconnect state (leader only)
 	stunFailCount    int
@@ -84,10 +85,11 @@ func NewClient(config *ClientConfig) (*Client, error) {
 		peers:            make(map[string]*PeerInfo),
 		ctx:              ctx,
 		cancel:           cancel,
-		stateCallbacks:   make([]func(ClientState), 0),
-		peerCallbacks:    make([]func(*PeerInfo), 0),
-		errorCallbacks:   make([]func(error), 0),
-		messageCallbacks: make([]func([]byte), 0),
+		stateCallbacks:    make([]func(ClientState), 0),
+		peerCallbacks:     make([]func(*PeerInfo), 0),
+		peerLeftCallbacks: make([]func(string), 0),
+		errorCallbacks:    make([]func(error), 0),
+		messageCallbacks:  make([]func([]byte), 0),
 	}, nil
 }
 

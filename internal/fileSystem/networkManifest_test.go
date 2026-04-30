@@ -282,6 +282,108 @@ func TestBlockHash_SignatureExcluded(t *testing.T) {
 }
 
 // ──────────────────────────────────────────────────────────
+// ShardMap — RecordShardHolder / GetShardHolders / merge
+// ──────────────────────────────────────────────────────────
+
+func emptyManifest() NetworkManifest {
+	return NetworkManifest{Version: 2, Chains: []UserChain{}, ShardMap: make(map[string]*ShardLocations)}
+}
+
+func TestRecordShardHolder_Basic(t *testing.T) {
+	m := emptyManifest()
+	changed := RecordShardHolder(&m, "abc123", 0, "node-A")
+	if !changed {
+		t.Fatal("expected changed=true on first record")
+	}
+	holders := GetShardHolders(m, "abc123", 0)
+	if len(holders) != 1 || holders[0] != "node-A" {
+		t.Fatalf("expected [node-A], got %v", holders)
+	}
+}
+
+func TestRecordShardHolder_Idempotent(t *testing.T) {
+	m := emptyManifest()
+	RecordShardHolder(&m, "abc123", 0, "node-A")
+	changed := RecordShardHolder(&m, "abc123", 0, "node-A") // same again
+	if changed {
+		t.Fatal("expected changed=false when holder already recorded")
+	}
+	if len(GetShardHolders(m, "abc123", 0)) != 1 {
+		t.Fatal("duplicate entry added despite idempotent contract")
+	}
+}
+
+func TestRecordShardHolder_MultipleHolders(t *testing.T) {
+	m := emptyManifest()
+	RecordShardHolder(&m, "abc123", 0, "node-A")
+	RecordShardHolder(&m, "abc123", 0, "node-B")
+	RecordShardHolder(&m, "abc123", 1, "node-C")
+
+	if len(GetShardHolders(m, "abc123", 0)) != 2 {
+		t.Fatal("expected 2 holders for shard 0")
+	}
+	if len(GetShardHolders(m, "abc123", 1)) != 1 {
+		t.Fatal("expected 1 holder for shard 1")
+	}
+}
+
+func TestGetShardHolders_Unknown(t *testing.T) {
+	m := emptyManifest()
+	if GetShardHolders(m, "nope", 0) != nil {
+		t.Fatal("expected nil for unknown file hash")
+	}
+	RecordShardHolder(&m, "abc123", 0, "node-A")
+	if GetShardHolders(m, "abc123", 99) != nil {
+		t.Fatal("expected nil for unknown shard index")
+	}
+}
+
+func TestMerge_ShardMapUnion(t *testing.T) {
+	local := emptyManifest()
+	RecordShardHolder(&local, "abc123", 0, "node-A")
+
+	remote := emptyManifest()
+	RecordShardHolder(&remote, "abc123", 0, "node-B") // new holder, same shard
+	RecordShardHolder(&remote, "abc123", 1, "node-C") // new shard entirely
+
+	merged, changed := MergeNetworkManifest(local, remote)
+	if !changed {
+		t.Fatal("expected changed=true when remote has new holders")
+	}
+	if len(GetShardHolders(merged, "abc123", 0)) != 2 {
+		t.Fatal("expected node-A and node-B for shard 0")
+	}
+	if len(GetShardHolders(merged, "abc123", 1)) != 1 {
+		t.Fatal("expected node-C for shard 1")
+	}
+}
+
+func TestMerge_ShardMapNewFile(t *testing.T) {
+	local := emptyManifest()
+	remote := emptyManifest()
+	RecordShardHolder(&remote, "deadbeef", 0, "node-X")
+
+	merged, changed := MergeNetworkManifest(local, remote)
+	if !changed {
+		t.Fatal("expected changed=true for entirely new file in shard map")
+	}
+	if len(GetShardHolders(merged, "deadbeef", 0)) != 1 {
+		t.Fatal("expected node-X as holder after merge")
+	}
+}
+
+func TestMerge_ShardMapIdempotent(t *testing.T) {
+	m := emptyManifest()
+	RecordShardHolder(&m, "abc123", 0, "node-A")
+
+	// Merging an identical shard map should not report changed.
+	_, changed := MergeNetworkManifest(m, m)
+	if changed {
+		t.Fatal("expected changed=false when shard maps are identical")
+	}
+}
+
+// ──────────────────────────────────────────────────────────
 // AppendBlockAdd / Remove / Rename manifest helpers
 // ──────────────────────────────────────────────────────────
 
@@ -329,5 +431,92 @@ func TestFullLifecycle(t *testing.T) {
 	files := ChainToFiles(m.Chains[idx])
 	if len(files) != 1 || files[0].Name != "renamed.txt" {
 		t.Fatalf("expected [renamed.txt], got %v", files)
+	}
+}
+
+// ──────────────────────────────────────────────────────────
+// RemoveShardHolder
+// ──────────────────────────────────────────────────────────
+
+func TestRemoveShardHolder_RemovesTargetNode(t *testing.T) {
+	m := emptyManifest()
+	RecordShardHolder(&m, "file1", 0, "node-A")
+	RecordShardHolder(&m, "file1", 0, "node-B")
+	RecordShardHolder(&m, "file1", 1, "node-A")
+
+	changed := RemoveShardHolder(&m, "node-A")
+	if !changed {
+		t.Fatal("expected changed=true")
+	}
+
+	// node-A should be gone from both shards.
+	for _, shardIdx := range []int{0, 1} {
+		for _, id := range GetShardHolders(m, "file1", shardIdx) {
+			if id == "node-A" {
+				t.Errorf("node-A still present in shard %d after removal", shardIdx)
+			}
+		}
+	}
+}
+
+func TestRemoveShardHolder_PreservesOtherNodes(t *testing.T) {
+	m := emptyManifest()
+	RecordShardHolder(&m, "file1", 0, "node-A")
+	RecordShardHolder(&m, "file1", 0, "node-B")
+	RecordShardHolder(&m, "file1", 0, "node-C")
+
+	RemoveShardHolder(&m, "node-A")
+
+	holders := GetShardHolders(m, "file1", 0)
+	for _, id := range holders {
+		if id == "node-A" {
+			t.Error("node-A should have been removed")
+		}
+	}
+	found := map[string]bool{}
+	for _, id := range holders {
+		found[id] = true
+	}
+	if !found["node-B"] || !found["node-C"] {
+		t.Errorf("node-B and node-C should still be present; got %v", holders)
+	}
+}
+
+func TestRemoveShardHolder_ReturnsFalseWhenNotPresent(t *testing.T) {
+	m := emptyManifest()
+	RecordShardHolder(&m, "file1", 0, "node-A")
+
+	changed := RemoveShardHolder(&m, "node-Z")
+	if changed {
+		t.Fatal("expected changed=false when node not present")
+	}
+}
+
+func TestRemoveShardHolder_AcrossMultipleFiles(t *testing.T) {
+	m := emptyManifest()
+	RecordShardHolder(&m, "file1", 0, "node-X")
+	RecordShardHolder(&m, "file2", 3, "node-X")
+	RecordShardHolder(&m, "file2", 7, "node-X")
+	RecordShardHolder(&m, "file2", 7, "node-Y")
+
+	RemoveShardHolder(&m, "node-X")
+
+	if len(GetShardHolders(m, "file1", 0)) != 0 {
+		t.Error("file1 shard 0 should have no holders")
+	}
+	if len(GetShardHolders(m, "file2", 3)) != 0 {
+		t.Error("file2 shard 3 should have no holders")
+	}
+	holders := GetShardHolders(m, "file2", 7)
+	if len(holders) != 1 || holders[0] != "node-Y" {
+		t.Errorf("file2 shard 7 should only have node-Y; got %v", holders)
+	}
+}
+
+func TestRemoveShardHolder_EmptyMap(t *testing.T) {
+	m := emptyManifest()
+	changed := RemoveShardHolder(&m, "node-A")
+	if changed {
+		t.Fatal("expected changed=false on empty ShardMap")
 	}
 }

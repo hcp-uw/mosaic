@@ -37,6 +37,11 @@ const (
 	ShardRequest    MessageType = "shard_request"
 	ShardResponse   MessageType = "shard_response"
 	ShardChunk      MessageType = "shard_chunk"
+
+	// Identity messages — used by mos status node to detect and verify same-account peers.
+	IdentityAnnounce  MessageType = "identity_announce"
+	IdentityChallenge MessageType = "identity_challenge"
+	IdentityResponse  MessageType = "identity_response"
 )
 
 // Message represents the base message structure
@@ -573,6 +578,89 @@ func (m *Message) GetShardChunkData() (*ShardChunkData, error) {
 	var d ShardChunkData
 	err = json.Unmarshal(b, &d)
 	return &d, err
+}
+
+// IdentityAnnounceData is broadcast to all peers on connect.
+// AccountPubKey is the hex PKIX DER ECDSA public key that identifies this account.
+type IdentityAnnounceData struct {
+	AccountPubKey string `json:"accountPubKey"`
+}
+
+// IdentityChallengeData is broadcast by a node running mos status node.
+// Nonce is 32 random bytes encoded as hex; all peers respond so the requester
+// can find which ones share the same account key.
+type IdentityChallengeData struct {
+	Nonce string `json:"nonce"`
+}
+
+// IdentityResponseData is the signed reply to an IdentityChallenge.
+// Signature is hex ECDSA-ASN1 of sha256(nonceBytes) under the responder's private key.
+type IdentityResponseData struct {
+	Nonce     string `json:"nonce"`
+	Signature string `json:"signature"`
+}
+
+func NewIdentityAnnounceMessage(accountPubKey string) *Message {
+	return &Message{
+		Sign:      NewSignature(accountPubKey),
+		Type:      IdentityAnnounce,
+		Timestamp: time.Now(),
+		Data:      IdentityAnnounceData{AccountPubKey: accountPubKey},
+	}
+}
+
+func NewIdentityChallengeMessage(senderPubKey, nonce string) *Message {
+	return &Message{
+		Sign:      NewSignature(senderPubKey),
+		Type:      IdentityChallenge,
+		Timestamp: time.Now(),
+		Data:      IdentityChallengeData{Nonce: nonce},
+	}
+}
+
+func NewIdentityResponseMessage(responderPubKey, nonce, signature string) *Message {
+	return &Message{
+		Sign:      NewSignature(responderPubKey),
+		Type:      IdentityResponse,
+		Timestamp: time.Now(),
+		Data:      IdentityResponseData{Nonce: nonce, Signature: signature},
+	}
+}
+
+func (m *Message) GetIdentityAnnounceData() (*IdentityAnnounceData, error) {
+	if m.Type != IdentityAnnounce {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d IdentityAnnounceData
+	return &d, json.Unmarshal(b, &d)
+}
+
+func (m *Message) GetIdentityChallengeData() (*IdentityChallengeData, error) {
+	if m.Type != IdentityChallenge {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d IdentityChallengeData
+	return &d, json.Unmarshal(b, &d)
+}
+
+func (m *Message) GetIdentityResponseData() (*IdentityResponseData, error) {
+	if m.Type != IdentityResponse {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d IdentityResponseData
+	return &d, json.Unmarshal(b, &d)
 }
 
 // Error types
