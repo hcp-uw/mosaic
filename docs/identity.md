@@ -25,6 +25,63 @@ The same login key on any machine produces the same ECDSA keypair. This means:
 
 ---
 
+## Session Encryption
+
+All peer-to-peer UDP traffic is encrypted using an **ephemeral X25519 Diffie-Hellman** key exchange that runs automatically when two peers connect. No long-lived keys touch the wire.
+
+### Handshake Flow
+
+```
+A connects to B (via STUN hole-punch or TURN relay)
+    │
+    ├─ A: generate ephemeral X25519 keypair (privA, pubA)
+    │    send HandshakeInit{senderID=A, pubA}  →→→  B
+    │
+    └─ B: generate ephemeral X25519 keypair (privB, pubB)
+         send HandshakeInit{senderID=B, pubB}  →→→  A
+
+Both sides compute independently:
+    sharedSecret = X25519(myEphemeralPriv, theirEphemeralPub)
+    sessionKey   = HKDF-SHA256(sharedSecret, info="mosaic-session", 32 bytes)
+
+HandshakeDone = true  →  all subsequent messages are encrypted
+```
+
+`HandshakeInit` messages are sent in plaintext (the session key can only exist after the exchange completes). Ephemeral public keys are not secret — an observer learns nothing useful from them.
+
+### Encrypted Frame Format
+
+After the handshake, every message is wrapped in **AES-256-GCM**:
+
+```
+[0x02] [12-byte random nonce] [AES-256-GCM ciphertext of original message]
+```
+
+The first byte acts as a routing tag:
+
+| First byte | Meaning |
+|---|---|
+| `0x7B` (`{`) | Plaintext JSON — only `HandshakeInit` during the initial exchange |
+| `0x02` | Session-encrypted frame — decrypt before routing |
+| `0x01` | Binary shard frame (only appears inside the decrypted envelope after `0x02` unwrap) |
+
+Overhead: 1 (magic) + 12 (nonce) + 16 (GCM tag) = **29 bytes per message** — less than 0.1% of a 32 KB shard chunk.
+
+### TURN Relay
+
+When a direct UDP path cannot be established, traffic is routed through the TURN relay. The relay forwards raw UDP frames and only ever sees ciphertext — the session key is computed end-to-end between the two peers, and the relay operator cannot decrypt it.
+
+### Code Reference
+
+| File | Purpose |
+|---|---|
+| `internal/p2p/peer.go` | `sealForPeer`, `openFromPeer` — AES-256-GCM helpers; `PeerInfo.SessionKey`, `HandshakeDone` |
+| `internal/p2p/client.go` | `completeHandshake` — X25519 → HKDF derivation; `processPeerMessage` — 0x02 decryption |
+| `internal/api/messages.go` | `HandshakeInit` message type, `NewHandshakeInitMessage`, `GetHandshakeInitData` |
+| `internal/p2p/turn.go` | `handleTURNMessages` — passes `ts.peerAddr` so decryption lookup works over relay |
+
+---
+
 ## Identity Announcement
 
 When a node connects to a peer, it immediately broadcasts an **IdentityAnnounce** message containing its account public key (hex PKIX DER):
@@ -92,7 +149,7 @@ Every peer receives the challenge and responds with their own pubkey and signatu
 
 ### Wire Format
 
-All three identity messages are standard `api.Message` JSON envelopes sent over the existing peer UDP connections. No new transport is needed.
+All three identity messages are standard `api.Message` JSON envelopes. After the session handshake completes they are wrapped in AES-256-GCM (the `0x02` frame format described in [Session Encryption](#session-encryption)) before hitting the wire, so they are never readable in transit. No new transport is needed.
 
 | Message | `type` field | Key fields |
 |---|---|---|
@@ -144,8 +201,10 @@ Node scan complete.
 
 | File | Purpose |
 |---|---|
-| `internal/api/messages.go` | `IdentityAnnounce`, `IdentityChallenge`, `IdentityResponse` message types and constructors |
+| `internal/api/messages.go` | `IdentityAnnounce`, `IdentityChallenge`, `IdentityResponse`, `HandshakeInit` message types and constructors |
 | `internal/daemon/handlers/joinNetwork.go` | `announceIdentity`, `handleIdentityChallenge` — send/respond to identity messages |
 | `internal/daemon/handlers/p2pState.go` | `RegisterChallenge`, `DeliverChallengeResponse` — challenge channel lifecycle |
 | `internal/daemon/handlers/statusNode.go` | Full scan + verification logic |
 | `internal/fileSystem/userKey.go` | ECDSA keypair derivation from login key |
+| `internal/p2p/peer.go` | `sealForPeer`, `openFromPeer` — AES-256-GCM session encryption; `PeerInfo` session fields |
+| `internal/p2p/client.go` | `completeHandshake`, `processPeerMessage` — handshake completion and decryption |

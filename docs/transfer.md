@@ -117,14 +117,25 @@ If a shard is smaller than 32 KB (e.g. small files produce small shards), `total
 
 ### Key Derivation
 
-The shard encryption key is derived from the user's login key using **HKDF-SHA256**:
+At login time the daemon derives the shard encryption key from the login key and caches it on disk:
 
 ```
-loginKey  ──HKDF-SHA256──►  32-byte AES-256 shard key
-                info = "mosaic-shard-key"
+mos login <key>
+    │
+    ▼
+HKDF-SHA256(loginKey, info="mosaic-shard-key")  →  32-byte shard key
+    │
+    ▼
+written to  ~/.mosaic-shard.key  (0600, raw 32 bytes)
 ```
 
-Because the login key is derived from the user's password, every device the same user logs into derives the same shard key. Different users have different login keys and therefore different shard keys — they cannot decrypt each other's shards.
+At runtime, `shardEncryptionKey()` reads `~/.mosaic-shard.key` directly — no further key derivation is needed.
+
+At logout, `~/.mosaic-shard.key` is deleted alongside `~/.mosaic-user.key`.
+
+The raw login key is **never written to disk**. An attacker who obtains `~/.mosaic-shard.key` can decrypt shard data but cannot sign manifest blocks or impersonate the account (that requires `~/.mosaic-user.key`). The two files have different purposes and are kept separate.
+
+Because the login key is the same on every device the user logs into, every device derives the same shard key. Different users have different login keys and therefore different shard keys — they cannot decrypt each other's shards.
 
 ### Blind-Courier Model (Option A)
 

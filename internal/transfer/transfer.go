@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -104,24 +103,20 @@ func ShardsDir() string {
 // Shard encryption key
 // ──────────────────────────────────────────────────────────
 
-// shardEncryptionKey derives a 32-byte AES-256 key from the user's login key
-// using HKDF-SHA256. Same login key on every device → same derived shard key,
-// so all nodes in the network can encrypt and decrypt each other's shards.
+// shardEncryptionKey loads the 32-byte AES-256 shard key cached at login time.
+// The key is derived from the login key (HKDF-SHA256, info="mosaic-shard-key")
+// and written to ~/.mosaic-shard.key during login so the raw login key is never
+// stored on disk.
 func shardEncryptionKey() ([32]byte, error) {
 	var key [32]byte
-	data, err := os.ReadFile(shared.LoginKeyPath())
+	data, err := os.ReadFile(shared.ShardKeyPath())
 	if err != nil {
-		return key, fmt.Errorf("not logged in — run 'mos login account <username> <key>'")
+		return key, fmt.Errorf("not logged in — run 'mos login <key>'")
 	}
-	loginKey := strings.TrimSpace(string(data))
-	if loginKey == "" {
-		return key, fmt.Errorf("login key is empty")
+	if len(data) != 32 {
+		return key, fmt.Errorf("shard key file is corrupt (expected 32 bytes, got %d)", len(data))
 	}
-	derived, err := hkdf.Key(sha256.New, []byte(loginKey), nil, "mosaic-shard-key", 32)
-	if err != nil {
-		return key, fmt.Errorf("key derivation failed: %w", err)
-	}
-	copy(key[:], derived)
+	copy(key[:], data)
 	return key, nil
 }
 

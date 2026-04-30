@@ -1,11 +1,20 @@
 package p2p
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/ecdh"
+	"crypto/rand"
 	"fmt"
+	"io"
 	"net"
 	"time"
 
 	"github.com/hcp-uw/mosaic/internal/api"
+)
+
+const (
+	sessionEncryptedMagic = 0x02 // first byte of an AES-256-GCM wrapped frame
 )
 
 // PeerInfo holds information about the assigned peer
@@ -15,7 +24,75 @@ type PeerInfo struct {
 	ID           string
 	IsLeader     bool      // true when this peer is the network leader
 	LastPeerPong time.Time
-	ViaTURN      bool      // true when Conn routes through the TURN relay
+	ViaTURN      bool // true when Conn routes through the TURN relay
+
+	// Session encryption — set after X25519 handshake completes.
+	SessionKey      [32]byte
+	HandshakeDone   bool
+	EphemeralPrivKey []byte // our ephemeral X25519 private key; cleared after handshake
+}
+
+// sealForPeer wraps data in AES-256-GCM using the peer's session key.
+// Format: [0x02][12-byte nonce][ciphertext+tag]
+func (peer *PeerInfo) sealForPeer(plaintext []byte) ([]byte, error) {
+	block, err := aes.NewCipher(peer.SessionKey[:])
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, gcm.NonceSize()) // 12 bytes
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, err
+	}
+	ct := gcm.Seal(nil, nonce, plaintext, nil)
+	out := make([]byte, 1+len(nonce)+len(ct))
+	out[0] = sessionEncryptedMagic
+	copy(out[1:], nonce)
+	copy(out[1+len(nonce):], ct)
+	return out, nil
+}
+
+// openFromPeer decrypts a session-encrypted frame. Returns the inner plaintext.
+func (peer *PeerInfo) openFromPeer(frame []byte) ([]byte, error) {
+	if len(frame) < 1+12+16 {
+		return nil, fmt.Errorf("frame too short")
+	}
+	block, err := aes.NewCipher(peer.SessionKey[:])
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonce := frame[1 : 1+gcm.NonceSize()]
+	ct := frame[1+gcm.NonceSize():]
+	return gcm.Open(nil, nonce, ct, nil)
+}
+
+// writeToPeer serializes msg, encrypts it if the handshake is done, and sends it.
+func (c *Client) writeToPeer(peer *PeerInfo, msg *api.Message) error {
+	data, err := msg.Serialize()
+	if err != nil {
+		return err
+	}
+	return c.writeRawToPeer(peer, data)
+}
+
+// writeRawToPeer encrypts data (if handshake done) and writes it to the peer.
+func (c *Client) writeRawToPeer(peer *PeerInfo, data []byte) error {
+	if peer.HandshakeDone {
+		encrypted, err := peer.sealForPeer(data)
+		if err != nil {
+			return fmt.Errorf("session encrypt failed: %w", err)
+		}
+		data = encrypted
+	}
+	_, err := peer.Conn.WriteTo(data, peer.Address)
+	return err
 }
 
 // SendToPeer sends data to the connected peer
@@ -28,23 +105,13 @@ func (c *Client) SendToPeer(peerId string, message *api.Message) error {
 	if peerInfo == nil {
 		return fmt.Errorf("no peer information available")
 	}
-
 	if peerInfo.Conn == nil {
 		return fmt.Errorf("not connected to peer")
 	}
-
-	// Block sending only in truly disconnected state
 	if state == StateDisconnected {
 		return fmt.Errorf("client disconnected")
 	}
-
-	data, err := message.Serialize()
-	if err != nil {
-		return err
-	}
-
-	_, err = peerInfo.Conn.WriteTo(data, peerInfo.Address)
-	return err
+	return c.writeToPeer(peerInfo, message)
 }
 
 func (c *Client) SendToAllPeers(message *api.Message) error {
@@ -56,28 +123,20 @@ func (c *Client) SendToAllPeers(message *api.Message) error {
 	if len(allPeers) == 0 {
 		return fmt.Errorf("no peer information available")
 	}
-
-	// Block sending only in truly disconnected state
 	if state == StateDisconnected {
 		return fmt.Errorf("client disconnected")
 	}
 
-	data, err := message.Serialize()
-	if err != nil {
-		return err
-	}
-
 	for _, peer := range allPeers {
-		_, err := peer.Conn.WriteTo(data, peer.Address)
-		if err != nil {
+		if err := c.writeToPeer(peer, message); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// SendRawToPeer sends raw bytes to a single peer by ID without JSON serialization.
-// Used to redistribute encrypted shard frames to a specific peer.
+// SendRawToPeer sends raw bytes to a single peer by ID, encrypting if the
+// session handshake is complete.
 func (c *Client) SendRawToPeer(peerID string, data []byte) error {
 	c.mutex.RLock()
 	peer := c.GetPeerById(peerID)
@@ -90,12 +149,11 @@ func (c *Client) SendRawToPeer(peerID string, data []byte) error {
 	if state == StateDisconnected {
 		return fmt.Errorf("client disconnected")
 	}
-	_, err := peer.Conn.WriteTo(data, peer.Address)
-	return err
+	return c.writeRawToPeer(peer, data)
 }
 
-// SendRawToAllPeers sends raw bytes directly to all connected peers without
-// any JSON serialization. Used for binary shard frames.
+// SendRawToAllPeers sends raw bytes to all connected peers, encrypting per peer
+// if their session handshake is complete.
 func (c *Client) SendRawToAllPeers(data []byte) error {
 	c.mutex.RLock()
 	allPeers := c.GetConnectedPeers()
@@ -109,7 +167,7 @@ func (c *Client) SendRawToAllPeers(data []byte) error {
 		return fmt.Errorf("client disconnected")
 	}
 	for _, peer := range allPeers {
-		if _, err := peer.Conn.WriteTo(data, peer.Address); err != nil {
+		if err := c.writeRawToPeer(peer, data); err != nil {
 			return err
 		}
 	}
@@ -124,30 +182,57 @@ func (c *Client) IsPeerCommunicationAvailable() bool {
 	return len(c.GetConnectedPeers()) > 0 && c.state != StateDisconnected
 }
 
-// ConnectToPeer attempts to establish direct connection to assigned peer using UDP hole punching
+// ConnectToPeer attempts to establish direct connection to assigned peer using UDP hole punching.
+// It also generates an ephemeral X25519 keypair and sends HandshakeInit so both sides can
+// derive a shared AES-256-GCM session key for all subsequent messages.
 func (c *Client) ConnectToPeer(peer *PeerInfo) error {
 	c.mutex.Lock()
-	defer c.mutex.Unlock()
 
 	if peer == nil {
+		c.mutex.Unlock()
 		return fmt.Errorf("no peer assigned")
 	}
-
 	if c.serverConn == nil {
+		c.mutex.Unlock()
 		return fmt.Errorf("not connected to server")
 	}
 
-	// Reuse the existing server connection socket for peer communication
-	// This is the key to proper UDP hole punching
+	// Generate ephemeral X25519 keypair for the session handshake.
+	ephPriv, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		c.mutex.Unlock()
+		return fmt.Errorf("failed to generate handshake key: %w", err)
+	}
+
 	c.peers[peer.ID] = peer
 	c.peers[peer.ID].Conn = c.serverConn
-	c.peers[peer.ID].LastPeerPong = time.Now() // Initialize peer connection time
+	c.peers[peer.ID].LastPeerPong = time.Now()
+	c.peers[peer.ID].EphemeralPrivKey = ephPriv.Bytes()
 	if c.state != StateLeader {
 		c.setState(StateConnectedToPeer)
 	}
 
-	// Start UDP hole punching - send initial packet to peer to establish connection
-	go c.establishPeerConnection(c.peers[peer.ID].Address)
+	peerAddr := c.peers[peer.ID].Address
+	peerID := peer.ID
+	pubKeyBytes := ephPriv.PublicKey().Bytes()
+	myID := c.id
+	c.mutex.Unlock()
+
+	go c.establishPeerConnection(peerAddr)
+
+	// Send HandshakeInit after punch packets have had a chance to open the path.
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		msg := api.NewHandshakeInitMessage(myID, pubKeyBytes)
+		// Send directly (plaintext) — session key doesn't exist yet.
+		c.mutex.RLock()
+		p := c.peers[peerID]
+		c.mutex.RUnlock()
+		if p != nil && p.Conn != nil {
+			data, _ := msg.Serialize()
+			p.Conn.WriteTo(data, p.Address) //nolint:errcheck — best-effort
+		}
+	}()
 
 	return nil
 }
@@ -162,7 +247,6 @@ func (c *Client) establishPeerConnection(peerAddr *net.UDPAddr) {
 		return
 	}
 
-	// Send initial "punch" packets to establish connection
 	punchMessage := []byte("STUN_PUNCH")
 	for range 3 {
 		_, err := peerConn.WriteTo(punchMessage, peerAddr)

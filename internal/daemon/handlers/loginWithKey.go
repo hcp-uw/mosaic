@@ -1,9 +1,11 @@
 package handlers
 
 import (
+	"crypto/hkdf"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"os"
 
 	"github.com/hcp-uw/mosaic/internal/cli/protocol"
 	"github.com/hcp-uw/mosaic/internal/cli/shared"
@@ -28,8 +30,13 @@ func LoginKey(req protocol.LoginKeyRequest) protocol.LoginKeyResponse {
 		return protocol.LoginKeyResponse{Success: false, Details: "login key must not be empty"}
 	}
 
-	if err := helpers.SaveLoginKey(req.Key); err != nil {
-		return protocol.LoginKeyResponse{Success: false, Details: fmt.Sprintf("could not save login key: %v", err)}
+	// Derive and cache the shard encryption key — never write the raw login key to disk.
+	shardKey, err := hkdf.Key(sha256.New, []byte(req.Key), nil, "mosaic-shard-key", 32)
+	if err != nil {
+		return protocol.LoginKeyResponse{Success: false, Details: fmt.Sprintf("could not derive shard key: %v", err)}
+	}
+	if err := os.WriteFile(shared.ShardKeyPath(), shardKey, 0600); err != nil {
+		return protocol.LoginKeyResponse{Success: false, Details: fmt.Sprintf("could not save shard key: %v", err)}
 	}
 
 	kp, err := filesystem.DeriveUserKeyFromLoginKey(req.Key, shared.UserKeyPath())

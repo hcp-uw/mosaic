@@ -49,9 +49,11 @@ func HandleLogout(req protocol.LogoutRequest) protocol.LogoutResponse {
 
 	// Wipe all identity and key material.
 	_ = helpers.ClearSession()
-	_ = helpers.ClearLoginKey()
-	if err := os.Remove(shared.UserKeyPath()); err != nil && !os.IsNotExist(err) {
-		fmt.Printf("Daemon: warning — could not delete key file: %v\n", err)
+	_ = helpers.ClearLoginKey() // no-op if already absent; kept for old installations
+	for _, keyFile := range []string{shared.UserKeyPath(), shared.ShardKeyPath()} {
+		if err := os.Remove(keyFile); err != nil && !os.IsNotExist(err) {
+			fmt.Printf("Daemon: warning — could not delete key file %s: %v\n", keyFile, err)
+		}
 	}
 
 	return protocol.LogoutResponse{

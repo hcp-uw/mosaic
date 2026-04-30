@@ -42,6 +42,11 @@ const (
 	IdentityAnnounce  MessageType = "identity_announce"
 	IdentityChallenge MessageType = "identity_challenge"
 	IdentityResponse  MessageType = "identity_response"
+
+	// HandshakeInit is sent immediately on peer connect (plaintext).
+	// Both sides send their ephemeral X25519 public key; each derives the
+	// shared AES-256-GCM session key and encrypts all subsequent messages.
+	HandshakeInit MessageType = "handshake_init"
 )
 
 // Message represents the base message structure
@@ -598,6 +603,35 @@ type IdentityChallengeData struct {
 type IdentityResponseData struct {
 	Nonce     string `json:"nonce"`
 	Signature string `json:"signature"`
+}
+
+// HandshakeInitData carries one side's ephemeral X25519 public key (32 bytes).
+type HandshakeInitData struct {
+	EphemeralPubKey []byte `json:"ephemeralPubKey"`
+}
+
+// NewHandshakeInitMessage creates a handshake message carrying the sender's
+// ephemeral X25519 public key. senderID is the P2P peer ID (used by the
+// receiver to look up the right PeerInfo from the peers map).
+func NewHandshakeInitMessage(senderID string, ephemeralPubKey []byte) *Message {
+	return &Message{
+		Sign:      NewSignature(senderID),
+		Type:      HandshakeInit,
+		Timestamp: time.Now(),
+		Data:      HandshakeInitData{EphemeralPubKey: ephemeralPubKey},
+	}
+}
+
+func (m *Message) GetHandshakeInitData() (*HandshakeInitData, error) {
+	if m.Type != HandshakeInit {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d HandshakeInitData
+	return &d, json.Unmarshal(b, &d)
 }
 
 func NewIdentityAnnounceMessage(accountPubKey string) *Message {

@@ -165,7 +165,7 @@ func (c *Client) handleTURNMessages(peerID string, ts *turnState) {
 		}
 		msg := make([]byte, n)
 		copy(msg, buf[:n])
-		c.processPeerMessage(msg)
+		c.processPeerMessage(msg, ts.peerAddr)
 	}
 }
 

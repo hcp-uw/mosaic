@@ -47,6 +47,13 @@ func NetworkKeyPath() string {
 	return filepath.Join(os.Getenv("HOME"), ".mosaic-network.key")
 }
 
+// ShardKeyPath returns ~/.mosaic-shard.key — the 32-byte AES-256 key used to
+// encrypt and decrypt shard data. Derived from the login key at login time and
+// cached here so the raw login key never needs to be stored on disk.
+func ShardKeyPath() string {
+	return filepath.Join(os.Getenv("HOME"), ".mosaic-shard.key")
+}
+
 // SessionPath returns ~/.mosaic-session — the persisted session file.
 func SessionPath() string {
 	return filepath.Join(os.Getenv("HOME"), ".mosaic-session")

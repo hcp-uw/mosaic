@@ -2,6 +2,9 @@ package p2p
 
 import (
 	"context"
+	"crypto/ecdh"
+	"crypto/hkdf"
+	"crypto/sha256"
 	"fmt"
 	"net"
 	"sync"
@@ -179,7 +182,7 @@ func (c *Client) handleMessages() {
 		if fromAddr.String() == c.serverAddr.String() {
 			c.processServerMessage(msg)
 		} else {
-			c.processPeerMessage(msg)
+			c.processPeerMessage(msg, fromAddr)
 		}
 	}
 }
@@ -195,15 +198,93 @@ func (c *Client) processServerMessage(data []byte) {
 	c.processMessage(msg)
 }
 
-// processPeerMessage processes a message from a peer
-func (c *Client) processPeerMessage(data []byte) {
-	// Filter out STUN punch packets
-	if string(data) == "STUN_PUNCH" {
-		return // Ignore punch packets
+// getPeerByAddr finds a peer by their UDP address (O(n), but peer count is tiny).
+func (c *Client) getPeerByAddr(addr *net.UDPAddr) *PeerInfo {
+	if addr == nil {
+		return nil
+	}
+	addrStr := addr.String()
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	for _, p := range c.peers {
+		if p.Address != nil && p.Address.String() == addrStr {
+			return p
+		}
+	}
+	return nil
+}
+
+// completeHandshake derives the shared AES-256-GCM session key from the
+// received HandshakeInit message and marks the peer's session as ready.
+func (c *Client) completeHandshake(msg *api.Message, peer *PeerInfo) {
+	if peer == nil {
+		return
+	}
+	d, err := msg.GetHandshakeInitData()
+	if err != nil {
+		return
 	}
 
-	// Binary shard frames start with 0x01. JSON always starts with '{' (0x7B).
-	// Route binary frames directly to the application layer without any parsing.
+	c.mutex.RLock()
+	ephPrivBytes := peer.EphemeralPrivKey
+	c.mutex.RUnlock()
+	if len(ephPrivBytes) == 0 {
+		return // we haven't sent our own HandshakeInit yet — drop
+	}
+
+	ephPriv, err := ecdh.X25519().NewPrivateKey(ephPrivBytes)
+	if err != nil {
+		return
+	}
+	theirPub, err := ecdh.X25519().NewPublicKey(d.EphemeralPubKey)
+	if err != nil {
+		return
+	}
+	sharedSecret, err := ephPriv.ECDH(theirPub)
+	if err != nil {
+		return
+	}
+	sessionKey, err := hkdf.Key(sha256.New, sharedSecret, nil, "mosaic-session", 32)
+	if err != nil {
+		return
+	}
+
+	c.mutex.Lock()
+	copy(peer.SessionKey[:], sessionKey)
+	peer.HandshakeDone = true
+	peer.EphemeralPrivKey = nil
+	c.mutex.Unlock()
+
+	id := peer.ID
+	if len(id) > 8 {
+		id = id[:8]
+	}
+	fmt.Printf("[P2P] Session established with peer %s\n", id)
+}
+
+// processPeerMessage processes a message from a peer
+func (c *Client) processPeerMessage(data []byte, fromAddr *net.UDPAddr) {
+	// Filter out STUN punch packets
+	if string(data) == "STUN_PUNCH" {
+		return
+	}
+
+	// Decrypt session-encrypted frame (magic byte 0x02).
+	// Lookup the sending peer by address so we can use their session key.
+	if len(data) > 0 && data[0] == sessionEncryptedMagic {
+		sender := c.getPeerByAddr(fromAddr)
+		if sender == nil || !sender.HandshakeDone {
+			return // handshake not complete — drop
+		}
+		inner, err := sender.openFromPeer(data)
+		if err != nil {
+			c.notifyError(fmt.Errorf("session decrypt failed from %s: %w", fromAddr, err))
+			return
+		}
+		data = inner
+	}
+
+	// Binary shard frames start with 0x01 (checked after potential decryption).
 	if len(data) > 0 && data[0] == 0x01 {
 		c.notifyMessageReceived(data)
 		return
@@ -276,11 +357,22 @@ func (c *Client) processPeerMessage(data []byte) {
 				c.notifyPeerAssigned(peerInfo)
 			}
 
+		case api.HandshakeInit:
+			// Find peer by their P2P ID (carried in Sign.PubKey) and complete
+			// the X25519 key exchange to establish a session key.
+			c.mutex.RLock()
+			peer := c.peers[msg.Sign.PubKey]
+			c.mutex.RUnlock()
+			go c.completeHandshake(msg, peer)
+			return
+
 		case api.ManifestSync:
-			// Route manifest sync messages to the application callback layer.
 			c.notifyMessageReceived(data)
 			return
 		case api.ShardPush, api.ShardRequest, api.ShardResponse, api.ShardChunk:
+			c.notifyMessageReceived(data)
+			return
+		case api.IdentityAnnounce, api.IdentityChallenge, api.IdentityResponse:
 			c.notifyMessageReceived(data)
 			return
 		}
