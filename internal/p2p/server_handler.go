@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"net"
 	"time"
+
+	"github.com/hcp-uw/mosaic/internal/api"
 )
 
 func (c *Client) ConnectToStun() error {
@@ -65,6 +67,21 @@ func (c *Client) ConnectToStun() error {
 
 // Disconnect closes the connection to the server
 func (c *Client) DisconnectFromStun() error {
+	// Broadcast NodeLeave to all peers before tearing down the socket so they
+	// can evict us immediately instead of waiting for the 30-second pong timeout.
+	c.mutex.RLock()
+	if len(c.peers) > 0 {
+		msg := api.NewNodeLeaveMessage(c.id)
+		if data, err := msg.Serialize(); err == nil {
+			for _, peer := range c.peers {
+				if peer.Conn != nil {
+					peer.Conn.WriteTo(data, peer.Address) //nolint:errcheck — best-effort
+				}
+			}
+		}
+	}
+	c.mutex.RUnlock()
+
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 

@@ -357,6 +357,17 @@ func (c *Client) processPeerMessage(data []byte, fromAddr *net.UDPAddr) {
 				c.notifyPeerAssigned(peerInfo)
 			}
 
+		case api.NodeLeave:
+			// Peer is disconnecting gracefully — evict immediately.
+			sender := c.getPeerByAddr(fromAddr)
+			if sender != nil {
+				c.mutex.Lock()
+				delete(c.peers, sender.ID)
+				c.mutex.Unlock()
+				c.notifyPeerLeft(sender.ID)
+			}
+			return
+
 		case api.HandshakeInit:
 			// Find peer by their P2P ID (carried in Sign.PubKey) and complete
 			// the X25519 key exchange to establish a session key.

@@ -47,6 +47,11 @@ const (
 	// Both sides send their ephemeral X25519 public key; each derives the
 	// shared AES-256-GCM session key and encrypts all subsequent messages.
 	HandshakeInit MessageType = "handshake_init"
+
+	// NodeLeave is broadcast to all peers just before a node disconnects
+	// gracefully. Receivers evict the sender immediately without waiting for
+	// the 30-second pong timeout.
+	NodeLeave MessageType = "node_leave"
 )
 
 // Message represents the base message structure
@@ -695,6 +700,15 @@ func (m *Message) GetIdentityResponseData() (*IdentityResponseData, error) {
 	}
 	var d IdentityResponseData
 	return &d, json.Unmarshal(b, &d)
+}
+
+// NewNodeLeaveMessage creates the graceful-leave broadcast sent to all peers
+// just before a node closes its connection.
+func NewNodeLeaveMessage(senderID string) *Message {
+	return &Message{
+		Type: NodeLeave,
+		Sign: NewSignature(senderID),
+	}
 }
 
 // Error types
