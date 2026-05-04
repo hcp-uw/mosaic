@@ -51,9 +51,14 @@ func DeleteStub(req protocol.DeleteStubRequest) protocol.DeleteStubResponse {
 		fmt.Printf("Warning: could not remove stub for %s: %v\n", filename, err)
 	}
 
+	// Remove from local manifest so the file no longer shows in 'mos list file'.
+	if err := filesystem.RemoveFromManifest(mosaicDir, filename); err != nil {
+		fmt.Printf("Warning: could not remove %s from local manifest: %v\n", filename, err)
+	}
+
 	return protocol.DeleteStubResponse{
 		Success:  true,
-		Details:  fmt.Sprintf("local copy of %q removed; file remains in manifest and can be re-downloaded", filename),
+		Details:  fmt.Sprintf("local copy of %q removed", filename),
 		FileName: filename,
 	}
 }

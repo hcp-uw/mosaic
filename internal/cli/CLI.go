@@ -266,6 +266,8 @@ func Run(Args []string) {
 			fmt.Println("  mos debug msg \"<text>\"   Send a text message to all peers (tests P2P link)")
 			os.Exit(1)
 		}
+	case "wipe":
+		wipeState()
 	case "shutdown":
 		if len(args) != 2 {
 			fmt.Println("Please give a valid command.")
@@ -298,7 +300,7 @@ func joinNetwork(serverAddr string) {
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
-	message := "\nJoined network successfully.\n-"
+	message := "\nJoined network successfully.\n"
 	fmt.Println(message)
 }
 
@@ -593,11 +595,35 @@ func uploadFile() {
 	absPath, err := filepath.Abs(filePath)
 	exitOnErr(err, "Error resolving path:")
 
-	fileSize := fileInfo.Size() / 1024
-	fmt.Printf("Uploading file: %s (%d KB)\n", fileInfo.Name(), fileSize)
+	fileSizeBytes := fileInfo.Size()
+	fmt.Printf("Uploading file: %s (%d KB)\n", fileInfo.Name(), fileSizeBytes/1024)
+
+	// Allow 60s base + 60s per GB so large files don't time out during SHA-256 and encoding.
+	uploadTimeout := 60*time.Second + time.Duration(fileSizeBytes/(1024*1024*1024)+1)*60*time.Second
+
+	// Spinner runs while we wait for the daemon to respond.
+	done := make(chan struct{})
+	start := time.Now()
+	go func() {
+		frames := []string{"|", "/", "-", "\\"}
+		i := 0
+		for {
+			select {
+			case <-done:
+				return
+			case <-time.After(200 * time.Millisecond):
+				fmt.Printf("\r  %s  processing... %ds", frames[i%len(frames)], int(time.Since(start).Seconds()))
+				i++
+			}
+		}
+	}()
+
 	resp, uploadErr := client.SendRequest("uploadFile", protocol.UploadFileRequest{
 		Path: absPath,
-	})
+	}, uploadTimeout)
+	close(done)
+	fmt.Print("\r                    \r") // clear spinner line
+
 	exitOnErr(uploadErr, "Error uploading file.")
 
 	var cmdResp protocol.UploadFileResponse
@@ -653,7 +679,7 @@ func uploadFolder() {
 // Downloads a file from the network
 func downloadFile() {
 	filePath := args[3]
-	resp, err := client.SendRequest("downloadFile", protocol.DownloadFileRequest{FilePath: filePath})
+	resp, err := client.SendRequest("downloadFile", protocol.DownloadFileRequest{FilePath: filePath}, 2*time.Minute)
 	exitOnErr(err, "Error downloading "+filePath+": ")
 
 	var cmdResp protocol.DownloadFileResponse
@@ -672,7 +698,7 @@ func downloadFile() {
 // Downloads a folder from the network
 func downloadFolder() {
 	filePath := args[3]
-	resp, err := client.SendRequest("downloadFolder", protocol.DownloadFolderRequest{FolderPath: filePath})
+	resp, err := client.SendRequest("downloadFolder", protocol.DownloadFolderRequest{FolderPath: filePath}, 2*time.Minute)
 	exitOnErr(err, "Error downloading "+filePath+": ")
 
 	var cmdResp protocol.DownloadFolderResponse
@@ -812,6 +838,77 @@ func version() {
 	}
 	message := fmt.Sprintf("\nmos version %v\n", cmdResp.Version)
 	fmt.Println(message)
+}
+
+// wipeState deletes all local Mosaic state: ~/Mosaic/, all ~/.mosaic-* key files,
+// and the daemon's runtime files. Intended for testing/reset only.
+func wipeState() {
+	fmt.Println("WARNING: This will permanently delete all local Mosaic state:")
+	fmt.Printf("  - %s  (files, shards, manifests)\n", shared.MosaicDir())
+	fmt.Println("  - ~/.mosaic-* key/session files")
+	fmt.Println("  - Daemon PID, socket, and log files")
+	fmt.Println()
+	fmt.Print("Type \"wipe\" to confirm: ")
+
+	var confirm string
+	fmt.Scanln(&confirm)
+	if confirm != "wipe" {
+		fmt.Println("Aborted.")
+		os.Exit(0)
+	}
+
+	// Kill any running daemon first so it doesn't hold stale in-memory state.
+	goos := runtime.GOOS
+	if pidBytes, err := os.ReadFile(shared.DaemonPIDFile); err == nil {
+		pidStr := strings.TrimSpace(string(pidBytes))
+		if pid, err := strconv.Atoi(pidStr); err == nil {
+			killProcess(pid, goos)
+		}
+	} else if isDaemonRunning(goos) {
+		killByName("mosaicd", goos)
+	}
+
+	errs := 0
+
+	// Wipe ~/Mosaic/ entirely, then recreate it empty.
+	mosaicDir := shared.MosaicDir()
+	if err := os.RemoveAll(mosaicDir); err != nil {
+		fmt.Println("  error removing Mosaic dir:", err)
+		errs++
+	}
+	if err := os.MkdirAll(mosaicDir, 0755); err != nil {
+		fmt.Println("  error recreating Mosaic dir:", err)
+		errs++
+	}
+
+	// Remove all ~/.mosaic-* and session files.
+	for _, path := range []string{
+		shared.LoginKeyPath(),
+		shared.UserKeyPath(),
+		shared.NetworkKeyPath(),
+		shared.ShardKeyPath(),
+		shared.SessionPath(),
+	} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			fmt.Printf("  error removing %s: %v\n", path, err)
+			errs++
+		}
+	}
+
+	// Remove daemon runtime files.
+	for _, path := range []string{
+		shared.DaemonPIDFile,
+		shared.SocketPath,
+		shared.DaemonLogFile,
+	} {
+		os.Remove(path) //nolint:errcheck — best-effort cleanup
+	}
+
+	if errs == 0 {
+		fmt.Println("State wiped. Run 'mosaic-node &' and 'mos login <key>' to start fresh.")
+	} else {
+		fmt.Printf("Done with %d error(s). Some files may need manual cleanup.\n", errs)
+	}
 }
 
 // help prints the help message

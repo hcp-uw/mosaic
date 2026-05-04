@@ -22,6 +22,16 @@ func (c *Client) OnPeerLeft(callback func(peerID string)) {
 	c.peerLeftCallbacks = append(c.peerLeftCallbacks, callback)
 }
 
+// OnHandshakeDone registers a callback invoked with the peer ID once the
+// X25519 session key exchange completes for that peer. Use this to trigger
+// work that requires an encrypted channel (e.g. manifest sync), because
+// the peer's HandshakeDone flag is guaranteed true when this fires.
+func (c *Client) OnHandshakeDone(callback func(peerID string)) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	c.handshakeCallbacks = append(c.handshakeCallbacks, callback)
+}
+
 // OnError registers a callback for errors
 func (c *Client) OnError(callback func(error)) {
 	c.mutex.Lock()
@@ -60,6 +70,17 @@ func (c *Client) notifyPeerAssigned(peerInfo *PeerInfo) {
 func (c *Client) notifyPeerLeft(peerID string) {
 	for _, callback := range c.peerLeftCallbacks {
 		go callback(peerID)
+	}
+}
+
+// notifyHandshakeDone notifies callbacks that a session key was established.
+func (c *Client) notifyHandshakeDone(peerID string) {
+	c.mutex.RLock()
+	cbs := make([]func(string), len(c.handshakeCallbacks))
+	copy(cbs, c.handshakeCallbacks)
+	c.mutex.RUnlock()
+	for _, cb := range cbs {
+		go cb(peerID)
 	}
 }
 

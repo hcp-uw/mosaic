@@ -5,11 +5,64 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/hcp-uw/mosaic/internal/api"
 	"github.com/hcp-uw/mosaic/internal/cli/protocol"
 	"github.com/hcp-uw/mosaic/internal/cli/shared"
 	"github.com/hcp-uw/mosaic/internal/daemon/handlers/helpers"
 	filesystem "github.com/hcp-uw/mosaic/internal/fileSystem"
+	"github.com/hcp-uw/mosaic/internal/transfer"
 )
+
+// Deletes a file from the network and returns an DeleteFileResponse
+// shardHoldersForFile returns the contentHash of filename and the deduplicated
+// set of node IDs that hold at least one shard for it (excluding this node).
+func shardHoldersForFile(nm filesystem.NetworkManifest, filename string) (contentHash string, holderIDs []string) {
+	// Find the contentHash by scanning all chains for a matching file name.
+	for _, chain := range nm.Chains {
+		for _, f := range filesystem.ChainToFiles(chain) {
+			if f.Name == filename {
+				contentHash = f.ContentHash
+				break
+			}
+		}
+		if contentHash != "" {
+			break
+		}
+	}
+	if contentHash == "" || nm.ShardMap == nil {
+		return
+	}
+	loc, ok := nm.ShardMap[contentHash]
+	if !ok {
+		return
+	}
+	seen := make(map[string]bool)
+	myNodeID := fmt.Sprintf("%d", helpers.GetNodeID())
+	for _, ids := range loc.Holders {
+		for _, id := range ids {
+			if id != myNodeID && !seen[id] {
+				seen[id] = true
+				holderIDs = append(holderIDs, id)
+			}
+		}
+	}
+	return
+}
+
+// signalShardDelete sends a ShardDelete message to each holder node ID.
+// Node IDs in the ShardMap are numeric strings; peers are looked up by their
+// P2P string ID which is the public key. We broadcast to all peers and let
+// each recipient decide whether to act on it.
+func signalShardDelete(contentHash string, holderIDs []string) {
+	client := GetP2PClient()
+	if client == nil {
+		return
+	}
+	msg := api.NewShardDeleteMessage(client.GetID(), contentHash)
+	if err := client.SendToAllPeers(msg); err != nil {
+		fmt.Printf("Warning: could not broadcast ShardDelete for %s: %v\n", contentHash, err)
+	}
+}
 
 // Deletes a file from the network and returns an DeleteFileResponse
 func DeleteFile(req protocol.DeleteFileRequest) protocol.DeleteFileResponse {
@@ -35,9 +88,15 @@ func DeleteFile(req protocol.DeleteFileRequest) protocol.DeleteFileResponse {
 	}
 
 	// Update the network manifest: append "remove" block, write, broadcast.
+	// Also collect the contentHash and unique shard holders so we can signal deletion.
+	var contentHash string
+	var holderIDs []string
 	if aesKey, err := filesystem.LoadOrCreateNetworkKey(shared.NetworkKeyPath()); err == nil {
 		if kp, kerr := filesystem.LoadOrCreateUserKey(shared.UserKeyPath()); kerr == nil {
 			if nm, err := filesystem.ReadNetworkManifest(mosaicDir, aesKey); err == nil {
+				// Capture contentHash and holder set before the remove block erases the entry.
+				contentHash, holderIDs = shardHoldersForFile(nm, filename)
+
 				if aerr := filesystem.AppendBlockRemove(&nm, helpers.GetAccountID(), filename, kp); aerr != nil {
 					fmt.Println("Warning: could not append remove block for", filename, "-", aerr)
 				} else if werr := filesystem.WriteNetworkManifestLocked(mosaicDir, aesKey, nm); werr != nil {
@@ -49,6 +108,16 @@ func DeleteFile(req protocol.DeleteFileRequest) protocol.DeleteFileResponse {
 		} else {
 			fmt.Println("Warning: could not load user key:", kerr)
 		}
+	}
+
+	// Delete our own local shards for the file.
+	if contentHash != "" {
+		transfer.DeleteLocalShards(contentHash)
+	}
+
+	// Signal all shard holders to delete their copies.
+	if contentHash != "" && len(holderIDs) > 0 {
+		go signalShardDelete(contentHash, holderIDs)
 	}
 
 	return protocol.DeleteFileResponse{

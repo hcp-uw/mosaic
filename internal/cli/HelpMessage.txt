@@ -3,7 +3,7 @@ Mosaic Command Line Interface — Distributed Storage Network
 Account:
   login <key>                             Log in with your key.
   login status                            Show current login status.
-  logout account                          Log out.
+  logout account                          Log out and remove session credentials.
 
 Network:
   join network                            Join the storage network.
@@ -17,19 +17,19 @@ Node & Account:
 
 Storage:
   set storage <amount>                    Set the total storage to share with the network.
-  empty storage                           Delete all stored data from the network.
+  empty storage                           Delete all your files from the network (irreversible).
 
 Files:
   list file                               List files with a local stub or cached copy on this machine.
   list manifest                           List all files in your network manifest (cross-machine view).
-  upload file <path>                      Upload a file to the network.
+  upload file <path>                      Upload a file to the network. Shows progress for large files.
   upload folder <path>                    Upload a folder to the network.
-  download file <name>                    Download a file from the network.
+  download file <name>                    Download a file from the network to ~/Mosaic/.
   download folder <name>                  Download a folder from the network.
-  info file <name>                        Display information about a specific file.
-  info folder <name>                      Display information about a specific folder.
-  delete file <name>                      Delete a file from the network and manifest.
-  delete file -s <name>                   Remove the local stub only (file stays in manifest).
+  info file <name>                        Display metadata for a specific file.
+  info folder <name>                      Display metadata for a specific folder.
+  delete file <name>                      Delete a file from the network, manifest, and all shard holders.
+  delete file -s <name>                   Remove the local stub only (file stays in network manifest).
   delete folder <name>                    Delete a folder from the network.
   rename file <oldname> <newname>         Rename a file on the network.
 
@@ -38,5 +38,6 @@ Debug:
 
 Other:
   version                                 Display current Mosaic client version.
-  shutdown                                Stop the daemon and clean up.
+  wipe                                    Delete all local state for testing (~/Mosaic/, keys, shards). Prompts for confirmation.
+  shutdown                                Stop the daemon and uninstall binaries.
   help                                    Show this help message.

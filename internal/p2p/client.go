@@ -27,11 +27,12 @@ type Client struct {
 	mutex            sync.RWMutex
 	ctx              context.Context
 	cancel           context.CancelFunc
-	stateCallbacks    []func(ClientState)
-	peerCallbacks     []func(*PeerInfo)
-	peerLeftCallbacks []func(string) // called with peer ID when a peer is evicted
-	errorCallbacks    []func(error)
-	messageCallbacks  []func([]byte)
+	stateCallbacks       []func(ClientState)
+	peerCallbacks        []func(*PeerInfo)
+	peerLeftCallbacks    []func(string) // called with peer ID when a peer is evicted
+	handshakeCallbacks   []func(string) // called with peer ID when handshake completes
+	errorCallbacks       []func(error)
+	messageCallbacks     []func([]byte)
 
 	// STUN reconnect state (leader only)
 	stunFailCount    int
@@ -88,11 +89,12 @@ func NewClient(config *ClientConfig) (*Client, error) {
 		peers:            make(map[string]*PeerInfo),
 		ctx:              ctx,
 		cancel:           cancel,
-		stateCallbacks:    make([]func(ClientState), 0),
-		peerCallbacks:     make([]func(*PeerInfo), 0),
-		peerLeftCallbacks: make([]func(string), 0),
-		errorCallbacks:    make([]func(error), 0),
-		messageCallbacks:  make([]func([]byte), 0),
+		stateCallbacks:     make([]func(ClientState), 0),
+		peerCallbacks:      make([]func(*PeerInfo), 0),
+		peerLeftCallbacks:  make([]func(string), 0),
+		handshakeCallbacks: make([]func(string), 0),
+		errorCallbacks:     make([]func(error), 0),
+		messageCallbacks:   make([]func([]byte), 0),
 	}, nil
 }
 
@@ -253,13 +255,15 @@ func (c *Client) completeHandshake(msg *api.Message, peer *PeerInfo) {
 	copy(peer.SessionKey[:], sessionKey)
 	peer.HandshakeDone = true
 	peer.EphemeralPrivKey = nil
+	peerID := peer.ID
 	c.mutex.Unlock()
 
-	id := peer.ID
-	if len(id) > 8 {
-		id = id[:8]
+	logID := peerID
+	if len(logID) > 8 {
+		logID = logID[:8]
 	}
-	fmt.Printf("[P2P] Session established with peer %s\n", id)
+	fmt.Printf("[P2P] Session established with peer %s\n", logID)
+	c.notifyHandshakeDone(peerID)
 }
 
 // processPeerMessage processes a message from a peer
@@ -270,15 +274,13 @@ func (c *Client) processPeerMessage(data []byte, fromAddr *net.UDPAddr) {
 	}
 
 	// Decrypt session-encrypted frame (magic byte 0x02).
-	// Lookup the sending peer by address so we can use their session key.
+	// Try the peer by source address first; if that fails (e.g. message arrived
+	// via a TURN relay whose source port differs from the peer's registered address),
+	// fall back to trying every peer with a completed handshake. AES-256-GCM
+	// authentication makes false positives cryptographically impossible.
 	if len(data) > 0 && data[0] == sessionEncryptedMagic {
-		sender := c.getPeerByAddr(fromAddr)
-		if sender == nil || !sender.HandshakeDone {
-			return // handshake not complete — drop
-		}
-		inner, err := sender.openFromPeer(data)
-		if err != nil {
-			c.notifyError(fmt.Errorf("session decrypt failed from %s: %w", fromAddr, err))
+		inner, ok := c.decryptFromAnyPeer(data, fromAddr)
+		if !ok {
 			return
 		}
 		data = inner
@@ -382,6 +384,9 @@ func (c *Client) processPeerMessage(data []byte, fromAddr *net.UDPAddr) {
 			c.notifyMessageReceived(data)
 			return
 		case api.IdentityAnnounce, api.IdentityChallenge, api.IdentityResponse:
+			c.notifyMessageReceived(data)
+			return
+		case api.ShardDelete:
 			c.notifyMessageReceived(data)
 			return
 		}

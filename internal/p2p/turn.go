@@ -26,9 +26,12 @@ import (
 )
 
 // turnFallbackTimeout is how long we wait for a direct pong before falling
-// back to TURN. Must be longer than the hole-punch window (3 × 100ms) but
-// short enough that the user isn't left waiting.
-const turnFallbackTimeout = 5 * time.Second
+// back to TURN. Must be longer than peerPingInterval (10s) so that a peer
+// gets at least one full ping→pong exchange before TURN is tried. Peers with
+// a public IP (like a droplet) will pong within the first ping cycle (~10s)
+// and never trigger TURN; peers behind NAT won't pong at all, so after
+// turnFallbackTimeout the relay is allocated.
+const turnFallbackTimeout = 15 * time.Second
 
 // turnState owns a single TURN allocation for one peer.
 type turnState struct {
@@ -138,10 +141,11 @@ func (c *Client) ConnectViaTURN(peerID string) error {
 func (c *Client) handleTURNMessages(peerID string, ts *turnState) {
 	defer func() {
 		ts.close()
-		// If the peer is still marked ViaTURN, clear the conn so it looks
-		// disconnected — the ping routine will evict it and trigger a retry.
+		// Only clear Conn if it's still pointing at THIS relay's PacketConn.
+		// A new ConnectViaTURN call may have already replaced it with a fresh
+		// relay; in that case we must not clobber the new connection.
 		c.mutex.Lock()
-		if peer, ok := c.peers[peerID]; ok && peer.ViaTURN {
+		if peer, ok := c.peers[peerID]; ok && peer.Conn == ts.relayConn {
 			peer.Conn = nil
 			peer.ViaTURN = false
 		}
@@ -159,6 +163,11 @@ func (c *Client) handleTURNMessages(peerID string, ts *turnState) {
 		if err != nil {
 			if c.ctx.Err() != nil {
 				return
+			}
+			// Read deadline expired with no traffic — normal for an idle relay.
+			// Reset and keep the loop alive so the connection isn't torn down.
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
 			}
 			c.notifyError(fmt.Errorf("TURN recv error for peer %s: %w", peerID, err))
 			return

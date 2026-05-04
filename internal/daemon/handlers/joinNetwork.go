@@ -70,9 +70,18 @@ func runClient(serverAddr string, errCh chan<- error) {
 			return
 		}
 		fmt.Printf("[P2P] Connected to peer %s\n", peer.ID)
-		go pushManifestToPeer(mosaicDir, client)
 		go redistributeShardsToNewPeer(peer, client)
 		go announceIdentity(client)
+	})
+
+	// Push the manifest only after the session handshake is complete so the
+	// peer's response arrives encrypted and both sides can read it. Pushing
+	// from OnPeerAssigned (before handshake) means the peer's reply is already
+	// encrypted (its HandshakeDone fires first) but we can't decrypt it yet.
+	client.OnHandshakeDone(func(peerID string) {
+		fmt.Printf("[P2P] Handshake done with %s — pushing manifest\n", peerID)
+		go pushManifestToPeer(mosaicDir, client)
+		go SyncUserStubs()
 	})
 
 	client.OnPeerLeft(func(peerID string) {
@@ -112,6 +121,8 @@ func runClient(serverAddr string, errCh chan<- error) {
 			go handleIdentityChallenge(msg, client)
 		case api.IdentityResponse:
 			go DeliverChallengeResponse(msg)
+		case api.ShardDelete:
+			go handleShardDelete(msg)
 		}
 	})
 
@@ -175,14 +186,10 @@ func handleManifestSync(mosaicDir string, msg *api.Message) {
 		fmt.Println("handleManifestSync: could not load network key:", err)
 		return
 	}
-	local, err := filesystem.ReadNetworkManifest(mosaicDir, aesKey)
+
+	merged, changed, err := filesystem.MergeAndWriteNetworkManifest(mosaicDir, aesKey, remote)
 	if err != nil {
-		fmt.Println("handleManifestSync: could not read local manifest:", err)
-		return
-	}
-	merged, changed := filesystem.MergeNetworkManifest(local, remote)
-	if err := filesystem.WriteNetworkManifest(mosaicDir, aesKey, merged); err != nil {
-		fmt.Println("handleManifestSync: could not write merged manifest:", err)
+		fmt.Println("handleManifestSync: could not merge/write manifest:", err)
 		return
 	}
 	fmt.Printf("handleManifestSync: merged — %d chains (changed=%v)\n", len(merged.Chains), changed)
@@ -193,13 +200,37 @@ func handleManifestSync(mosaicDir string, msg *api.Message) {
 		go BroadcastNetworkManifest(merged)
 	}
 
-	// Replay our chain and create stubs for any files we don't have locally.
+	// Replay our chain and sync local state with the network manifest.
 	accountID := helpers.GetAccountID()
 	idx := filesystem.FindChainIndex(merged, accountID)
 	if idx == -1 {
 		return // no files for this user yet
 	}
 	files := filesystem.ChainToFiles(merged.Chains[idx])
+
+	// Build a set of currently-live names so we can detect deletions.
+	networkNames := make(map[string]bool, len(files))
+	for _, f := range files {
+		networkNames[f.Name] = true
+	}
+
+	// Remove local entries for files that no longer exist in the network manifest.
+	localEntries, lerr := filesystem.ReadManifest(mosaicDir)
+	if lerr == nil {
+		for name := range localEntries {
+			if !networkNames[name] {
+				if err := filesystem.RemoveFromManifest(mosaicDir, name); err != nil {
+					fmt.Printf("handleManifestSync: could not remove %s from local manifest: %v\n", name, err)
+				}
+				if err := filesystem.RemoveStub(mosaicDir, name); err != nil && !os.IsNotExist(err) {
+					fmt.Printf("handleManifestSync: could not remove stub for %s: %v\n", name, err)
+				}
+				fmt.Printf("handleManifestSync: removed deleted file %s from local state\n", name)
+			}
+		}
+	}
+
+	// Add stubs for files we don't have locally yet.
 	for _, f := range files {
 		if filesystem.IsInManifest(mosaicDir, f.Name) {
 			continue
@@ -213,6 +244,17 @@ func handleManifestSync(mosaicDir string, msg *api.Message) {
 		}
 	}
 	fmt.Printf("handleManifestSync: synced %d files from network\n", len(files))
+}
+
+// handleShardDelete removes all locally-stored shards for the file identified
+// by contentHash. Triggered by a ShardDelete broadcast from the file owner.
+func handleShardDelete(msg *api.Message) {
+	d, err := msg.GetShardDeleteData()
+	if err != nil {
+		fmt.Printf("handleShardDelete: bad message: %v\n", err)
+		return
+	}
+	transfer.DeleteLocalShards(d.ContentHash)
 }
 
 // recordShardInManifest records that this node holds shardIndex for the file

@@ -52,6 +52,10 @@ const (
 	// gracefully. Receivers evict the sender immediately without waiting for
 	// the 30-second pong timeout.
 	NodeLeave MessageType = "node_leave"
+
+	// ShardDelete asks a holder to delete all locally-stored shards for a file.
+	// Sent by the file owner after a successful network manifest remove.
+	ShardDelete MessageType = "shard_delete"
 )
 
 // Message represents the base message structure
@@ -709,6 +713,33 @@ func NewNodeLeaveMessage(senderID string) *Message {
 		Type: NodeLeave,
 		Sign: NewSignature(senderID),
 	}
+}
+
+// ShardDeleteData tells a holder to delete all local shards for a file.
+type ShardDeleteData struct {
+	ContentHash string `json:"contentHash"`
+}
+
+// NewShardDeleteMessage creates a shard-delete broadcast for a specific file.
+func NewShardDeleteMessage(senderID, contentHash string) *Message {
+	return &Message{
+		Sign:      NewSignature(senderID),
+		Type:      ShardDelete,
+		Timestamp: time.Now(),
+		Data:      ShardDeleteData{ContentHash: contentHash},
+	}
+}
+
+func (m *Message) GetShardDeleteData() (*ShardDeleteData, error) {
+	if m.Type != ShardDelete {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d ShardDeleteData
+	return &d, json.Unmarshal(b, &d)
 }
 
 // Error types

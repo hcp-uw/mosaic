@@ -20,6 +20,18 @@ func main() {
 	} else {
 		fmt.Printf("Mosaic directory ready at %s\n", mountPoint)
 
+		// Ensure both manifest files exist on disk before anything else starts.
+		// This prevents races where concurrent ManifestSync messages all try to
+		// create the file at the same time on a fresh node.
+		if err := filesystem.EnsureManifest(mountPoint); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not initialise local manifest: %v\n", err)
+		}
+		if aesKey, err := filesystem.LoadOrCreateNetworkKey(shared.NetworkKeyPath()); err == nil {
+			if err := filesystem.EnsureNetworkManifest(mountPoint, aesKey); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: could not initialise network manifest: %v\n", err)
+			}
+		}
+
 		go func() {
 			c := make(chan os.Signal, 1)
 			signal.Notify(c, os.Interrupt, syscall.SIGTERM)

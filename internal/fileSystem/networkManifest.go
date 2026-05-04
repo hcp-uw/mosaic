@@ -319,6 +319,18 @@ func UserExistsInNetwork(m NetworkManifest, userID int) bool {
 // Disk I/O (outer AES-256-GCM at-rest encryption)
 // ──────────────────────────────────────────────────────────
 
+// EnsureNetworkManifest writes an empty encrypted network manifest to disk if
+// one does not already exist. Call at daemon startup so that concurrent
+// ManifestSync merges always find a valid file rather than racing on first write.
+func EnsureNetworkManifest(mosaicDir string, key [32]byte) error {
+	p := networkManifestPath(mosaicDir)
+	if _, err := os.Stat(p); err == nil {
+		return nil // already exists
+	}
+	empty := NetworkManifest{Version: 2, Chains: []UserChain{}, ShardMap: make(map[string]*ShardLocations)}
+	return WriteNetworkManifest(mosaicDir, key, empty)
+}
+
 // ReadNetworkManifest decrypts and deserializes the manifest from disk.
 // Returns an empty v2 manifest if the file does not exist.
 func ReadNetworkManifest(mosaicDir string, key [32]byte) (NetworkManifest, error) {
@@ -378,6 +390,30 @@ func WriteNetworkManifestLocked(mosaicDir string, key [32]byte, m NetworkManifes
 	networkManifestMu.Lock()
 	defer networkManifestMu.Unlock()
 	return WriteNetworkManifest(mosaicDir, key, m)
+}
+
+// MergeAndWriteNetworkManifest reads the local manifest, merges remote into it,
+// and writes the result — all under one mutex acquisition so concurrent
+// handleManifestSync goroutines cannot interleave their read-modify-write cycles.
+// Returns the merged manifest and whether it differed from the local copy.
+func MergeAndWriteNetworkManifest(mosaicDir string, key [32]byte, remote NetworkManifest) (NetworkManifest, bool, error) {
+	networkManifestMu.Lock()
+	defer networkManifestMu.Unlock()
+
+	local, err := ReadNetworkManifest(mosaicDir, key)
+	if err != nil {
+		// Manifest exists but is corrupt (decrypt failure from a past race condition).
+		// Treat as empty so the incoming remote can overwrite and recover the state.
+		fmt.Printf("MergeAndWriteNetworkManifest: local manifest unreadable (%v) — recovering from remote\n", err)
+		local = NetworkManifest{Version: 2, Chains: []UserChain{}, ShardMap: make(map[string]*ShardLocations)}
+	}
+
+	merged, changed := MergeNetworkManifest(local, remote)
+	if !changed {
+		return merged, false, nil
+	}
+
+	return merged, true, WriteNetworkManifest(mosaicDir, key, merged)
 }
 
 // ──────────────────────────────────────────────────────────

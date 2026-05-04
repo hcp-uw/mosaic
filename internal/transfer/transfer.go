@@ -317,54 +317,47 @@ func Init(ctx context.Context) {
 
 // UploadFile RS-encodes path, saves shards locally, and streams them to all
 // connected peers using the binary wire protocol. Wrap in a goroutine for background use.
-func UploadFile(path string, client *p2p.Client) {
+func UploadFile(path string, client *p2p.Client) error {
 	filename := filepath.Base(path)
 	nameNoExt := strings.TrimSuffix(filename, filepath.Ext(filename))
 
 	f, err := os.Open(path)
 	if err != nil {
-		fmt.Printf("[Transfer] Cannot open %s: %v\n", path, err)
-		return
+		return fmt.Errorf("cannot open %s: %w", path, err)
 	}
 	hasher := sha256.New()
 	fileSize64, err := io.Copy(hasher, f)
 	f.Close()
 	if err != nil {
-		fmt.Printf("[Transfer] Cannot hash %s: %v\n", path, err)
-		return
+		return fmt.Errorf("cannot hash %s: %w", path, err)
 	}
 	fileHash := hex.EncodeToString(hasher.Sum(nil))
 	fileSize := int(fileSize64)
 
 	netKey, err := shardEncryptionKey()
 	if err != nil {
-		fmt.Printf("[Transfer] Cannot derive shard key: %v\n", err)
-		return
+		return fmt.Errorf("cannot derive shard key: %w", err)
 	}
 
 	fmt.Printf("[Transfer] Uploading %s  hash=%s…  size=%d bytes\n", filename, fileHash[:12], fileSize)
 
 	outDir, err := os.MkdirTemp("", "mosaic-upload-*")
 	if err != nil {
-		fmt.Printf("[Transfer] Cannot create temp dir: %v\n", err)
-		return
+		return fmt.Errorf("cannot create temp dir: %w", err)
 	}
 	defer os.RemoveAll(outDir)
 
 	if err := copyFile(path, filepath.Join(outDir, filename)); err != nil {
-		fmt.Printf("[Transfer] Cannot stage file: %v\n", err)
-		return
+		return fmt.Errorf("cannot stage file: %w", err)
 	}
 
 	fmt.Printf("[Transfer] Encoding into %d data + %d parity shards…\n", DataShards, ParityShards)
 	enc, err := encoding.NewEncoder(DataShards, ParityShards, outDir, outDir)
 	if err != nil {
-		fmt.Printf("[Transfer] Encoder init failed: %v\n", err)
-		return
+		return fmt.Errorf("encoder init failed: %w", err)
 	}
 	if err := enc.EncodeFile(filename); err != nil {
-		fmt.Printf("[Transfer] Encode failed: %v\n", err)
-		return
+		return fmt.Errorf("encode failed: %w", err)
 	}
 
 	// Build stable peer order: sort our ID + all connected peer IDs lexicographically.
@@ -448,9 +441,10 @@ func UploadFile(path string, client *p2p.Client) {
 
 	if len(connectedPeers) == 0 {
 		fmt.Println("[Transfer] No peers connected — all shards saved locally")
-		return
+		return nil
 	}
 	fmt.Printf("[Transfer] Upload complete: %s\n", filename)
+	return nil
 }
 
 // ──────────────────────────────────────────────────────────
@@ -850,6 +844,17 @@ func FetchFileBytes(filename string, client *p2p.Client, getHolders func(content
 		return nil, fmt.Errorf("reconstructed file not found in %s", outDir)
 	}
 	return os.ReadFile(matches[0])
+}
+
+// DeleteLocalShards removes the shard directory for contentHash from the local
+// shard store. Called when the file owner broadcasts a ShardDelete message.
+func DeleteLocalShards(contentHash string) {
+	shardDir := filepath.Join(ShardsDir(), contentHash)
+	if err := os.RemoveAll(shardDir); err != nil {
+		fmt.Printf("[Transfer] DeleteLocalShards: could not remove shards for %s: %v\n", contentHash, err)
+		return
+	}
+	fmt.Printf("[Transfer] Deleted local shards for %s\n", contentHash)
 }
 
 // ──────────────────────────────────────────────────────────

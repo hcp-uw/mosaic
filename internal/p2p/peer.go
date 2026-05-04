@@ -73,6 +73,40 @@ func (peer *PeerInfo) openFromPeer(frame []byte) ([]byte, error) {
 	return gcm.Open(nil, nonce, ct, nil)
 }
 
+// decryptFromAnyPeer attempts to decrypt a session-encrypted frame, first by
+// looking up the peer by source address and then by trying every peer with a
+// completed handshake. The second path handles TURN relay scenarios where the
+// packet's source address is the relay server rather than the peer's real IP.
+// AES-256-GCM authentication makes false positives cryptographically impossible.
+func (c *Client) decryptFromAnyPeer(data []byte, fromAddr *net.UDPAddr) ([]byte, bool) {
+	// Fast path: peer found by source address.
+	sender := c.getPeerByAddr(fromAddr)
+	if sender != nil && sender.HandshakeDone {
+		inner, err := sender.openFromPeer(data)
+		if err == nil {
+			return inner, true
+		}
+	}
+
+	// Slow path: TURN relay or address mismatch — try all handshake-complete peers.
+	c.mutex.RLock()
+	peers := make([]*PeerInfo, 0, len(c.peers))
+	for _, p := range c.peers {
+		if p.HandshakeDone && p != sender {
+			peers = append(peers, p)
+		}
+	}
+	c.mutex.RUnlock()
+
+	for _, p := range peers {
+		inner, err := p.openFromPeer(data)
+		if err == nil {
+			return inner, true
+		}
+	}
+	return nil, false
+}
+
 // writeToPeer serializes msg, encrypts it if the handshake is done, and sends it.
 func (c *Client) writeToPeer(peer *PeerInfo, msg *api.Message) error {
 	data, err := msg.Serialize()

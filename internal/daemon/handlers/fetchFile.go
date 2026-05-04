@@ -19,10 +19,14 @@ func FetchFileBytes(filename string) ([]byte, error) {
 	var nm filesystem.NetworkManifest
 	var manifestLoaded bool
 	if aesKey, err := filesystem.LoadOrCreateNetworkKey(shared.NetworkKeyPath()); err == nil {
-		if m, err := filesystem.ReadNetworkManifest(mosaicDir, aesKey); err == nil {
-			nm = m
-			manifestLoaded = true
+		m, merr := filesystem.ReadNetworkManifest(mosaicDir, aesKey)
+		if merr != nil {
+			// Manifest is corrupt — use an empty one so getHolders is still set and
+			// ShardRequests can be sent to peers (they will respond if they hold shards).
+			m = filesystem.NetworkManifest{}
 		}
+		nm = m
+		manifestLoaded = true
 	}
 
 	// If no local shard meta exists for this file, synthesise one from the

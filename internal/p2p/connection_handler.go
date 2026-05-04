@@ -124,7 +124,8 @@ func (c *Client) tickPeerPings(state ClientState) {
 
 		// If a direct peer hasn't ponged within the TURN fallback window and
 		// we haven't already switched it to TURN, queue a fallback attempt.
-		if !peer.ViaTURN && staleness > turnFallbackTimeout && peer.IsLeader {
+		// This applies to any peer (leader or member) — either side may be behind NAT.
+		if !peer.ViaTURN && staleness > turnFallbackTimeout {
 			turnFallbackIDs = append(turnFallbackIDs, id)
 		}
 

@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/hcp-uw/mosaic/internal/cli/shared"
 	"github.com/hcp-uw/mosaic/internal/daemon/handlers/helpers"
@@ -38,7 +39,32 @@ func SyncUserStubs() {
 		return // user has no files in the network manifest yet
 	}
 
-	for _, f := range filesystem.ChainToFiles(m.Chains[idx]) {
+	files := filesystem.ChainToFiles(m.Chains[idx])
+
+	// Build a set of currently-live names so we can detect deletions.
+	networkNames := make(map[string]bool, len(files))
+	for _, f := range files {
+		networkNames[f.Name] = true
+	}
+
+	// Remove local entries for files deleted from the network manifest.
+	localEntries, lerr := filesystem.ReadManifest(mosaicDir)
+	if lerr == nil {
+		for name := range localEntries {
+			if !networkNames[name] {
+				if err := filesystem.RemoveFromManifest(mosaicDir, name); err != nil {
+					fmt.Printf("syncUserStubs: could not remove %s from local manifest: %v\n", name, err)
+				}
+				if err := filesystem.RemoveStub(mosaicDir, name); err != nil && !os.IsNotExist(err) {
+					fmt.Printf("syncUserStubs: could not remove stub for %s: %v\n", name, err)
+				}
+				fmt.Printf("syncUserStubs: removed deleted file %s from local state\n", name)
+			}
+		}
+	}
+
+	// Add stubs for files not yet tracked locally.
+	for _, f := range files {
 		if filesystem.IsInManifest(mosaicDir, f.Name) {
 			continue
 		}

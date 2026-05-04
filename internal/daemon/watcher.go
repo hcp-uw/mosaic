@@ -137,11 +137,15 @@ func (w *DirWatcher) onDisappeared(logicalName string) {
 		return
 	}
 
-	// If cached=false the daemon already marked this file as uncached before
-	// removing the local copy (deleteStub, logout). Don't treat it as a
-	// user-initiated network delete.
+	// If cached=false the physical file is a stub. The user deleted the stub
+	// directly (e.g. in Finder). Remove the local manifest entry so the file
+	// no longer appears in 'mos list file', but do NOT propagate a network delete
+	// (the file still exists on the network).
 	if !entry.Cached {
-		fmt.Printf("[watcher] skipping delete for %s — already marked uncached\n", logicalName)
+		fmt.Printf("[watcher] stub deleted by user — removing %s from local manifest\n", logicalName)
+		if err := filesystem.RemoveFromManifest(w.mosaicDir, logicalName); err != nil {
+			fmt.Printf("[watcher] could not remove %s from local manifest: %v\n", logicalName, err)
+		}
 		return
 	}
 

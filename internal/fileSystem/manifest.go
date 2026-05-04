@@ -58,6 +58,19 @@ func writeManifestLocked(mosaicDir string, entries map[string]ManifestEntry) err
 	return os.Rename(tmp, manifestPath(mosaicDir))
 }
 
+// EnsureManifest creates an empty local manifest file if one does not exist.
+// Call this at daemon startup so concurrent ManifestSync merges always have a
+// valid file to read-modify-write against rather than racing on first creation.
+func EnsureManifest(mosaicDir string) error {
+	p := manifestPath(mosaicDir)
+	if _, err := os.Stat(p); err == nil {
+		return nil // already exists
+	}
+	manifestMu.Lock()
+	defer manifestMu.Unlock()
+	return writeManifestLocked(mosaicDir, map[string]ManifestEntry{})
+}
+
 // AddToManifest inserts or replaces an entry. Pass an empty string for
 // contentHash if it is not yet known (e.g. for legacy or remote-only entries).
 func AddToManifest(mosaicDir, name string, size, nodeID int, contentHash string) error {

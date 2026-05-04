@@ -10,7 +10,10 @@ import (
 	"github.com/hcp-uw/mosaic/internal/cli/shared"
 )
 
-func SendRequest(command string, data interface{}) (*protocol.Response, error) {
+// SendRequest sends a command to the daemon and returns the response.
+// timeout controls how long to wait for the daemon to reply; use a large
+// value (e.g. 2 * time.Minute) for commands that fetch data from peers.
+func SendRequest(command string, data interface{}, timeout ...time.Duration) (*protocol.Response, error) {
 	conn, err := net.DialTimeout("unix", shared.SocketPath, 2*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to daemon (%s): %w", shared.SocketPath, err)
@@ -18,6 +21,9 @@ func SendRequest(command string, data interface{}) (*protocol.Response, error) {
 	defer conn.Close()
 
 	totalTimeout := 10 * time.Second
+	if len(timeout) > 0 && timeout[0] > 0 {
+		totalTimeout = timeout[0]
+	}
 	if err := conn.SetDeadline(time.Now().Add(totalTimeout)); err != nil {
 		return nil, fmt.Errorf("failed to set connection deadline: %w", err)
 	}

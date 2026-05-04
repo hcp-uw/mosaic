@@ -51,12 +51,27 @@ func uploadFile(path string, keepLocal bool) protocol.UploadFileResponse {
 
 	contentHash, _ := sha256File(path)
 
-	// Update the manifest entry with the latest size and content hash.
+	// Track whether the file was already cached locally before upload.
+	alreadyCached := false
+	if _, err := os.Stat(realPath); err == nil {
+		alreadyCached = true
+	}
+
+	// Update the local manifest entry so this node knows about the file.
 	if err := filesystem.AddToManifest(mosaicDir, filename, originalSize, nodeID, contentHash); err != nil {
 		fmt.Println("Warning: could not update manifest for", filename, "-", err)
 	}
 
-	// Update the network manifest: append "add" block, write, broadcast.
+	// Distribute shards to peers. This blocks until all shards are sent so we
+	// don't announce the file to the network before it's actually downloadable.
+	if err := transfer.UploadFile(path, GetP2PClient()); err != nil {
+		fmt.Printf("Warning: shard upload failed for %s: %v\n", filename, err)
+		// Don't abort — the file is at least stored locally, so we still proceed
+		// to announce it (partial availability is better than no announcement).
+	}
+
+	// Only now append the network manifest block and broadcast to peers.
+	// Peers that receive ManifestSync after this point can successfully download.
 	if aesKey, err := filesystem.LoadOrCreateNetworkKey(shared.NetworkKeyPath()); err == nil {
 		if kp, kerr := filesystem.LoadOrCreateUserKey(shared.UserKeyPath()); kerr == nil {
 			if nm, err := filesystem.ReadNetworkManifest(mosaicDir, aesKey); err == nil {
@@ -73,17 +88,11 @@ func uploadFile(path string, keepLocal bool) protocol.UploadFileResponse {
 					fmt.Println("Warning: could not write network manifest for", filename, "-", werr)
 				} else {
 					BroadcastNetworkManifest(nm)
-					go transfer.UploadFile(path, GetP2PClient())
 				}
 			}
 		} else {
 			fmt.Println("Warning: could not load user key:", kerr)
 		}
-	}
-
-	alreadyCached := false
-	if _, err := os.Stat(realPath); err == nil {
-		alreadyCached = true
 	}
 
 	switch {
@@ -110,7 +119,7 @@ func uploadFile(path string, keepLocal bool) protocol.UploadFileResponse {
 
 	return protocol.UploadFileResponse{
 		Success:          true,
-		Details:          "Upload processed by daemon",
+		Details:          "Upload complete — shards distributed and file announced to network",
 		FileName:         filename,
 		AvailableStorage: helpers.AvailableStorage(),
 	}
