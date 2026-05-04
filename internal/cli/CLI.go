@@ -6,12 +6,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -601,19 +603,47 @@ func uploadFile() {
 	// Allow 60s base + 60s per GB so large files don't time out during SHA-256 and encoding.
 	uploadTimeout := 60*time.Second + time.Duration(fileSizeBytes/(1024*1024*1024)+1)*60*time.Second
 
-	// Spinner runs while we wait for the daemon to respond.
+	// Progress bar polls /upload-progress on the daemon's HTTP server.
+	// While the daemon is still hashing/encoding (total==0), shows a spinner.
+	// Once shard dispatch starts (total>0), switches to a percentage bar.
 	done := make(chan struct{})
 	start := time.Now()
+	var spinnerWg sync.WaitGroup
+	spinnerWg.Add(1)
 	go func() {
+		defer spinnerWg.Done()
+		httpClient := &http.Client{Timeout: 500 * time.Millisecond}
 		frames := []string{"|", "/", "-", "\\"}
-		i := 0
+		frame := 0
 		for {
 			select {
 			case <-done:
 				return
-			case <-time.After(200 * time.Millisecond):
-				fmt.Printf("\r  %s  processing... %ds", frames[i%len(frames)], int(time.Since(start).Seconds()))
-				i++
+			case <-time.After(300 * time.Millisecond):
+			}
+			elapsed := int(time.Since(start).Seconds())
+
+			// Poll daemon progress endpoint.
+			var dispatched, total int
+			if r, err := httpClient.Get("http://localhost:7777/upload-progress"); err == nil {
+				var body struct {
+					Dispatched int `json:"dispatched"`
+					Total      int `json:"total"`
+				}
+				if json.NewDecoder(r.Body).Decode(&body) == nil {
+					dispatched, total = body.Dispatched, body.Total
+				}
+				r.Body.Close()
+			}
+
+			if total > 0 {
+				pct := dispatched * 100 / total
+				filled := pct / 5 // 20-cell bar
+				bar := strings.Repeat("█", filled) + strings.Repeat("░", 20-filled)
+				fmt.Printf("\r  [%s] %3d%%  %ds  ", bar, pct, elapsed)
+			} else {
+				fmt.Printf("\r  %s  preparing...  %ds  ", frames[frame%len(frames)], elapsed)
+				frame++
 			}
 		}
 	}()
@@ -621,8 +651,10 @@ func uploadFile() {
 	resp, uploadErr := client.SendRequest("uploadFile", protocol.UploadFileRequest{
 		Path: absPath,
 	}, uploadTimeout)
+	elapsed := time.Since(start)
 	close(done)
-	fmt.Print("\r                    \r") // clear spinner line
+	spinnerWg.Wait()
+	fmt.Print("\r" + strings.Repeat(" ", 50) + "\r") // clear progress line
 
 	exitOnErr(uploadErr, "Error uploading file.")
 
@@ -630,9 +662,8 @@ func uploadFile() {
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
-	message := fmt.Sprintf("\nFile '%v' uploaded successfully to network.\n- Available storage remaining: %d GB.\n",
-		cmdResp.FileName, cmdResp.AvailableStorage)
-	fmt.Println(message)
+	fmt.Printf("\nFile '%v' uploaded successfully to network.\n- Time: %s\n- Available storage remaining: %d GB.\n\n",
+		cmdResp.FileName, elapsed.Round(time.Second), cmdResp.AvailableStorage)
 }
 
 // Uploads a folder to the network
@@ -905,7 +936,7 @@ func wipeState() {
 	}
 
 	if errs == 0 {
-		fmt.Println("State wiped. Run 'mosaic-node &' and 'mos login <key>' to start fresh.")
+		fmt.Println("State wiped. Run './install.sh' and 'mos login <key>' to start fresh.")
 	} else {
 		fmt.Printf("Done with %d error(s). Some files may need manual cleanup.\n", errs)
 	}
@@ -921,7 +952,7 @@ func exitOnErr(err error, msg string) {
 	if err != nil {
 		if strings.Contains(err.Error(), "failed to connect to daemon") {
 			fmt.Println("Error: could not reach daemon. Is mosaic-node running?")
-			fmt.Println("Start it with: mosaic-node &")
+			fmt.Println("Start it with: mosaic-node & or ./install.sh")
 		} else {
 			fmt.Println(msg, err)
 		}

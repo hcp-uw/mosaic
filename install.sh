@@ -76,7 +76,7 @@ is_app_running() {
 # Stop the Swift menu bar app if it's running
 stop_app() {
     if is_app_running; then
-        echo "Stopping Mosaic app..."
+        printf "Stopping Mosaic app..."
         pkill -x "Mosaic" 2>/dev/null || true
         pkill -x "MosaicFinderSync" 2>/dev/null || true
         sleep 1
@@ -84,7 +84,7 @@ stop_app() {
             pkill -9 -x "Mosaic" 2>/dev/null || true
             sleep 1
         fi
-        echo -e "${GREEN}✓ Mosaic app stopped${NC}"
+        echo -e " ${GREEN}✓${NC}"
     fi
 }
 
@@ -108,8 +108,7 @@ build_app() {
         return 0
     fi
 
-    echo ""
-    echo "Building Mosaic.app..."
+    printf "Building Mosaic.app..."
 
     local derived="${script_dir}/MosaicApp/DerivedData"
 
@@ -124,16 +123,14 @@ build_app() {
         > /tmp/mosaic-xcodebuild.log 2>&1
 
     if [ $? -ne 0 ]; then
-        echo -e "${YELLOW}⚠ App build failed — check /tmp/mosaic-xcodebuild.log${NC}"
-        echo "  The CLI and daemon will work normally without the menu bar app."
+        echo -e " ${YELLOW}⚠ (failed — CLI works without it)${NC}"
         return 0
     fi
 
     local app_path="${derived}/Build/Products/Release/Mosaic.app"
     if [ -d "$app_path" ]; then
-        # Remove quarantine so Gatekeeper doesn't block it on first launch.
         xattr -dr com.apple.quarantine "$app_path" 2>/dev/null || true
-        echo -e "${GREEN}✓ Mosaic.app built${NC}"
+        echo -e " ${GREEN}✓${NC}"
     fi
 }
 
@@ -146,14 +143,13 @@ start_app() {
         return 0
     fi
 
-    echo ""
-    echo "Starting Mosaic app..."
+    printf "Starting Mosaic app..."
 
     # Try bundle ID first — works as long as the app has been run at least once.
     if open -b "com.mosaic.Mosaic" 2>/dev/null; then
         sleep 2
         if is_app_running; then
-            echo -e "${GREEN}✓ Mosaic app started${NC}"
+            echo -e " ${GREEN}✓${NC}"
             return 0
         fi
     fi
@@ -173,22 +169,18 @@ start_app() {
             open "$candidate" 2>/dev/null
             sleep 2
             if is_app_running; then
-                echo -e "${GREEN}✓ Mosaic app started from ${candidate}${NC}"
+                echo -e " ${GREEN}✓${NC}"
                 return 0
             fi
         fi
     done
 
-    echo -e "${YELLOW}⚠ Mosaic.app not found — running without the menu bar app.${NC}"
-    echo "  Build and run the app in Xcode at least once to register it:"
-    echo "  open MosaicApp/Mosaic.xcodeproj"
-    echo "  The CLI and daemon will work normally without it."
+    echo -e " ${YELLOW}⚠ (not found — CLI works without it)${NC}"
 }
 
 # Stop daemon (robust version)
 stop_daemon() {
-    echo ""
-    echo "Checking for running daemons..."
+    printf "Checking for running daemons..."
     local stopped=false
     local attempts=0
     local max_attempts=3
@@ -198,7 +190,6 @@ stop_daemon() {
         if [ -f "${PID_FILE}" ]; then
             local pid=$(cat "${PID_FILE}" 2>/dev/null || echo "")
             if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-                echo "Stopping daemon (PID: $pid)..."
                 kill "$pid" 2>/dev/null || true
                 # Wait up to 4s for graceful disconnect (daemon leaves P2P network on SIGTERM).
                 local wait=0
@@ -207,9 +198,7 @@ stop_daemon() {
                     wait=$((wait+1))
                 done
 
-                # Force kill if still alive.
                 if kill -0 "$pid" 2>/dev/null; then
-                    echo "Process still alive, using SIGKILL..."
                     kill -9 "$pid" 2>/dev/null || true
                     sleep 1
                 fi
@@ -220,7 +209,6 @@ stop_daemon() {
         
         # Fallback: kill by process name
         if is_daemon_running; then
-            echo "Found running mosaicd processes (attempt $((attempts+1))/$max_attempts)..."
             if [ "$OS" = "Windows" ]; then
                 taskkill /F /IM "mosaicd.exe" 2>/dev/null || true
             else
@@ -228,9 +216,7 @@ stop_daemon() {
                 pkill -TERM -f "mosaicd" 2>/dev/null || true
                 sleep 2
                 
-                # Force kill if still running
                 if pgrep -f "mosaicd" > /dev/null 2>&1; then
-                    echo "Using SIGKILL..."
                     pkill -9 -f "mosaicd" 2>/dev/null || true
                     sleep 1
                 fi
@@ -249,7 +235,6 @@ stop_daemon() {
         fi
         
         if [ $attempts -lt $max_attempts ]; then
-            echo "Retrying..."
             sleep 1
         fi
     done
@@ -259,27 +244,14 @@ stop_daemon() {
     
     # Final verification
     if is_daemon_running; then
-        echo -e "${RED}⚠ Warning: mosaicd processes still running after $max_attempts attempts${NC}"
-        echo ""
-        echo "Running processes:"
-        if [ "$OS" = "Windows" ]; then
-            tasklist | grep -i "mosaicd.exe" || true
-        else
-            ps aux | grep mosaicd | grep -v grep || true
-        fi
-        echo ""
-        echo -e "${YELLOW}You may need to manually kill these processes:${NC}"
-        if [ "$OS" = "Windows" ]; then
-            echo "  taskkill /F /IM mosaicd.exe"
-        else
-            echo "  pkill -9 -f mosaicd"
-        fi
+        echo -e " ${RED}✗${NC}"
+        echo -e "${RED}  Could not stop daemon after $max_attempts attempts. Try: pkill -9 -f mosaicd${NC}"
         return 1
     else
         if [ "$stopped" = true ]; then
-            echo -e "${GREEN}✓ Daemon stopped${NC}"
+            echo -e " ${GREEN}✓${NC}"
         else
-            echo "No daemon was running"
+            echo -e " ${GREEN}✓ (none running)${NC}"
         fi
         return 0
     fi
@@ -287,7 +259,7 @@ stop_daemon() {
 
 # Build binaries
 build_binaries() {
-    echo "Building binaries for $OS..."
+    printf "Building binaries for $OS..."
     mkdir -p bin
 
     # When running as root (sudo), Go may not be in PATH.
@@ -301,19 +273,24 @@ build_binaries() {
 
     if [ -n "$SUDO_USER" ]; then
         chown "$SUDO_USER" bin
-        su "$SUDO_USER" -c "cd $(pwd) && $build_cmd"
+        su "$SUDO_USER" -c "cd $(pwd) && $build_cmd" > /dev/null 2>&1
     else
-        eval "$build_cmd"
+        eval "$build_cmd" > /dev/null 2>&1
     fi
 
-    echo -e "${GREEN}✓ Build complete!${NC}"
+    if [ $? -eq 0 ]; then
+        echo -e " ${GREEN}✓${NC}"
+    else
+        echo -e " ${RED}✗${NC}"
+        echo -e "${RED}Build failed. Run 'go build ./...' for details.${NC}"
+        exit 1
+    fi
 }
 
 # Install binaries
 install_binaries() {
-    echo ""
-    echo "Installing to ${BIN_DIR}..."
-    
+    printf "Installing to ${BIN_DIR}..."
+
     # Create bin directory if it doesn't exist
     if [ "$NEEDS_SUDO" = true ]; then
         sudo mkdir -p "${BIN_DIR}"
@@ -328,32 +305,24 @@ install_binaries() {
         chmod +x "${BIN_DIR}/${CLI_BIN}" 2>/dev/null || true
         chmod +x "${BIN_DIR}/${DAEMON_BIN}" 2>/dev/null || true
     fi
-    
-    echo -e "${GREEN}✓ Installed successfully!${NC}"
+
+    echo -e " ${GREEN}✓${NC}"
     
     # Check if BIN_DIR is in PATH
     if [ "$OS" != "macOS" ]; then
         if [[ ":$PATH:" != *":${BIN_DIR}:"* ]]; then
-            echo ""
-            echo -e "${YELLOW}⚠ Warning: ${BIN_DIR} is not in your PATH${NC}"
-            echo ""
-            echo "Add this to your shell config (~/.bashrc, ~/.zshrc, or ~/.profile):"
-            echo -e "${GREEN}export PATH=\"${BIN_DIR}:\$PATH\"${NC}"
-            echo ""
-            echo "Then reload your shell:"
-            echo -e "${GREEN}source ~/.bashrc${NC}  # or ~/.zshrc, ~/.profile"
-            echo ""
+            echo -e "${YELLOW}  ⚠ ${BIN_DIR} is not in PATH — add to ~/.bashrc or ~/.zshrc:${NC}"
+            echo -e "    export PATH=\"${BIN_DIR}:\$PATH\""
         fi
     fi
 }
 
 # Start daemon
 start_daemon() {
-    echo ""
-    echo "Starting daemon..."
-    
+    printf "Starting daemon..."
+
     if is_daemon_running; then
-        echo -e "${YELLOW}Daemon already running${NC}"
+        echo -e " ${YELLOW}✓ (already running)${NC}"
         return 0
     fi
     
@@ -389,22 +358,16 @@ start_daemon() {
         waited=$((waited+1))
         
         if is_daemon_running; then
-            # Clean up build directory
             rm -rf bin/ 2>/dev/null || true
-            echo -e "${GREEN}✓ Daemon started (logs: ${LOG_FILE})${NC}"
+            echo -e " ${GREEN}✓${NC}"
             return 0
         fi
     done
-    
-    # Failed to start
-    echo -e "${RED}✗ Failed to start daemon after ${max_wait} seconds${NC}"
-    echo ""
-    echo "Check the logs for details:"
-    echo "  cat ${LOG_FILE}"
-    echo ""
+
+    echo -e " ${RED}✗${NC}"
+    echo -e "${RED}  Daemon failed to start. Check logs: cat ${LOG_FILE}${NC}"
     if [ -f "${LOG_FILE}" ]; then
-        echo "Last 10 lines of log:"
-        tail -10 "${LOG_FILE}"
+        tail -5 "${LOG_FILE}"
     fi
     return 1
 }
@@ -485,17 +448,15 @@ print_success() {
         echo -e "${GREEN}✓ Logged in${NC}"
         echo ""
         echo "Next steps:"
-        echo "  mos join <stun-server-ip>:3478   - Connect to the network"
-        echo "  mos upload file <path>            - Upload a file"
-        echo "  mos download file <name>          - Download a file"
+        echo "  mos join network             - Connect to the network"
+        echo "  mos upload file <path>       - Upload a file"
+        echo "  mos download file <name>     - Download a file"
     else
-        echo -e "${YELLOW}⚠ You are not logged in.${NC}"
+        echo -e "${YELLOW}⚠ Not logged in${NC}"
         echo ""
         echo "To get started:"
-        echo -e "  ${GREEN}mos login <key>${NC}   - Log in with your key"
-        echo ""
-        echo "Then connect to the network:"
-        echo "  mos join <stun-server-ip>:3478"
+        echo -e "  ${GREEN}mos login <key>${NC}              - Log in with your key"
+        echo "  mos join network             - Connect to the network"
     fi
 
     echo ""
@@ -511,35 +472,25 @@ print_success() {
 main() {
     echo -e "${GREEN}Mosaic Installation Script${NC}"
     echo ""
-    
+
     set_platform_vars
-    echo "Detected OS: $OS"
+    echo "Platform: $OS"
     echo ""
-    
+
     # Check for Go
     if ! command -v go &> /dev/null; then
-        echo -e "${RED}✗ Go is not installed${NC}"
-        echo "Please install Go from https://golang.org/dl/"
+        echo -e "${RED}✗ Go is not installed. Install from https://golang.org/dl/${NC}"
         exit 1
     fi
-    
-    # Stop any existing processes
+
     stop_app
     stop_daemon || true
-
-    # Build and install
     build_binaries
     install_binaries
-
-    # Start daemon
     if ! start_daemon; then
-        echo ""
-        echo -e "${RED}Installation completed but daemon failed to start${NC}"
         show_debug_info
         exit 1
     fi
-
-    # Build and start the Swift app (best-effort — warns but doesn't fail)
     build_app
     start_app
 

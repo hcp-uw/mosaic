@@ -12,6 +12,7 @@ import (
 	"github.com/hcp-uw/mosaic/internal/cli/shared"
 	"github.com/hcp-uw/mosaic/internal/daemon/handlers"
 	filesystem "github.com/hcp-uw/mosaic/internal/fileSystem"
+	"github.com/hcp-uw/mosaic/internal/transfer"
 )
 
 func httpPort() string {
@@ -41,10 +42,20 @@ func StartHTTPServer() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/files", handleFiles)
 	mux.HandleFunc("/files/", handleFileByName)
+	mux.HandleFunc("/upload-progress", handleUploadProgress)
 
 	port := httpPort()
 	fmt.Println("HTTP API listening on", port)
 	return http.ListenAndServe(port, mux)
+}
+
+// GET /upload-progress — returns current shard dispatch counts for the active upload.
+func handleUploadProgress(w http.ResponseWriter, r *http.Request) {
+	dispatched, total := transfer.GetUploadProgress()
+	writeJSON(w, http.StatusOK, struct {
+		Dispatched int `json:"dispatched"`
+		Total      int `json:"total"`
+	}{dispatched, total})
 }
 
 // GET /files

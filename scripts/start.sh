@@ -24,7 +24,19 @@ fi
 LOG_DIR="/var/log/mosaic"
 PID_DIR="/var/run/mosaic"
 
-mkdir -p "$LOG_DIR" "$PID_DIR"
+mkdir -p "$LOG_DIR" "$PID_DIR" bin
+
+# Build binaries if missing
+if [ ! -f "./bin/mosaic-stun" ] || [ ! -f "./bin/mosaic-turn" ]; then
+    printf "Building server binaries..."
+    if go build -o bin/mosaic-stun ./cmd/mosaic-stun && go build -o bin/mosaic-turn ./cmd/mosaic-turn; then
+        echo " ✓"
+    else
+        echo " ✗"
+        echo "Build failed. Run 'go build ./...' for details."
+        exit 1
+    fi
+fi
 
 # STUN server
 if [ -f "${PID_DIR}/stun.pid" ] && kill -0 "$(cat ${PID_DIR}/stun.pid)" 2>/dev/null; then

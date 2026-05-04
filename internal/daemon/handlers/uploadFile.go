@@ -13,6 +13,10 @@ import (
 	"github.com/hcp-uw/mosaic/internal/transfer"
 )
 
+// uploadFile handles both explicit uploads and local-file ingestion.
+// contentHash and originalSize are derived from the actual file read inside
+// transfer.UploadFile so we never store an empty hash in the manifest.
+
 // UploadFile uploads a file to the network.
 // If the file is already cached locally (e.g. a re-upload), it re-fetches
 // from the network to update the local copy.
@@ -37,19 +41,9 @@ func uploadFile(path string, keepLocal bool) protocol.UploadFileResponse {
 	}
 
 	filename := removePath(path)
-
-	originalSize := 0
-	if info, err := os.Stat(path); err == nil {
-		originalSize = int(info.Size())
-	}
-
 	mosaicDir := shared.MosaicDir()
 	nodeID := helpers.GetNodeID()
 	realPath := filepath.Join(mosaicDir, filename)
-
-	// TODO: distribute file shards to peers here.
-
-	contentHash, _ := sha256File(path)
 
 	// Track whether the file was already cached locally before upload.
 	alreadyCached := false
@@ -57,17 +51,25 @@ func uploadFile(path string, keepLocal bool) protocol.UploadFileResponse {
 		alreadyCached = true
 	}
 
+	// Distribute shards to peers. This blocks until all shards are sent so we
+	// don't announce the file to the network before it's actually downloadable.
+	// UploadFile returns the content hash and file size derived from the actual
+	// file read — using these avoids a silent empty-hash if a pre-read failed.
+	contentHash, originalSize, uploadErr := transfer.UploadFile(path, GetP2PClient())
+	if uploadErr != nil {
+		fmt.Printf("Warning: shard upload failed for %s: %v\n", filename, uploadErr)
+	}
+	if contentHash == "" {
+		// File could not be read at all — abort rather than writing a broken manifest entry.
+		return protocol.UploadFileResponse{
+			Success: false,
+			Details: fmt.Sprintf("upload failed: could not read %s — %v", filename, uploadErr),
+		}
+	}
+
 	// Update the local manifest entry so this node knows about the file.
 	if err := filesystem.AddToManifest(mosaicDir, filename, originalSize, nodeID, contentHash); err != nil {
 		fmt.Println("Warning: could not update manifest for", filename, "-", err)
-	}
-
-	// Distribute shards to peers. This blocks until all shards are sent so we
-	// don't announce the file to the network before it's actually downloadable.
-	if err := transfer.UploadFile(path, GetP2PClient()); err != nil {
-		fmt.Printf("Warning: shard upload failed for %s: %v\n", filename, err)
-		// Don't abort — the file is at least stored locally, so we still proceed
-		// to announce it (partial availability is better than no announcement).
 	}
 
 	// Only now append the network manifest block and broadcast to peers.

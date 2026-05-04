@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hcp-uw/mosaic/internal/api"
@@ -77,6 +78,12 @@ var (
 
 	// fileReadyChans allows FetchFileBytes to wait for autoReconstruct to finish.
 	fileReadyChans sync.Map // fileHash → chan struct{}
+
+	// uploadProgress tracks shard distribution progress for the current upload.
+	// shardsDispatched is incremented each time a shard is stored or sent.
+	// shardsTotal is set at the start of UploadFile.
+	uploadShardsDispatched atomic.Int32
+	uploadShardsTotal      atomic.Int32
 )
 
 // SetShardStoredCallback registers a function that is called (in a goroutine)
@@ -86,6 +93,18 @@ func SetShardStoredCallback(fn func(contentHash string, shardIndex int)) {
 	shardStoredCbMu.Lock()
 	shardStoredCb = fn
 	shardStoredCbMu.Unlock()
+}
+
+// GetUploadProgress returns the number of shards dispatched so far and the
+// total shards for the current upload. Both are 0 when no upload is running.
+func GetUploadProgress() (dispatched, total int) {
+	return int(uploadShardsDispatched.Load()), int(uploadShardsTotal.Load())
+}
+
+// resetUploadProgress initialises the counters for a new upload.
+func resetUploadProgress(total int) {
+	uploadShardsDispatched.Store(0)
+	uploadShardsTotal.Store(int32(total))
 }
 
 // testShardsDir is overridden in tests to redirect shard I/O to a temp dir.
@@ -316,48 +335,54 @@ func Init(ctx context.Context) {
 // ──────────────────────────────────────────────────────────
 
 // UploadFile RS-encodes path, saves shards locally, and streams them to all
-// connected peers using the binary wire protocol. Wrap in a goroutine for background use.
-func UploadFile(path string, client *p2p.Client) error {
+// connected peers using the binary wire protocol. Returns the file's SHA-256
+// content hash and byte size so the caller can record them in the manifest
+// without a second read of the file.
+func UploadFile(path string, client *p2p.Client) (fileHash string, fileSize int, err error) {
+	// Reset progress immediately so the CLI shows "preparing..." instead of
+	// the previous upload's stale 100% while hashing/encoding takes place.
+	resetUploadProgress(0)
+
 	filename := filepath.Base(path)
 	nameNoExt := strings.TrimSuffix(filename, filepath.Ext(filename))
 
 	f, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("cannot open %s: %w", path, err)
+		return "", 0, fmt.Errorf("cannot open %s: %w", path, err)
 	}
 	hasher := sha256.New()
 	fileSize64, err := io.Copy(hasher, f)
 	f.Close()
 	if err != nil {
-		return fmt.Errorf("cannot hash %s: %w", path, err)
+		return "", 0, fmt.Errorf("cannot hash %s: %w", path, err)
 	}
-	fileHash := hex.EncodeToString(hasher.Sum(nil))
-	fileSize := int(fileSize64)
+	fileHash = hex.EncodeToString(hasher.Sum(nil))
+	fileSize = int(fileSize64)
 
 	netKey, err := shardEncryptionKey()
 	if err != nil {
-		return fmt.Errorf("cannot derive shard key: %w", err)
+		return "", 0, fmt.Errorf("cannot derive shard key: %w", err)
 	}
 
 	fmt.Printf("[Transfer] Uploading %s  hash=%s…  size=%d bytes\n", filename, fileHash[:12], fileSize)
 
 	outDir, err := os.MkdirTemp("", "mosaic-upload-*")
 	if err != nil {
-		return fmt.Errorf("cannot create temp dir: %w", err)
+		return "", 0, fmt.Errorf("cannot create temp dir: %w", err)
 	}
 	defer os.RemoveAll(outDir)
 
 	if err := copyFile(path, filepath.Join(outDir, filename)); err != nil {
-		return fmt.Errorf("cannot stage file: %w", err)
+		return "", 0, fmt.Errorf("cannot stage file: %w", err)
 	}
 
 	fmt.Printf("[Transfer] Encoding into %d data + %d parity shards…\n", DataShards, ParityShards)
 	enc, err := encoding.NewEncoder(DataShards, ParityShards, outDir, outDir)
 	if err != nil {
-		return fmt.Errorf("encoder init failed: %w", err)
+		return "", 0, fmt.Errorf("encoder init failed: %w", err)
 	}
 	if err := enc.EncodeFile(filename); err != nil {
-		return fmt.Errorf("encode failed: %w", err)
+		return "", 0, fmt.Errorf("encode failed: %w", err)
 	}
 
 	// Build stable peer order: sort our ID + all connected peer IDs lexicographically.
@@ -394,6 +419,8 @@ func UploadFile(path string, client *p2p.Client) error {
 	shardDir := filepath.Join(ShardsDir(), fileHash)
 	_ = os.MkdirAll(shardDir, 0755)
 
+	resetUploadProgress(TotalShards)
+
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 1) // sequential sends to avoid UDP packet loss
 
@@ -406,6 +433,7 @@ func UploadFile(path string, client *p2p.Client) error {
 			dst := filepath.Join(shardDir, fmt.Sprintf("shard%d_%s.dat", i, fileHash))
 			if chunks, err := encryptShardFileToChunks(srcPath, netKey); err == nil {
 				if writeErr := writeEncryptedShardFile(dst, chunks); writeErr == nil {
+					uploadShardsDispatched.Add(1)
 					shardStoredCbMu.Lock()
 					cb := shardStoredCb
 					shardStoredCbMu.Unlock()
@@ -425,6 +453,7 @@ func UploadFile(path string, client *p2p.Client) error {
 				if err := sendPlaintextShardToPeer(src, shardIdx, fileHash, filename, fileSize, netKey, peerID, client); err != nil {
 					fmt.Printf("[Transfer] Shard %d → peer %s failed: %v\n", shardIdx, peerID[:8], err)
 				}
+				uploadShardsDispatched.Add(1)
 			}(i, targetPeerID, srcPath)
 		}
 	}
@@ -441,10 +470,10 @@ func UploadFile(path string, client *p2p.Client) error {
 
 	if len(connectedPeers) == 0 {
 		fmt.Println("[Transfer] No peers connected — all shards saved locally")
-		return nil
+		return fileHash, fileSize, nil
 	}
 	fmt.Printf("[Transfer] Upload complete: %s\n", filename)
-	return nil
+	return fileHash, fileSize, nil
 }
 
 // ──────────────────────────────────────────────────────────
