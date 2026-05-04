@@ -33,6 +33,9 @@ Files:
   delete folder <name>                    Delete a folder from the network.
   rename file <oldname> <newname>         Rename a file on the network.
 
+Debug:
+  debug msg "<text>"                      Send a text message to all peers (tests P2P link and session encryption).
+
 Other:
   version                                 Display current Mosaic client version.
   shutdown                                Stop the daemon and clean up.

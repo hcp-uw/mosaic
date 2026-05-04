@@ -95,6 +95,11 @@ func runClient(serverAddr string, errCh chan<- error) {
 			return
 		}
 		switch msg.Type {
+		case api.PeerTextMessage:
+			d, err := msg.GetPeerTextMessageData()
+			if err == nil {
+				fmt.Printf("[DEBUG] received from %s: %q\n", msg.Sign.PubKey, d.Message)
+			}
 		case api.ManifestSync:
 			go handleManifestSync(mosaicDir, msg)
 		case api.ShardRequest:

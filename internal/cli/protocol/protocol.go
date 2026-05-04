@@ -303,3 +303,13 @@ type ListManifestResponse struct {
 	Details string              `json:"details"`
 	Files   []ManifestFileEntry `json:"files"`
 }
+
+type DebugSendMsgRequest struct {
+	Message string `json:"message"`
+}
+
+type DebugSendMsgResponse struct {
+	Success   bool   `json:"success"`
+	Details   string `json:"details"`
+	PeerCount int    `json:"peerCount"`
+}

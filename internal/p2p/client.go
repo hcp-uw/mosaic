@@ -304,11 +304,9 @@ func (c *Client) processPeerMessage(data []byte, fromAddr *net.UDPAddr) {
 			c.mutex.Unlock()
 			return
 		case api.PeerTextMessage:
-			data, err := msg.GetPeerTextMessageData()
-			if err != nil {
-				c.notifyError(fmt.Errorf("Failed to read PeerTxtMessageData"))
-			}
-			c.notifyMessageReceived([]byte(data.Message))
+			// Forward the full serialized message so the daemon layer can
+			// identify the type and log it properly.
+			c.notifyMessageReceived(data)
 
 		case api.NewPeerJoiner:
 			data, err := msg.GetNewPeerJoinerData()

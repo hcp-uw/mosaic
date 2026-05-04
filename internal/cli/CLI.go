@@ -257,6 +257,15 @@ func Run(Args []string) {
 			fmt.Println("- mos delete folder <name>     Delete a folder.")
 			os.Exit(1)
 		}
+	case "debug":
+		switch {
+		case len(args) == 4 && args[2] == "msg":
+			debugSendMsg(args[3])
+		default:
+			fmt.Println("Usage:")
+			fmt.Println("  mos debug msg \"<text>\"   Send a text message to all peers (tests P2P link)")
+			os.Exit(1)
+		}
 	case "shutdown":
 		if len(args) != 2 {
 			fmt.Println("Please give a valid command.")
@@ -1028,4 +1037,20 @@ func isDaemonRunning(goos string) bool {
 	default:
 		return false
 	}
+}
+
+func debugSendMsg(message string) {
+	resp, err := client.SendRequest("debugSendMsg", protocol.DebugSendMsgRequest{Message: message})
+	exitOnErr(err, "Error sending debug message: ")
+
+	var cmdResp protocol.DebugSendMsgResponse
+	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
+		exitOnErr(err, "Error parsing response.")
+	}
+	if !cmdResp.Success {
+		fmt.Printf("Send failed (%d peer(s) connected): %s\n", cmdResp.PeerCount, cmdResp.Details)
+		os.Exit(1)
+	}
+	fmt.Printf("Sent to %d peer(s). Watch the other node's daemon log for:\n", cmdResp.PeerCount)
+	fmt.Printf("  [DEBUG] received from ...: %q\n", message)
 }

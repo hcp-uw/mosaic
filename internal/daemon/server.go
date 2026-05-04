@@ -136,6 +136,9 @@ func handleConn(conn net.Conn) {
 	case "getVersion":
 		var versionReq protocol.VersionRequest
 		handleWith(enc, req.Data, &versionReq, handlers.GetVersion, "Get version request failed.")
+	case "debugSendMsg":
+		var debugReq protocol.DebugSendMsgRequest
+		handleWith(enc, req.Data, &debugReq, handlers.DebugSendMsg, "Debug send failed.")
 
 	default:
 		err := enc.Encode(&protocol.Response{Ok: false, Message: "unknown command"})
