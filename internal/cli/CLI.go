@@ -710,6 +710,10 @@ func uploadFile() {
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
+	if !cmdResp.Success {
+		fmt.Printf("\nError uploading file: %s\n", cmdResp.Details)
+		os.Exit(1)
+	}
 	fmt.Printf("\nFile '%v' uploaded successfully to network.\n- Time: %s\n- Available storage remaining: %d GB.\n\n",
 		cmdResp.FileName, elapsed.Round(time.Second), cmdResp.AvailableStorage)
 }

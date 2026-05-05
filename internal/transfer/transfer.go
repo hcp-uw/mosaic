@@ -427,16 +427,24 @@ func UploadFile(path string, client *p2p.Client) (fileHash string, fileSize int,
 
 	fmt.Printf("[Transfer] Uploading %s  hash=%s…  size=%d bytes\n", filename, fileHash[:12], fileSize)
 
-	// outDir holds the encoded shard files. The source file is read directly
-	// from its original location (no staging copy needed).
+	// outDir is where the encoder looks for the source file and writes shards.
+	// We symlink the source file in rather than copying it to save I/O on large files.
+	// On failure (e.g., cross-device), fall back to a full copy.
 	outDir, err := os.MkdirTemp("", "mosaic-upload-*")
 	if err != nil {
 		return "", 0, fmt.Errorf("cannot create temp dir: %w", err)
 	}
 	defer os.RemoveAll(outDir)
 
+	linkPath := filepath.Join(outDir, filename)
+	if err := os.Symlink(path, linkPath); err != nil {
+		if err := copyFile(path, linkPath); err != nil {
+			return "", 0, fmt.Errorf("cannot stage file: %w", err)
+		}
+	}
+
 	fmt.Printf("[Transfer] Encoding into %d data + %d parity shards…\n", DataShards, ParityShards)
-	enc, err := encoding.NewEncoder(DataShards, ParityShards, outDir, filepath.Dir(path))
+	enc, err := encoding.NewEncoder(DataShards, ParityShards, outDir, outDir)
 	if err != nil {
 		return "", 0, fmt.Errorf("encoder init failed: %w", err)
 	}

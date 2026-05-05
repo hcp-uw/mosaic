@@ -59,6 +59,16 @@ func DownloadFile(req protocol.DownloadFileRequest) protocol.DownloadFileRespons
 		fmt.Println("Daemon: integrity verified for", filename)
 	}
 
+	// Remove the stub placeholder and mark the local manifest entry as cached.
+	// Suppress the watcher first so it doesn't interpret the stub removal as a
+	// user-initiated delete and accidentally propagate a network delete.
+	stubPath := filepath.Join(mosaicDir, filename+".mosaic")
+	if watcherSuppressFunc != nil {
+		watcherSuppressFunc(stubPath)
+	}
+	_ = os.Remove(stubPath)
+	_ = filesystem.MarkCachedInManifest(mosaicDir, filename)
+
 	return protocol.DownloadFileResponse{
 		Success:          true,
 		Details:          "file written to disk",

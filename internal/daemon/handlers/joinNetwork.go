@@ -335,19 +335,14 @@ func recordShardHolderForPeer(contentHash string, shardIndex int, peerID string)
 		fmt.Printf("recordShardHolderForPeer: could not load network key: %v\n", err)
 		return
 	}
-	nm, err := filesystem.ReadNetworkManifest(mosaicDir, aesKey)
+	nm, changed, err := filesystem.RecordShardHolderAndWrite(mosaicDir, aesKey, contentHash, shardIndex, peerID)
 	if err != nil {
-		fmt.Printf("recordShardHolderForPeer: could not read manifest: %v\n", err)
-		return
-	}
-	if !filesystem.RecordShardHolder(&nm, contentHash, shardIndex, peerID) {
-		return // already recorded
-	}
-	if err := filesystem.WriteNetworkManifestLocked(mosaicDir, aesKey, nm); err != nil {
 		fmt.Printf("recordShardHolderForPeer: could not write manifest: %v\n", err)
 		return
 	}
-	BroadcastNetworkManifest(nm)
+	if changed {
+		BroadcastNetworkManifest(nm)
+	}
 }
 
 // recordShardInManifest records that this node holds shardIndex for the file
@@ -361,19 +356,14 @@ func recordShardInManifest(contentHash string, shardIndex int) {
 		fmt.Printf("recordShardInManifest: could not load network key: %v\n", err)
 		return
 	}
-	nm, err := filesystem.ReadNetworkManifest(mosaicDir, aesKey)
+	nm, changed, err := filesystem.RecordShardHolderAndWrite(mosaicDir, aesKey, contentHash, shardIndex, nodeID)
 	if err != nil {
-		fmt.Printf("recordShardInManifest: could not read manifest: %v\n", err)
-		return
-	}
-	if !filesystem.RecordShardHolder(&nm, contentHash, shardIndex, nodeID) {
-		return // already recorded — nothing to write or broadcast
-	}
-	if err := filesystem.WriteNetworkManifestLocked(mosaicDir, aesKey, nm); err != nil {
 		fmt.Printf("recordShardInManifest: could not write manifest: %v\n", err)
 		return
 	}
-	BroadcastNetworkManifest(nm)
+	if changed {
+		BroadcastNetworkManifest(nm)
+	}
 }
 
 // handlePeerLeft runs when a peer is evicted after a pong timeout.

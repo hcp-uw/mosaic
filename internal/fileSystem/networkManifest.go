@@ -392,6 +392,24 @@ func WriteNetworkManifestLocked(mosaicDir string, key [32]byte, m NetworkManifes
 	return WriteNetworkManifest(mosaicDir, key, m)
 }
 
+// RecordShardHolderAndWrite atomically reads the local manifest, records nodeID
+// as a holder of shardIndex for contentHash, and writes the result — all under
+// one mutex acquisition so concurrent shard callbacks cannot lose each other's
+// writes. Returns the updated manifest and true if the manifest was modified.
+func RecordShardHolderAndWrite(mosaicDir string, key [32]byte, contentHash string, shardIndex int, nodeID string) (NetworkManifest, bool, error) {
+	networkManifestMu.Lock()
+	defer networkManifestMu.Unlock()
+
+	m, err := ReadNetworkManifest(mosaicDir, key)
+	if err != nil {
+		m = NetworkManifest{}
+	}
+	if !RecordShardHolder(&m, contentHash, shardIndex, nodeID) {
+		return m, false, nil
+	}
+	return m, true, WriteNetworkManifest(mosaicDir, key, m)
+}
+
 // MergeAndWriteNetworkManifest reads the local manifest, merges remote into it,
 // and writes the result — all under one mutex acquisition so concurrent
 // handleManifestSync goroutines cannot interleave their read-modify-write cycles.

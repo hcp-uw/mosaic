@@ -3,6 +3,8 @@ package transfer
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -457,6 +459,126 @@ func TestEnsureShardMeta_Idempotent(t *testing.T) {
 	}
 	if m.FileName != "original.md" {
 		t.Errorf("second call should not overwrite: got %q", m.FileName)
+	}
+}
+
+// ──────────────────────────────────────────────────────────
+// UploadFile staging and error propagation
+// ──────────────────────────────────────────────────────────
+
+// uploadTestKey writes a 32-byte shard key to HOME/.mosaic-shard.key and
+// redirects HOME to a temp dir, so shardEncryptionKey() succeeds in tests.
+func uploadTestKey(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	var key [32]byte
+	for i := range key {
+		key[i] = byte(i + 1)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".mosaic-shard.key"), key[:], 0600); err != nil {
+		t.Fatalf("write shard key: %v", err)
+	}
+}
+
+// TestUploadFile_StagesFileViaSymlink is a regression test for the bug where
+// the temp-dir file copy was removed without fixing the encoder's srcDir,
+// causing "encode failed: stat …/file.txt: no such file or directory".
+// UploadFile must succeed even when the source file is not already inside the
+// staging temp directory.
+func TestUploadFile_StagesFileViaSymlink(t *testing.T) {
+	uploadTestKey(t)
+	useTempShardsDir(t)
+
+	// Source file lives in its own directory — NOT in the encoder's staging dir.
+	srcDir := t.TempDir()
+	srcFile := filepath.Join(srcDir, "staging_test.txt")
+	content := bytes.Repeat([]byte("hello staging\n"), 500)
+	if err := os.WriteFile(srcFile, content, 0644); err != nil {
+		t.Fatalf("write source file: %v", err)
+	}
+
+	// nil client → all shards stored locally, no P2P sends needed.
+	hash, size, err := UploadFile(srcFile, nil)
+	if err != nil {
+		t.Fatalf("UploadFile: %v — staging via symlink may be broken", err)
+	}
+	if hash == "" {
+		t.Error("UploadFile returned empty hash — staging may have failed silently")
+	}
+	if size != len(content) {
+		t.Errorf("UploadFile size: got %d, want %d", size, len(content))
+	}
+}
+
+// TestUploadFile_HashMatchesContent verifies that the hash returned by
+// UploadFile is the SHA-256 of the original file bytes. Guards against
+// regressions where a staging or hashing failure caused an empty or wrong hash
+// to be stored in the manifest, making the file permanently undownloadable.
+func TestUploadFile_HashMatchesContent(t *testing.T) {
+	uploadTestKey(t)
+	useTempShardsDir(t)
+
+	srcDir := t.TempDir()
+	content := []byte("deterministic content for hash verification")
+	srcFile := filepath.Join(srcDir, "hash_check.txt")
+	if err := os.WriteFile(srcFile, content, 0644); err != nil {
+		t.Fatalf("write source file: %v", err)
+	}
+
+	sum := sha256.Sum256(content)
+	wantHash := hex.EncodeToString(sum[:])
+
+	gotHash, _, err := UploadFile(srcFile, nil)
+	if err != nil {
+		t.Fatalf("UploadFile: %v", err)
+	}
+	if gotHash != wantHash {
+		t.Errorf("hash mismatch: got %q, want %q", gotHash, wantHash)
+	}
+}
+
+// TestUploadFile_ReturnsErrorForMissingFile verifies that UploadFile returns a
+// non-nil error and an empty hash when the source file does not exist. Prevents
+// the regression where failures propagated as a blank success response (showing
+// "File '' uploaded successfully" in the CLI with 0 GB storage remaining).
+func TestUploadFile_ReturnsErrorForMissingFile(t *testing.T) {
+	uploadTestKey(t)
+	useTempShardsDir(t)
+
+	hash, size, err := UploadFile("/nonexistent/path/ghost.txt", nil)
+	if err == nil {
+		t.Fatal("expected error for missing source file, got nil")
+	}
+	if hash != "" {
+		t.Errorf("expected empty hash on failure, got %q", hash)
+	}
+	if size != 0 {
+		t.Errorf("expected zero size on failure, got %d", size)
+	}
+}
+
+// TestUploadFile_ReturnsErrorWithoutShardKey verifies that UploadFile returns a
+// meaningful error when no shard key is present (user not logged in), rather
+// than panicking or silently producing an empty result.
+func TestUploadFile_ReturnsErrorWithoutShardKey(t *testing.T) {
+	// Point HOME at an empty dir so no shard key exists.
+	t.Setenv("HOME", t.TempDir())
+	useTempShardsDir(t)
+
+	srcDir := t.TempDir()
+	srcFile := filepath.Join(srcDir, "test.txt")
+	os.WriteFile(srcFile, []byte("data"), 0644)
+
+	hash, size, err := UploadFile(srcFile, nil)
+	if err == nil {
+		t.Fatal("expected error when shard key is missing, got nil")
+	}
+	if hash != "" {
+		t.Errorf("expected empty hash, got %q", hash)
+	}
+	if size != 0 {
+		t.Errorf("expected zero size, got %d", size)
 	}
 }
 

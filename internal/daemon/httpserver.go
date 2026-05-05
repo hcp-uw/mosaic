@@ -155,20 +155,6 @@ func handleFileByName(w http.ResponseWriter, r *http.Request) {
 
 	case r.Method == http.MethodPost && sub == "fetch":
 		resp := handlers.DownloadFile(protocol.DownloadFileRequest{FilePath: name})
-		if resp.Success {
-			stubPath := filepath.Join(mosaicDir, name+".mosaic")
-
-			if !filesystem.IsInManifest(mosaicDir, name) {
-				_ = filesystem.AddToManifest(mosaicDir, name, 0, 0, "")
-			}
-
-			if GlobalWatcher != nil {
-				GlobalWatcher.SuppressNext(stubPath)
-			}
-			_ = os.Remove(stubPath)
-
-			_ = filesystem.MarkCachedInManifest(mosaicDir, name)
-		}
 		writeJSON(w, http.StatusOK, resp)
 
 	default:

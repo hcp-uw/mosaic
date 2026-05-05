@@ -53,6 +53,12 @@ func StartDirWatcher(mosaicDir string) (*DirWatcher, error) {
 	w := &DirWatcher{mosaicDir: mosaicDir}
 	GlobalWatcher = w
 
+	// Let handlers suppress watcher events for daemon-initiated file operations
+	// without needing to import the daemon package (which would be circular).
+	handlers.RegisterWatcherSuppressFunc(func(path string) {
+		w.SuppressNext(path)
+	})
+
 	fsw, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err

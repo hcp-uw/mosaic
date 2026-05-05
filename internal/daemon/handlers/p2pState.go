@@ -16,6 +16,17 @@ var (
 	p2pClientMu sync.RWMutex
 )
 
+// watcherSuppressFunc, when set, is called by handlers before removing a file
+// they generated themselves so the watcher can ignore the resulting event.
+// Registered by the daemon package to avoid a circular import.
+var watcherSuppressFunc func(path string)
+
+// RegisterWatcherSuppressFunc lets the daemon register its SuppressNext so
+// handlers can call it without importing the daemon package.
+func RegisterWatcherSuppressFunc(fn func(path string)) {
+	watcherSuppressFunc = fn
+}
+
 // pendingChallenges maps a nonce hex string to the channel waiting for responses.
 // Used by mos status node: the handler registers a channel, broadcasts an
 // IdentityChallenge, and reads responses until the deadline.
