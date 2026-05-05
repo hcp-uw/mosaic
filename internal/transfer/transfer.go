@@ -30,10 +30,10 @@ const (
 	ParityShards = 4
 	TotalShards  = DataShards + ParityShards
 
-	// 32 KB chunks — safe under the 65507-byte UDP max even after AES-GCM (+28 bytes)
-	// and binary header (+~57 bytes). 8× larger than the old 4 KB JSON chunks,
-	// so 8× fewer packets for the same file.
-	chunkSize = 32 * 1024
+	// 60 KB chunks — safe under the 65507-byte UDP max even after AES-GCM (+28 bytes),
+	// binary header (+~57 bytes), and session encryption (+29 bytes): total ~61,430 bytes.
+	// 2× larger than the previous 32 KB, so 47% fewer UDP datagrams for the same file.
+	chunkSize = 60 * 1024
 
 	// binaryMagic is the first byte of every binary shard frame.
 	// JSON messages always start with '{' (0x7B) so 0x01 is unambiguous.
@@ -68,7 +68,7 @@ var (
 	assemblies    = make(map[string]*shardAssembly) // key: "fileHash:shardIndex"
 	reconstructed sync.Map                          // fileHash → true; prevents duplicate reconstruction
 
-	sendLimiter = make(chan struct{}, 200)
+	sendLimiter = make(chan struct{}, 1000)
 	initOnce    sync.Once
 
 	// shardStoredCb is called after a shard is successfully written to disk.
@@ -364,11 +364,11 @@ func decodeBinaryShardChunk(frame []byte) (*binaryShardChunk, error) {
 // Rate limiter
 // ──────────────────────────────────────────────────────────
 
-// Init starts the send rate-limiter goroutine (20 K tokens/sec).
+// Init starts the send rate-limiter goroutine (50 K tokens/sec, 1000-token burst).
 // Safe to call multiple times; only the first call takes effect.
 func Init(ctx context.Context) {
 	initOnce.Do(func() {
-		for i := 0; i < 200; i++ {
+		for i := 0; i < 1000; i++ {
 			sendLimiter <- struct{}{}
 		}
 		go func() {
@@ -379,7 +379,7 @@ func Init(ctx context.Context) {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					for i := 0; i < 200; i++ {
+					for i := 0; i < 500; i++ {
 						select {
 						case sendLimiter <- struct{}{}:
 						default:
@@ -427,18 +427,16 @@ func UploadFile(path string, client *p2p.Client) (fileHash string, fileSize int,
 
 	fmt.Printf("[Transfer] Uploading %s  hash=%s…  size=%d bytes\n", filename, fileHash[:12], fileSize)
 
+	// outDir holds the encoded shard files. The source file is read directly
+	// from its original location (no staging copy needed).
 	outDir, err := os.MkdirTemp("", "mosaic-upload-*")
 	if err != nil {
 		return "", 0, fmt.Errorf("cannot create temp dir: %w", err)
 	}
 	defer os.RemoveAll(outDir)
 
-	if err := copyFile(path, filepath.Join(outDir, filename)); err != nil {
-		return "", 0, fmt.Errorf("cannot stage file: %w", err)
-	}
-
 	fmt.Printf("[Transfer] Encoding into %d data + %d parity shards…\n", DataShards, ParityShards)
-	enc, err := encoding.NewEncoder(DataShards, ParityShards, outDir, outDir)
+	enc, err := encoding.NewEncoder(DataShards, ParityShards, outDir, filepath.Dir(path))
 	if err != nil {
 		return "", 0, fmt.Errorf("encoder init failed: %w", err)
 	}
@@ -482,8 +480,14 @@ func UploadFile(path string, client *p2p.Client) (fileHash string, fileSize int,
 
 	resetUploadProgress(TotalShards)
 
+	// Allow one goroutine per distinct peer target so sends to different peers
+	// run concurrently. Sends to the same peer are still ordered within the goroutine.
+	numPeerTargets := numNodes - 1
+	if numPeerTargets < 1 {
+		numPeerTargets = 1
+	}
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, 1) // sequential sends to avoid UDP packet loss
+	sem := make(chan struct{}, numPeerTargets)
 
 	for i := 0; i < TotalShards; i++ {
 		srcPath := filepath.Join(outDir, ".bin", filename, fmt.Sprintf("shard%d_%s.dat", i, nameNoExt))
