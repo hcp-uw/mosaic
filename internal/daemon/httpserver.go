@@ -43,6 +43,8 @@ func StartHTTPServer() error {
 	mux.HandleFunc("/files", handleFiles)
 	mux.HandleFunc("/files/", handleFileByName)
 	mux.HandleFunc("/upload-progress", handleUploadProgress)
+	mux.HandleFunc("/download-progress", handleDownloadProgress)
+	mux.HandleFunc("/join-sync-status", handleJoinSyncStatus)
 
 	port := httpPort()
 	fmt.Println("HTTP API listening on", port)
@@ -56,6 +58,26 @@ func handleUploadProgress(w http.ResponseWriter, r *http.Request) {
 		Dispatched int `json:"dispatched"`
 		Total      int `json:"total"`
 	}{dispatched, total})
+}
+
+// GET /download-progress — returns shard fetch progress for the active FetchFileBytes call.
+func handleDownloadProgress(w http.ResponseWriter, r *http.Request) {
+	received, needed := transfer.GetDownloadProgress()
+	writeJSON(w, http.StatusOK, struct {
+		Received int `json:"received"`
+		Needed   int `json:"needed"`
+	}{received, needed})
+}
+
+// GET /join-sync-status — returns whether the post-join manifest+shard sync has settled.
+func handleJoinSyncStatus(w http.ResponseWriter, r *http.Request) {
+	settled, manifestSynced, shardsReceived, elapsedMs := handlers.GetJoinSyncStatus()
+	writeJSON(w, http.StatusOK, struct {
+		Settled        bool  `json:"settled"`
+		ManifestSynced bool  `json:"manifestSynced"`
+		ShardsReceived int   `json:"shardsReceived"`
+		ElapsedMs      int64 `json:"elapsedMs"`
+	}{settled, manifestSynced, shardsReceived, elapsedMs})
 }
 
 // GET /files

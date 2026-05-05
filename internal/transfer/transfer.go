@@ -76,6 +76,12 @@ var (
 	shardStoredCb   func(contentHash string, shardIndex int)
 	shardStoredCbMu sync.Mutex
 
+	// shardSentCb is called after a shard is successfully sent to a peer.
+	// The daemon registers this to record the peer as a shard holder immediately,
+	// without waiting for the receiver to assemble and report back.
+	shardSentCb   func(contentHash string, shardIndex int, peerID string)
+	shardSentCbMu sync.Mutex
+
 	// fileReadyChans allows FetchFileBytes to wait for autoReconstruct to finish.
 	fileReadyChans sync.Map // fileHash → chan struct{}
 
@@ -84,6 +90,17 @@ var (
 	// shardsTotal is set at the start of UploadFile.
 	uploadShardsDispatched atomic.Int32
 	uploadShardsTotal      atomic.Int32
+
+	// joinSync tracks shards received from peers after a network join.
+	// Used by the CLI to block until redistribution settles.
+	joinShardsReceived        atomic.Int32
+	joinLastShardActivityNano atomic.Int64 // Unix nanoseconds; 0 = no activity yet
+
+	// downloadProgress tracks shard fetching during a FetchFileBytes call.
+	downloadShardsNeeded   atomic.Int32
+	downloadShardsReceived atomic.Int32
+	downloadTargetHash     string
+	downloadTargetMu       sync.Mutex
 )
 
 // SetShardStoredCallback registers a function that is called (in a goroutine)
@@ -93,6 +110,15 @@ func SetShardStoredCallback(fn func(contentHash string, shardIndex int)) {
 	shardStoredCbMu.Lock()
 	shardStoredCb = fn
 	shardStoredCbMu.Unlock()
+}
+
+// SetShardSentCallback registers a function that is called after a shard is
+// successfully sent to a peer. The daemon uses this to record the peer as a
+// holder immediately, without waiting for the peer's assembly to complete.
+func SetShardSentCallback(fn func(contentHash string, shardIndex int, peerID string)) {
+	shardSentCbMu.Lock()
+	shardSentCb = fn
+	shardSentCbMu.Unlock()
 }
 
 // GetUploadProgress returns the number of shards dispatched so far and the
@@ -105,6 +131,41 @@ func GetUploadProgress() (dispatched, total int) {
 func resetUploadProgress(total int) {
 	uploadShardsDispatched.Store(0)
 	uploadShardsTotal.Store(int32(total))
+}
+
+// ResetJoinSync clears the join-sync counters at the start of a new join.
+func ResetJoinSync() {
+	joinShardsReceived.Store(0)
+	joinLastShardActivityNano.Store(0)
+}
+
+// GetJoinShardActivity returns how many shards have been received from peers
+// since the last join, and the Unix-nanosecond timestamp of the last one.
+func GetJoinShardActivity() (received int, lastNano int64) {
+	return int(joinShardsReceived.Load()), joinLastShardActivityNano.Load()
+}
+
+// SetDownloadTarget arms the download-progress counters for a FetchFileBytes call.
+func SetDownloadTarget(fileHash string, needed int) {
+	downloadTargetMu.Lock()
+	downloadTargetHash = fileHash
+	downloadTargetMu.Unlock()
+	downloadShardsNeeded.Store(int32(needed))
+	downloadShardsReceived.Store(0)
+}
+
+// ClearDownloadTarget disarms the download-progress counters after a fetch.
+func ClearDownloadTarget() {
+	downloadTargetMu.Lock()
+	downloadTargetHash = ""
+	downloadTargetMu.Unlock()
+	downloadShardsNeeded.Store(0)
+	downloadShardsReceived.Store(0)
+}
+
+// GetDownloadProgress returns (received, needed) for the active FetchFileBytes call.
+func GetDownloadProgress() (received, needed int) {
+	return int(downloadShardsReceived.Load()), int(downloadShardsNeeded.Load())
 }
 
 // testShardsDir is overridden in tests to redirect shard I/O to a temp dir.
@@ -452,6 +513,13 @@ func UploadFile(path string, client *p2p.Client) (fileHash string, fileSize int,
 				defer wg.Done()
 				if err := sendPlaintextShardToPeer(src, shardIdx, fileHash, filename, fileSize, netKey, peerID, client); err != nil {
 					fmt.Printf("[Transfer] Shard %d → peer %s failed: %v\n", shardIdx, peerID[:8], err)
+				} else {
+					shardSentCbMu.Lock()
+					cb := shardSentCb
+					shardSentCbMu.Unlock()
+					if cb != nil {
+						go cb(fileHash, shardIdx, peerID)
+					}
 				}
 				uploadShardsDispatched.Add(1)
 			}(i, targetPeerID, srcPath)
@@ -553,6 +621,10 @@ func finalizeShard(asm *shardAssembly) {
 		return
 	}
 	fmt.Printf("[Transfer] Shard %d assembled → %s\n", asm.shardIndex, shardPath)
+
+	// Track join-sync progress: every assembled shard came from a peer.
+	joinShardsReceived.Add(1)
+	joinLastShardActivityNano.Store(time.Now().UnixNano())
 
 	// Notify the daemon that this node now holds this shard.
 	shardStoredCbMu.Lock()
@@ -753,6 +825,13 @@ func StoreShardData(fileHash, fileName string, fileSize, shardIndex, totalDataSh
 	}
 	fmt.Printf("[Transfer] Stored received shard %d for %s\n", shardIndex, fileHash[:12])
 
+	// Track download progress when this shard was fetched for FetchFileBytes.
+	downloadTargetMu.Lock()
+	if downloadTargetHash == fileHash {
+		downloadShardsReceived.Add(1)
+	}
+	downloadTargetMu.Unlock()
+
 	// Preserve existing block size if we already have meta; otherwise compute it.
 	bs := encoding.ComputeBlockSize(fileSize, totalDataShards)
 	if existing := FindShardMetaByHash(fileHash); existing != nil && existing.BlockSize > 0 {
@@ -817,6 +896,10 @@ func FetchFileBytes(filename string, client *p2p.Client, getHolders func(content
 			})
 			_ = client.SendToAllPeers(msg)
 		}
+
+		// Arm download-progress counters so the CLI can show a progress bar.
+		SetDownloadTarget(meta.FileHash, len(missing))
+		defer ClearDownloadTarget()
 
 		// Wait for autoReconstruct to signal that the file is ready.
 		ch := make(chan struct{}, 1)

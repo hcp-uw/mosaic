@@ -302,8 +302,56 @@ func joinNetwork(serverAddr string) {
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
-	message := "\nJoined network successfully.\n"
-	fmt.Println(message)
+
+	// Block until the post-join manifest + shard sync has settled.
+	// This prevents uploading or downloading against a half-synced node.
+	fmt.Println("\nConnected to network.")
+	httpClient := &http.Client{Timeout: 500 * time.Millisecond}
+	frames := []string{"|", "/", "-", "\\"}
+	frame := 0
+	start := time.Now()
+
+	for {
+		time.Sleep(300 * time.Millisecond)
+		elapsed := int(time.Since(start).Seconds())
+
+		var status struct {
+			Settled        bool  `json:"settled"`
+			ManifestSynced bool  `json:"manifestSynced"`
+			ShardsReceived int   `json:"shardsReceived"`
+			ElapsedMs      int64 `json:"elapsedMs"`
+		}
+		if r, err2 := httpClient.Get("http://localhost:7777/join-sync-status"); err2 == nil {
+			json.NewDecoder(r.Body).Decode(&status)
+			r.Body.Close()
+		}
+
+		if status.Settled {
+			fmt.Print("\r" + strings.Repeat(" ", 60) + "\r")
+			if status.ShardsReceived > 0 {
+				fmt.Printf("  Sync complete in %ds — %d shards received.\n\n",
+					elapsed, status.ShardsReceived)
+			} else {
+				fmt.Printf("  Sync complete in %ds.\n\n", elapsed)
+			}
+			break
+		}
+
+		if status.ManifestSynced {
+			fmt.Printf("\r  %s  Syncing shards (%d received)...  %ds  ",
+				frames[frame%len(frames)], status.ShardsReceived, elapsed)
+		} else {
+			fmt.Printf("\r  %s  Waiting for peers...  %ds  ", frames[frame%len(frames)], elapsed)
+		}
+		frame++
+
+		if elapsed > 30 {
+			fmt.Print("\r" + strings.Repeat(" ", 60) + "\r")
+			fmt.Println("  Sync timed out after 30s — proceeding anyway.")
+			fmt.Println()
+			break
+		}
+	}
 }
 
 // Gets overall network status
@@ -710,8 +758,54 @@ func uploadFolder() {
 // Downloads a file from the network
 func downloadFile() {
 	filePath := args[3]
-	resp, err := client.SendRequest("downloadFile", protocol.DownloadFileRequest{FilePath: filePath}, 2*time.Minute)
-	exitOnErr(err, "Error downloading "+filePath+": ")
+	fmt.Printf("Downloading %s...\n", filePath)
+
+	done := make(chan struct{})
+	start := time.Now()
+	var spinnerWg sync.WaitGroup
+	spinnerWg.Add(1)
+	go func() {
+		defer spinnerWg.Done()
+		httpClient := &http.Client{Timeout: 500 * time.Millisecond}
+		frames := []string{"|", "/", "-", "\\"}
+		frame := 0
+		for {
+			select {
+			case <-done:
+				return
+			case <-time.After(300 * time.Millisecond):
+			}
+			elapsed := int(time.Since(start).Seconds())
+
+			var prog struct {
+				Received int `json:"received"`
+				Needed   int `json:"needed"`
+			}
+			if r, err := httpClient.Get("http://localhost:7777/download-progress"); err == nil {
+				json.NewDecoder(r.Body).Decode(&prog)
+				r.Body.Close()
+			}
+
+			if prog.Needed > 0 {
+				pct := prog.Received * 100 / prog.Needed
+				filled := pct / 5
+				bar := strings.Repeat("█", filled) + strings.Repeat("░", 20-filled)
+				fmt.Printf("\r  [%s] %3d%%  fetching shards (%d/%d)  %ds  ",
+					bar, pct, prog.Received, prog.Needed, elapsed)
+			} else {
+				fmt.Printf("\r  %s  fetching...  %ds  ", frames[frame%len(frames)], elapsed)
+				frame++
+			}
+		}
+	}()
+
+	resp, dlErr := client.SendRequest("downloadFile", protocol.DownloadFileRequest{FilePath: filePath}, 2*time.Minute)
+	elapsed := time.Since(start)
+	close(done)
+	spinnerWg.Wait()
+	fmt.Print("\r" + strings.Repeat(" ", 60) + "\r")
+
+	exitOnErr(dlErr, "Error downloading "+filePath+": ")
 
 	var cmdResp protocol.DownloadFileResponse
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
@@ -721,9 +815,8 @@ func downloadFile() {
 		fmt.Printf("\nError downloading '%v': %s\n", cmdResp.FileName, cmdResp.Details)
 		os.Exit(1)
 	}
-	message := fmt.Sprintf("\nFile '%v' downloaded successfully from network.\n"+
-		"- Storage Remaining: %d GB\n", cmdResp.FileName, cmdResp.AvailableStorage)
-	fmt.Println(message)
+	fmt.Printf("\nFile '%v' downloaded successfully.\n- Time: %s\n- Storage Remaining: %d GB\n\n",
+		cmdResp.FileName, elapsed.Round(time.Second), cmdResp.AvailableStorage)
 }
 
 // Downloads a folder from the network

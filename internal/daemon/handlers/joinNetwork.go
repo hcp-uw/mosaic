@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"sort"
+	"sync/atomic"
 	"time"
 
 	"github.com/hcp-uw/mosaic/internal/api"
@@ -21,6 +22,65 @@ import (
 	"github.com/hcp-uw/mosaic/internal/p2p"
 	"github.com/hcp-uw/mosaic/internal/transfer"
 )
+
+// joinSync holds the state used by GetJoinSyncStatus and IsJoinSettling.
+// All fields are accessed atomically via their own methods.
+var joinSync struct {
+	manifestSynced atomic.Bool
+	joinTimeNano   atomic.Int64 // Unix nanosecond when join started; 0 = not joined
+	busy           atomic.Bool  // true while settling after join
+}
+
+// resetJoinSyncState resets join-sync state and transfer-layer counters for a fresh join.
+func resetJoinSyncState() {
+	joinSync.manifestSynced.Store(false)
+	joinSync.joinTimeNano.Store(time.Now().UnixNano())
+	joinSync.busy.Store(true)
+	transfer.ResetJoinSync()
+}
+
+func markManifestSynced() {
+	joinSync.manifestSynced.Store(true)
+}
+
+// IsJoinSettling returns true while the post-join manifest and shard sync is
+// still in progress. Upload operations should refuse while this is true.
+func IsJoinSettling() bool {
+	return joinSync.busy.Load()
+}
+
+// GetJoinSyncStatus returns the current sync progress for the /join-sync-status
+// HTTP endpoint. settled is true once the node is ready to use.
+func GetJoinSyncStatus() (settled, manifestSynced bool, shardsReceived int, elapsedMs int64) {
+	manifestSynced = joinSync.manifestSynced.Load()
+	joinedNano := joinSync.joinTimeNano.Load()
+	if joinedNano > 0 {
+		elapsedMs = (time.Now().UnixNano() - joinedNano) / 1e6
+	}
+	shardsReceived, lastActivityNano := transfer.GetJoinShardActivity()
+
+	if !joinSync.busy.Load() {
+		settled = true
+		return
+	}
+
+	switch {
+	case !manifestSynced:
+		// No peer seen yet — settle after 6 s (solo node or slow peer).
+		settled = elapsedMs > 6000
+	case lastActivityNano == 0:
+		// Manifest synced but no shards arrived — settle after 2 s.
+		settled = elapsedMs > 2000
+	default:
+		// Shards are coming in — settle 2 s after the last one.
+		settled = (time.Now().UnixNano()-lastActivityNano)/1e6 > 2000
+	}
+
+	if settled {
+		joinSync.busy.Store(false)
+	}
+	return
+}
 
 // HandleJoin joins the P2P network, verifying the STUN connection before returning.
 func HandleJoin(req protocol.JoinRequest) protocol.JoinResponse {
@@ -38,6 +98,7 @@ func HandleJoin(req protocol.JoinRequest) protocol.JoinResponse {
 
 func runClient(serverAddr string, errCh chan<- error) {
 	mosaicDir := shared.MosaicDir()
+	resetJoinSyncState()
 
 	config := p2p.DefaultClientConfig(serverAddr, shared.DefaultTURNServer, shared.TURNUsername, shared.TURNPassword)
 	client, err := p2p.NewClient(config)
@@ -57,6 +118,12 @@ func runClient(serverAddr string, errCh chan<- error) {
 	// broadcast each time this node stores a new shard (upload or receive).
 	transfer.SetShardStoredCallback(func(contentHash string, shardIndex int) {
 		recordShardInManifest(contentHash, shardIndex)
+	})
+
+	// Register the shard-sent callback so we record the peer as a holder
+	// immediately after sending, without waiting for the peer's assembly.
+	transfer.SetShardSentCallback(func(contentHash string, shardIndex int, peerID string) {
+		recordShardHolderForPeer(contentHash, shardIndex, peerID)
 	})
 
 	client.OnStateChange(func(state p2p.ClientState) {
@@ -193,6 +260,7 @@ func handleManifestSync(mosaicDir string, msg *api.Message) {
 		return
 	}
 	fmt.Printf("handleManifestSync: merged — %d chains (changed=%v)\n", len(merged.Chains), changed)
+	markManifestSynced()
 
 	// If the merge brought in new information, broadcast the combined result
 	// back to all peers so the network converges to the same state.
@@ -255,6 +323,31 @@ func handleShardDelete(msg *api.Message) {
 		return
 	}
 	transfer.DeleteLocalShards(d.ContentHash)
+}
+
+// recordShardHolderForPeer records that peerID holds shardIndex for contentHash
+// in the network manifest. Called immediately after a successful shard send so
+// the ShardMap reflects the peer as a holder without waiting for assembly.
+func recordShardHolderForPeer(contentHash string, shardIndex int, peerID string) {
+	mosaicDir := shared.MosaicDir()
+	aesKey, err := filesystem.LoadOrCreateNetworkKey(shared.NetworkKeyPath())
+	if err != nil {
+		fmt.Printf("recordShardHolderForPeer: could not load network key: %v\n", err)
+		return
+	}
+	nm, err := filesystem.ReadNetworkManifest(mosaicDir, aesKey)
+	if err != nil {
+		fmt.Printf("recordShardHolderForPeer: could not read manifest: %v\n", err)
+		return
+	}
+	if !filesystem.RecordShardHolder(&nm, contentHash, shardIndex, peerID) {
+		return // already recorded
+	}
+	if err := filesystem.WriteNetworkManifestLocked(mosaicDir, aesKey, nm); err != nil {
+		fmt.Printf("recordShardHolderForPeer: could not write manifest: %v\n", err)
+		return
+	}
+	BroadcastNetworkManifest(nm)
 }
 
 // recordShardInManifest records that this node holds shardIndex for the file

@@ -39,6 +39,12 @@ func uploadFile(path string, keepLocal bool) protocol.UploadFileResponse {
 			Details: "not logged in — run 'mos login <key>' before uploading",
 		}
 	}
+	if IsJoinSettling() {
+		return protocol.UploadFileResponse{
+			Success: false,
+			Details: "network sync in progress — wait a moment for the join to finish, then try again",
+		}
+	}
 
 	filename := removePath(path)
 	mosaicDir := shared.MosaicDir()
