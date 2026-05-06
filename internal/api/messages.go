@@ -482,6 +482,7 @@ type ShardPushData struct {
 type ShardRequestData struct {
 	FileHash   string `json:"fileHash"`
 	ShardIndex int    `json:"shardIndex"`
+	Relayed    bool   `json:"relayed,omitempty"` // true = already forwarded once; don't relay again
 }
 
 // ShardResponseData is the reply to a ShardRequest.

@@ -126,6 +126,19 @@ func runClient(serverAddr string, errCh chan<- error) {
 		recordShardHolderForPeer(contentHash, shardIndex, peerID)
 	})
 
+	// Register the shard-relay callback so that when a shard arrives via a
+	// one-hop relay (another peer streamed it to us on behalf of a requester who
+	// couldn't reach the holder directly), we forward it to the original requester.
+	transfer.SetShardRelayCallback(func(fileHash string, shardIndex int, requesterIDs []string) {
+		meta := transfer.FindShardMetaByHash(fileHash)
+		if meta == nil {
+			return
+		}
+		for _, requesterID := range requesterIDs {
+			go transfer.StreamShardToPeer(fileHash, meta, shardIndex, requesterID, client)
+		}
+	})
+
 	client.OnStateChange(func(state p2p.ClientState) {
 		fmt.Printf("[P2P] State: %s\n", state)
 	})

@@ -85,6 +85,17 @@ var (
 	// fileReadyChans allows FetchFileBytes to wait for autoReconstruct to finish.
 	fileReadyChans sync.Map // fileHash → chan struct{}
 
+	// shardRelayCallback is called when a shard arrives that was originally
+	// requested by a different peer (relay scenario). The daemon registers this
+	// so it can forward the shard to the original requester via binary streaming.
+	shardRelayCallback   func(fileHash string, shardIndex int, requesterIDs []string)
+	shardRelayCallbackMu sync.Mutex
+
+	// pendingShardRequests tracks shards we are relaying on behalf of other peers.
+	// Key: "fileHash:shardIndex" → list of requester P2P IDs awaiting that shard.
+	pendingShardRequestsMu sync.Mutex
+	pendingShardRequests   = make(map[string][]string)
+
 	// uploadProgress tracks shard distribution progress for the current upload.
 	// shardsDispatched is incremented each time a shard is stored or sent.
 	// shardsTotal is set at the start of UploadFile.
@@ -102,6 +113,31 @@ var (
 	downloadTargetHash     string
 	downloadTargetMu       sync.Mutex
 )
+
+// SetShardRelayCallback registers a callback invoked when a shard arrives that
+// had pending relay requesters. The daemon uses this to forward the shard to
+// the original requester(s) via binary streaming.
+func SetShardRelayCallback(fn func(fileHash string, shardIndex int, requesterIDs []string)) {
+	shardRelayCallbackMu.Lock()
+	shardRelayCallback = fn
+	shardRelayCallbackMu.Unlock()
+}
+
+func registerPendingShardRequest(fileHash string, shardIndex int, requesterID string) {
+	key := fmt.Sprintf("%s:%d", fileHash, shardIndex)
+	pendingShardRequestsMu.Lock()
+	pendingShardRequests[key] = append(pendingShardRequests[key], requesterID)
+	pendingShardRequestsMu.Unlock()
+}
+
+func takePendingShardRequesters(fileHash string, shardIndex int) []string {
+	key := fmt.Sprintf("%s:%d", fileHash, shardIndex)
+	pendingShardRequestsMu.Lock()
+	ids := pendingShardRequests[key]
+	delete(pendingShardRequests, key)
+	pendingShardRequestsMu.Unlock()
+	return ids
+}
 
 // SetShardStoredCallback registers a function that is called (in a goroutine)
 // each time a shard is fully assembled and written to disk. The daemon uses
@@ -504,15 +540,13 @@ func UploadFile(path string, client *p2p.Client) (fileHash string, fileSize int,
 		if targetIndex == ourIndex {
 			// Our shard: encrypt and persist locally, register in ShardMap.
 			dst := filepath.Join(shardDir, fmt.Sprintf("shard%d_%s.dat", i, fileHash))
-			if chunks, err := encryptShardFileToChunks(srcPath, netKey); err == nil {
-				if writeErr := writeEncryptedShardFile(dst, chunks); writeErr == nil {
-					uploadShardsDispatched.Add(1)
-					shardStoredCbMu.Lock()
-					cb := shardStoredCb
-					shardStoredCbMu.Unlock()
-					if cb != nil {
-						go cb(fileHash, i)
-					}
+			if writeErr := encryptAndStoreShardFile(srcPath, dst, netKey); writeErr == nil {
+				uploadShardsDispatched.Add(1)
+				shardStoredCbMu.Lock()
+				cb := shardStoredCb
+				shardStoredCbMu.Unlock()
+				if cb != nil {
+					go cb(fileHash, i)
 				}
 			}
 		} else {
@@ -644,6 +678,16 @@ func finalizeShard(asm *shardAssembly) {
 	shardStoredCbMu.Unlock()
 	if cb != nil {
 		go cb(asm.fileHash, asm.shardIndex)
+	}
+
+	// If any peers were waiting for this shard via relay, notify them now.
+	if requesters := takePendingShardRequesters(asm.fileHash, asm.shardIndex); len(requesters) > 0 {
+		shardRelayCallbackMu.Lock()
+		relayCb := shardRelayCallback
+		shardRelayCallbackMu.Unlock()
+		if relayCb != nil {
+			go relayCb(asm.fileHash, asm.shardIndex, requesters)
+		}
 	}
 
 	writeShardMeta(shardDir, ShardMeta{
@@ -1093,33 +1137,52 @@ func StreamShardToPeer(fileHash string, meta *ShardMeta, shardIndex int, peerID 
 	fmt.Printf("[Transfer] Redistributed shard %d of %s → peer %s\n", shardIndex, fileHash[:12], peerID[:8])
 }
 
-// ──────────────────────────────────────────────────────────
-// Shard request / response (still JSON — low-frequency control messages)
-// ──────────────────────────────────────────────────────────
-
-// HandleShardRequest responds to a peer requesting a shard we have stored.
+// HandleShardRequest responds to a peer requesting a shard.
+//
+// If the shard is stored locally it is streamed to the requester using the
+// binary chunk protocol (no UDP size limit, same path as redistribution).
+//
+// If the shard is not local and the request hasn't already been relayed, we
+// forward the request to all our other peers. When one of them streams the
+// shard back, the relay callback (set by the daemon) forwards it to the
+// original requester.
 func HandleShardRequest(msg *api.Message, client *p2p.Client) {
 	d, err := msg.GetShardRequestData()
 	if err != nil {
 		return
 	}
+	requesterID := msg.Sign.PubKey
+
 	pattern := filepath.Join(ShardsDir(), d.FileHash, fmt.Sprintf("shard%d_*.dat", d.ShardIndex))
 	matches, _ := filepath.Glob(pattern)
-	sign := api.NewSignature(client.GetID())
 
-	if len(matches) == 0 {
-		_ = client.SendToAllPeers(api.NewShardResponseMessage(sign, api.ShardResponseData{
-			FileHash: d.FileHash, ShardIndex: d.ShardIndex, Found: false,
-		}))
+	if len(matches) > 0 {
+		// Fast path: we have it — binary stream to the requester.
+		meta := FindShardMetaByHash(d.FileHash)
+		if meta == nil {
+			return
+		}
+		fmt.Printf("[Transfer] Serving shard %d of %s → %s\n", d.ShardIndex, d.FileHash[:12], requesterID[:8])
+		go StreamShardToPeer(d.FileHash, meta, d.ShardIndex, requesterID, client)
 		return
 	}
-	data, err := os.ReadFile(matches[0])
-	if err != nil {
+
+	// Slow path: we don't have it.
+	if d.Relayed {
+		// Already relayed once — stop here to prevent forwarding loops.
 		return
 	}
-	_ = client.SendToAllPeers(api.NewShardResponseMessage(sign, api.ShardResponseData{
-		FileHash: d.FileHash, ShardIndex: d.ShardIndex, Found: true, Data: data,
-	}))
+
+	// Register the original requester so the relay callback can forward when the
+	// shard arrives, then broadcast a one-hop relay to our own peers.
+	fmt.Printf("[Transfer] Shard %d of %s not local — relaying for %s\n", d.ShardIndex, d.FileHash[:12], requesterID[:8])
+	registerPendingShardRequest(d.FileHash, d.ShardIndex, requesterID)
+	relay := api.NewShardRequestMessage(api.NewSignature(client.GetID()), api.ShardRequestData{
+		FileHash:   d.FileHash,
+		ShardIndex: d.ShardIndex,
+		Relayed:    true,
+	})
+	client.SendToAllPeers(relay) //nolint:errcheck — best-effort
 }
 
 // ──────────────────────────────────────────────────────────
@@ -1191,6 +1254,61 @@ func decryptShardToPlaintext(path string, key [32]byte) ([]byte, error) {
 		plain = append(plain, dec...)
 	}
 	return plain, nil
+}
+
+// encryptAndStoreShardFile reads srcPath in chunkSize windows, encrypts each chunk
+// with AES-GCM, and writes the length-prefixed encrypted chunks to dstPath in the
+// same on-disk format as writeEncryptedShardFile. Only one chunk (≤60 KB) is held
+// in memory at a time, avoiding the 100-200 MB spike from loading an entire shard.
+func encryptAndStoreShardFile(srcPath, dstPath string, key [32]byte) error {
+	info, err := os.Stat(srcPath)
+	if err != nil {
+		return err
+	}
+	totalChunks := int((info.Size() + chunkSize - 1) / chunkSize)
+
+	src, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+
+	dst, err := os.Create(dstPath)
+	if err != nil {
+		return err
+	}
+	defer dst.Close()
+
+	var hdr [4]byte
+	binary.LittleEndian.PutUint32(hdr[:], uint32(totalChunks))
+	if _, err := dst.Write(hdr[:]); err != nil {
+		return err
+	}
+
+	buf := make([]byte, chunkSize)
+	for {
+		n, err := io.ReadFull(src, buf)
+		if n > 0 {
+			encrypted, eerr := encryptChunk(key, buf[:n])
+			if eerr != nil {
+				return eerr
+			}
+			var lenBuf [4]byte
+			binary.LittleEndian.PutUint32(lenBuf[:], uint32(len(encrypted)))
+			if _, err := dst.Write(lenBuf[:]); err != nil {
+				return err
+			}
+			if _, err := dst.Write(encrypted); err != nil {
+				return err
+			}
+		}
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
 }
 
 // encryptShardFileToChunks reads a plaintext shard file and returns AES-GCM
