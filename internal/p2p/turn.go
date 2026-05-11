@@ -123,6 +123,14 @@ func (c *Client) ConnectViaTURN(peerID string) error {
 		ts.close()
 		return fmt.Errorf("TURN: peer %s disappeared", peerID)
 	}
+	if peer.ViaTURN {
+		// A concurrent ConnectViaTURN call (from a previous ping cycle that
+		// was still in-flight when the next cycle fired) already set up TURN.
+		// Discard this duplicate allocation rather than leaking it.
+		c.mutex.Unlock()
+		ts.close()
+		return nil
+	}
 	peer.Conn = ts.relayConn
 	peer.ViaTURN = true
 	peer.LastPeerPong = time.Now()

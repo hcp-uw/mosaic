@@ -2,16 +2,47 @@ package handlers
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/hcp-uw/mosaic/internal/cli/shared"
 	filesystem "github.com/hcp-uw/mosaic/internal/fileSystem"
 	"github.com/hcp-uw/mosaic/internal/transfer"
 )
 
+// inflightFetch is the shared state for concurrent callers waiting on the same file.
+type inflightFetch struct {
+	done chan struct{}
+	data []byte
+	err  error
+}
+
+// fetchInFlight deduplicates concurrent FetchFileBytes calls for the same filename.
+// Without this, two callers racing on the same file overwrite each other's
+// shardReadyChans entries, causing one to time out and retry unnecessarily.
+var fetchInFlight sync.Map // filename → *inflightFetch
+
 // FetchFileBytes reconstructs a file's raw bytes from its distributed shards.
 // If no local shard meta exists yet, it bootstraps from the network manifest
 // so that FetchFileBytes can request missing shards from peers.
+// Concurrent calls for the same filename are collapsed into a single fetch.
 func FetchFileBytes(filename string) ([]byte, error) {
+	inflight := &inflightFetch{done: make(chan struct{})}
+	actual, loaded := fetchInFlight.LoadOrStore(filename, inflight)
+	if loaded {
+		// Another goroutine is already fetching this file — wait for it.
+		existing := actual.(*inflightFetch)
+		<-existing.done
+		return existing.data, existing.err
+	}
+	defer func() {
+		fetchInFlight.Delete(filename)
+		close(inflight.done) // unblock all waiters
+	}()
+	inflight.data, inflight.err = doFetchFileBytes(filename)
+	return inflight.data, inflight.err
+}
+
+func doFetchFileBytes(filename string) ([]byte, error) {
 	client := GetP2PClient()
 	mosaicDir := shared.MosaicDir()
 

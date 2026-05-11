@@ -352,7 +352,7 @@ func (c *Client) processPeerMessage(data []byte, fromAddr *net.UDPAddr) {
 			}
 
 			c.mutex.Lock()
-			c.peers[data.JoinerAddress] = peerInfo
+			c.peers[data.JoinerID] = peerInfo
 			c.mutex.Unlock()
 
 			c.notifyPeerAssigned(peerInfo)
@@ -383,12 +383,14 @@ func (c *Client) processPeerMessage(data []byte, fromAddr *net.UDPAddr) {
 
 		case api.NodeLeave:
 			// Peer is disconnecting gracefully — evict immediately.
-			sender := c.getPeerByAddr(fromAddr)
-			if sender != nil {
+			// Use the sender's P2P ID from the message (keyed in the map) rather
+			// than a source-address lookup, which breaks when NAT remaps the port.
+			senderID := msg.Sign.PubKey
+			if senderID != "" {
 				c.mutex.Lock()
-				delete(c.peers, sender.ID)
+				delete(c.peers, senderID)
 				c.mutex.Unlock()
-				c.notifyPeerLeft(sender.ID)
+				c.notifyPeerLeft(senderID)
 			}
 			return
 
