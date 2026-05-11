@@ -31,7 +31,7 @@ import (
 // a public IP (like a droplet) will pong within the first ping cycle (~10s)
 // and never trigger TURN; peers behind NAT won't pong at all, so after
 // turnFallbackTimeout the relay is allocated.
-const turnFallbackTimeout = 15 * time.Second
+const turnFallbackTimeout = 25 * time.Second
 
 // turnState owns a single TURN allocation for one peer.
 type turnState struct {

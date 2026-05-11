@@ -281,6 +281,23 @@ func handleManifestSync(mosaicDir string, msg *api.Message) {
 		go BroadcastNetworkManifest(merged)
 	}
 
+	// Always send our current merged manifest back to the sender, regardless
+	// of whether we learned anything new. This ensures a freshly-joined peer
+	// with an empty manifest gets our full state (changed=false for us means
+	// we already had everything, but the sender may not).
+	go func(senderID string) {
+		c := GetP2PClient()
+		if c == nil {
+			return
+		}
+		data, err := filesystem.ManifestToJSON(merged)
+		if err != nil {
+			return
+		}
+		reply := api.NewManifestSyncMessage(data)
+		c.SendToPeer(senderID, reply) //nolint:errcheck
+	}(msg.Sign.PubKey)
+
 	// Replay our chain and sync local state with the network manifest.
 	accountID := helpers.GetAccountID()
 	idx := filesystem.FindChainIndex(merged, accountID)

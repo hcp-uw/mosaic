@@ -30,10 +30,11 @@ const (
 	ParityShards = 4
 	TotalShards  = DataShards + ParityShards
 
-	// 60 KB chunks — safe under the 65507-byte UDP max even after AES-GCM (+28 bytes),
-	// binary header (+~57 bytes), and session encryption (+29 bytes): total ~61,430 bytes.
-	// 2× larger than the previous 32 KB, so 47% fewer UDP datagrams for the same file.
-	chunkSize = 60 * 1024
+	// 8 KB chunks — each frame (~8,133 bytes total after AES-GCM and binary header)
+	// fragments into ~6 IPv4 packets at 1500-byte MTU, vs ~42 for 60 KB chunks.
+	// Fewer fragments per datagram means far fewer chunk losses on lossy paths
+	// (university WiFi, TURN relay) where a single dropped fragment kills the chunk.
+	chunkSize = 8 * 1024
 
 	// binaryMagic is the first byte of every binary shard frame.
 	// JSON messages always start with '{' (0x7B) so 0x01 is unambiguous.
@@ -68,8 +69,8 @@ var (
 	assemblies    = make(map[string]*shardAssembly) // key: "fileHash:shardIndex"
 	reconstructed sync.Map                          // fileHash → true; prevents duplicate reconstruction
 
-	sendLimiter = make(chan struct{}, 1000)
-	initOnce    sync.Once
+	udpPacer = &adaptivePacer{interval: pacerInitInterval}
+	initOnce sync.Once
 
 	// shardStoredCb is called after a shard is successfully written to disk.
 	// The daemon registers this to update the network manifest and broadcast.
@@ -112,6 +113,10 @@ var (
 	downloadShardsReceived atomic.Int32
 	downloadTargetHash     string
 	downloadTargetMu       sync.Mutex
+
+	// lastChunkReceivedNano is updated on every incoming shard chunk so that
+	// FetchFileBytes can use an idle timeout instead of a fixed deadline.
+	lastChunkReceivedNano atomic.Int64
 )
 
 // SetShardRelayCallback registers a callback invoked when a shard arrives that
@@ -397,33 +402,71 @@ func decodeBinaryShardChunk(frame []byte) (*binaryShardChunk, error) {
 }
 
 // ──────────────────────────────────────────────────────────
-// Rate limiter
+// Adaptive UDP pacer
 // ──────────────────────────────────────────────────────────
 
-// Init starts the send rate-limiter goroutine (50 K tokens/sec, 1000-token burst).
-// Safe to call multiple times; only the first call takes effect.
-func Init(ctx context.Context) {
+// adaptivePacer paces UDP sends using AIMD (additive-increase /
+// multiplicative-decrease), with kernel WriteTo latency as the congestion
+// signal. A fast WriteTo means the OS send buffer has headroom → speed up.
+// A slow/blocking WriteTo means the buffer is backing up → slow down.
+// A hard send error triggers an immediate rate halving.
+//
+// Bounds: 100 µs–100 ms between sends (10,000/sec down to 10/sec).
+// Start:  2 ms (500/sec × 8 KB ≈ 32 Mbps) — conservative for TURN/WiFi.
+type adaptivePacer struct {
+	mu       sync.Mutex
+	interval time.Duration
+	nextSend time.Time
+}
+
+const (
+	pacerInitInterval = 2 * time.Millisecond   // 500 sends/sec start
+	pacerMinInterval  = 100 * time.Microsecond // 10,000 sends/sec ceiling
+	pacerMaxInterval  = 100 * time.Millisecond // 10 sends/sec floor
+)
+
+// wait blocks until the next send slot is available, then reserves it.
+// Resets if idle to prevent a burst after a quiet period.
+func (p *adaptivePacer) wait() {
+	p.mu.Lock()
+	now := time.Now()
+	if p.nextSend.Before(now) {
+		p.nextSend = now // idle reset — no burst catch-up
+	}
+	sleep := p.nextSend.Sub(now)
+	p.nextSend = p.nextSend.Add(p.interval)
+	p.mu.Unlock()
+	if sleep > 0 {
+		time.Sleep(sleep)
+	}
+}
+
+// adjust tunes the interval after each send.
+//   - Hard error            → double the interval (halve throughput)
+//   - WriteTo slow (> 5 ms) → +25 % interval (kernel buffer backing up)
+//   - WriteTo fast (< 500 µs) → −5 % interval (room to go faster)
+func (p *adaptivePacer) adjust(writeLatency time.Duration, sendOK bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	cur := p.interval
+	switch {
+	case !sendOK:
+		p.interval = min(cur*2, pacerMaxInterval)
+	case writeLatency > 5*time.Millisecond:
+		p.interval = min(time.Duration(float64(cur)*1.25), pacerMaxInterval)
+	case writeLatency < 500*time.Microsecond:
+		p.interval = max(time.Duration(float64(cur)*0.95), pacerMinInterval)
+	}
+}
+
+// Init resets the adaptive pacer to its initial rate. Safe to call multiple
+// times; only the first call takes effect.
+func Init(_ context.Context) {
 	initOnce.Do(func() {
-		for i := 0; i < 1000; i++ {
-			sendLimiter <- struct{}{}
-		}
-		go func() {
-			ticker := time.NewTicker(10 * time.Millisecond)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					for i := 0; i < 500; i++ {
-						select {
-						case sendLimiter <- struct{}{}:
-						default:
-						}
-					}
-				}
-			}
-		}()
+		udpPacer.mu.Lock()
+		udpPacer.interval = pacerInitInterval
+		udpPacer.nextSend = time.Time{}
+		udpPacer.mu.Unlock()
 	})
 }
 
@@ -546,7 +589,7 @@ func UploadFile(path string, client *p2p.Client) (fileHash string, fileSize int,
 				cb := shardStoredCb
 				shardStoredCbMu.Unlock()
 				if cb != nil {
-					go cb(fileHash, i)
+					cb(fileHash, i)
 				}
 			}
 		} else {
@@ -564,7 +607,7 @@ func UploadFile(path string, client *p2p.Client) (fileHash string, fileSize int,
 					cb := shardSentCb
 					shardSentCbMu.Unlock()
 					if cb != nil {
-						go cb(fileHash, shardIdx, peerID)
+						cb(fileHash, shardIdx, peerID)
 					}
 				}
 				uploadShardsDispatched.Add(1)
@@ -629,6 +672,8 @@ func HandleBinaryShardChunk(data []byte) {
 	received := len(asm.chunks)
 	total := asm.totalChunks
 	asm.mu.Unlock()
+
+	lastChunkReceivedNano.Store(time.Now().UnixNano())
 
 	if received%100 == 0 || received == total {
 		fmt.Printf("[Recv] Shard %d: %d/%d chunks\n", c.shardIndex, received, total)
@@ -939,18 +984,28 @@ func FetchFileBytes(filename string, client *p2p.Client, getHolders func(content
 
 	if len(missing) > 0 && client != nil && getHolders != nil {
 		sign := api.NewSignature(client.GetID())
+		requestsSent := 0
 		for _, idx := range missing {
 			holders := getHolders(meta.FileHash, idx)
 			if len(holders) == 0 {
-				fmt.Printf("[Transfer] No known holders for shard %d of %s\n", idx, filename)
-				continue
+				if !client.IsPeerCommunicationAvailable() {
+					fmt.Printf("[Transfer] No known holders for shard %d of %s — no peers connected\n", idx, filename)
+					continue
+				}
+				// ShardMap not yet populated (timing) — broadcast to all peers anyway.
+				fmt.Printf("[Transfer] No known holders for shard %d of %s — broadcasting to all peers\n", idx, filename)
+			} else {
+				fmt.Printf("[Transfer] Requesting shard %d of %s from %d known holder(s)\n", idx, filename, len(holders))
 			}
-			fmt.Printf("[Transfer] Requesting shard %d of %s from %d peer(s)\n", idx, filename, len(holders))
 			msg := api.NewShardRequestMessage(sign, api.ShardRequestData{
 				FileHash:   meta.FileHash,
 				ShardIndex: idx,
 			})
 			_ = client.SendToAllPeers(msg)
+			requestsSent++
+		}
+		if requestsSent == 0 {
+			return nil, fmt.Errorf("no peers connected to request shards for %q", filename)
 		}
 
 		// Arm download-progress counters so the CLI can show a progress bar.
@@ -958,17 +1013,32 @@ func FetchFileBytes(filename string, client *p2p.Client, getHolders func(content
 		defer ClearDownloadTarget()
 
 		// Wait for autoReconstruct to signal that the file is ready.
+		// Use an idle timeout rather than a fixed deadline: reset the timer
+		// whenever a chunk arrives so large files aren't abandoned mid-transfer.
 		ch := make(chan struct{}, 1)
 		fileReadyChans.Store(meta.FileHash, ch)
 		defer fileReadyChans.Delete(meta.FileHash)
 
-		select {
-		case <-ch:
-			// File written to ~/Mosaic/ by autoReconstruct — read it back.
-			destPath := filepath.Join(shared.MosaicDir(), filename)
-			return os.ReadFile(destPath)
-		case <-time.After(60 * time.Second):
-			return nil, fmt.Errorf("timed out waiting for shards of %q from peers", filename)
+		const idleTimeout = 30 * time.Second
+		idleTimer := time.NewTimer(idleTimeout)
+		defer idleTimer.Stop()
+		activityTick := time.NewTicker(5 * time.Second)
+		defer activityTick.Stop()
+		lastSeen := lastChunkReceivedNano.Load()
+
+		for {
+			select {
+			case <-ch:
+				destPath := filepath.Join(shared.MosaicDir(), filename)
+				return os.ReadFile(destPath)
+			case <-activityTick.C:
+				if now := lastChunkReceivedNano.Load(); now != lastSeen {
+					lastSeen = now
+					idleTimer.Reset(idleTimeout)
+				}
+			case <-idleTimer.C:
+				return nil, fmt.Errorf("timed out waiting for shards of %q — no chunk activity for %v", filename, idleTimeout)
+			}
 		}
 	}
 
@@ -1032,6 +1102,7 @@ func DeleteLocalShards(contentHash string) {
 // sendPlaintextShardToPeer reads a plaintext shard file from the RS encoder's
 // temp directory, encrypts each chunk, and sends it as binary frames to one peer.
 // Used during upload so peer-bound shards are never written to the uploader's disk.
+// Uses QUIC when a stream can be opened; falls back to UDP otherwise.
 func sendPlaintextShardToPeer(srcPath string, shardIndex int, fileHash, fileName string, fileSize int, key [32]byte, peerID string, client *p2p.Client) error {
 	info, err := os.Stat(srcPath)
 	if err != nil {
@@ -1044,6 +1115,11 @@ func sendPlaintextShardToPeer(srcPath string, shardIndex int, fileHash, fileName
 		return fmt.Errorf("open shard %d: %w", shardIndex, err)
 	}
 	defer sf.Close()
+
+	quicStream, quicErr := client.OpenShardStream(peerID)
+	if quicErr == nil {
+		defer quicStream.Close()
+	}
 
 	buf := make([]byte, chunkSize)
 	for chunkIndex := 0; ; chunkIndex++ {
@@ -1067,13 +1143,26 @@ func sendPlaintextShardToPeer(srcPath string, shardIndex int, fileHash, fileName
 			if ferr != nil {
 				return fmt.Errorf("encode frame shard %d chunk %d: %w", shardIndex, chunkIndex, ferr)
 			}
-			<-sendLimiter
-			if werr := client.SendRawToPeer(peerID, frame); werr != nil {
-				return fmt.Errorf("send shard %d chunk %d: %w", shardIndex, chunkIndex, werr)
+			if quicStream != nil {
+				if werr := sendFrameViaQUIC(quicStream, frame); werr != nil {
+					return fmt.Errorf("send shard %d chunk %d (QUIC): %w", shardIndex, chunkIndex, werr)
+				}
+			} else {
+				udpPacer.wait()
+				t0 := time.Now()
+				werr := client.SendRawToPeer(peerID, frame)
+				udpPacer.adjust(time.Since(t0), werr == nil)
+				if werr != nil {
+					return fmt.Errorf("send shard %d chunk %d: %w", shardIndex, chunkIndex, werr)
+				}
 			}
 		}
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			fmt.Printf("[Transfer] Shard %d sent to %s (%d chunks)\n", shardIndex, peerID[:8], chunkIndex+1)
+			transport := "UDP"
+			if quicStream != nil {
+				transport = "QUIC"
+			}
+			fmt.Printf("[Transfer] Shard %d sent to %s (%d chunks, %s)\n", shardIndex, peerID[:8], chunkIndex+1, transport)
 			return nil
 		}
 		if err != nil {
@@ -1082,9 +1171,22 @@ func sendPlaintextShardToPeer(srcPath string, shardIndex int, fileHash, fileName
 	}
 }
 
+// sendFrameViaQUIC writes a binary shard frame to a QUIC send stream using
+// the 4-byte LE length-prefix framing that handleQUICStream expects.
+func sendFrameViaQUIC(w io.WriteCloser, frame []byte) error {
+	var lenBuf [4]byte
+	binary.LittleEndian.PutUint32(lenBuf[:], uint32(len(frame)))
+	if _, err := w.Write(lenBuf[:]); err != nil {
+		return err
+	}
+	_, err := w.Write(frame)
+	return err
+}
+
 // StreamShardToPeer reads a locally stored encrypted shard and forwards its
 // chunks to a specific peer using the binary wire protocol. The chunks are
 // sent as-is — no decryption or re-encryption needed (blind-courier model).
+// Uses QUIC when a stream can be opened; falls back to UDP per-chunk otherwise.
 func StreamShardToPeer(fileHash string, meta *ShardMeta, shardIndex int, peerID string, client *p2p.Client) {
 	shardPath := filepath.Join(ShardsDir(), fileHash, fmt.Sprintf("shard%d_%s.dat", shardIndex, fileHash))
 
@@ -1099,6 +1201,13 @@ func StreamShardToPeer(fileHash string, meta *ShardMeta, shardIndex int, peerID 
 		return
 	}
 	totalChunks := int(binary.LittleEndian.Uint32(hdr[:]))
+
+	// Try to open a QUIC stream for reliable, in-order delivery.
+	// Fall back to UDP if QUIC isn't established yet.
+	quicStream, quicErr := client.OpenShardStream(peerID)
+	if quicErr == nil {
+		defer quicStream.Close()
+	}
 
 	for chunkIdx := 0; chunkIdx < totalChunks; chunkIdx++ {
 		var lenBuf [4]byte
@@ -1128,13 +1237,27 @@ func StreamShardToPeer(fileHash string, meta *ShardMeta, shardIndex int, peerID 
 			return
 		}
 
-		<-sendLimiter
-		if err := client.SendRawToPeer(peerID, frame); err != nil {
-			fmt.Printf("[Transfer] StreamShardToPeer: shard %d chunk %d → %s failed: %v\n", shardIndex, chunkIdx, peerID[:8], err)
-			return
+		if quicStream != nil {
+			if err := sendFrameViaQUIC(quicStream, frame); err != nil {
+				fmt.Printf("[Transfer] StreamShardToPeer: shard %d chunk %d → %s (QUIC) failed: %v\n", shardIndex, chunkIdx, peerID[:8], err)
+				return
+			}
+		} else {
+			udpPacer.wait()
+			t0 := time.Now()
+			err := client.SendRawToPeer(peerID, frame)
+			udpPacer.adjust(time.Since(t0), err == nil)
+			if err != nil {
+				fmt.Printf("[Transfer] StreamShardToPeer: shard %d chunk %d → %s failed: %v\n", shardIndex, chunkIdx, peerID, err)
+				return
+			}
 		}
 	}
-	fmt.Printf("[Transfer] Redistributed shard %d of %s → peer %s\n", shardIndex, fileHash[:12], peerID[:8])
+	transport := "UDP"
+	if quicStream != nil {
+		transport = "QUIC"
+	}
+	fmt.Printf("[Transfer] Redistributed shard %d of %s → peer %s (%s)\n", shardIndex, fileHash[:12], peerID[:8], transport)
 }
 
 // HandleShardRequest responds to a peer requesting a shard.

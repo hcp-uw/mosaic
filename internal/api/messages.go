@@ -615,20 +615,21 @@ type IdentityResponseData struct {
 	Signature string `json:"signature"`
 }
 
-// HandshakeInitData carries one side's ephemeral X25519 public key (32 bytes).
+// HandshakeInitData carries one side's ephemeral X25519 public key and QUIC port.
 type HandshakeInitData struct {
 	EphemeralPubKey []byte `json:"ephemeralPubKey"`
+	QUICPort        int    `json:"quicPort,omitempty"` // sender's QUIC listening port; 0 = no QUIC
 }
 
 // NewHandshakeInitMessage creates a handshake message carrying the sender's
-// ephemeral X25519 public key. senderID is the P2P peer ID (used by the
-// receiver to look up the right PeerInfo from the peers map).
-func NewHandshakeInitMessage(senderID string, ephemeralPubKey []byte) *Message {
+// ephemeral X25519 public key and QUIC listening port. senderID is the P2P
+// peer ID (used by the receiver to look up the right PeerInfo).
+func NewHandshakeInitMessage(senderID string, ephemeralPubKey []byte, quicPort int) *Message {
 	return &Message{
 		Sign:      NewSignature(senderID),
 		Type:      HandshakeInit,
 		Timestamp: time.Now(),
-		Data:      HandshakeInitData{EphemeralPubKey: ephemeralPubKey},
+		Data:      HandshakeInitData{EphemeralPubKey: ephemeralPubKey, QUICPort: quicPort},
 	}
 }
 

@@ -94,13 +94,12 @@ func (w *DirWatcher) handleEvent(event fsnotify.Event) {
 	path := event.Name
 	filename := filepath.Base(path)
 
-	fmt.Printf("[watcher] raw event: op=%s path=%s\n", event.Op, path)
-
-	// Ignore hidden files (manifest, temp files, etc.)
+	// Ignore hidden files (manifest, temp files, .DS_Store, etc.)
 	if strings.HasPrefix(filename, ".") {
-		fmt.Printf("[watcher] ignored hidden file: %s\n", filename)
 		return
 	}
+
+	fmt.Printf("[watcher] raw event: op=%s path=%s\n", event.Op, path)
 
 	// Check suppress list — daemon-initiated operations register here first.
 	if _, suppressed := w.suppress.LoadAndDelete(path); suppressed {

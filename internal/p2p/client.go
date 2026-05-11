@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hcp-uw/mosaic/internal/api"
+	quic "github.com/quic-go/quic-go"
 )
 
 // Client represents a STUN client
@@ -33,6 +34,11 @@ type Client struct {
 	handshakeCallbacks   []func(string) // called with peer ID when handshake completes
 	errorCallbacks       []func(error)
 	messageCallbacks     []func([]byte)
+
+	// QUIC data transport — separate UDP socket from the STUN control channel.
+	quicTr       *quic.Transport
+	quicListener *quic.Listener
+	quicPort     int // our QUIC listening port; 0 if QUIC not started
 
 	// STUN reconnect state (leader only)
 	stunFailCount    int
@@ -255,20 +261,24 @@ func (c *Client) completeHandshake(msg *api.Message, peer *PeerInfo) {
 	copy(peer.SessionKey[:], sessionKey)
 	peer.HandshakeDone = true
 	peer.EphemeralPrivKey = nil
+	peer.QUICPort = d.QUICPort
 	peerID := peer.ID
+	myID := c.id
 	c.mutex.Unlock()
 
-	logID := peerID
-	if len(logID) > 8 {
-		logID = logID[:8]
-	}
-	fmt.Printf("[P2P] Session established with peer %s\n", logID)
+	fmt.Printf("[P2P] Session established with peer %s\n", peerID)
 	c.notifyHandshakeDone(peerID)
+
+	// The side with the lexicographically smaller ID dials QUIC to avoid
+	// duplicate connections (both sides receive HandshakeInit from each other).
+	if d.QUICPort > 0 && myID < peerID {
+		go c.dialQUICToPeer(peerID)
+	}
 }
 
 // processPeerMessage processes a message from a peer
 func (c *Client) processPeerMessage(data []byte, fromAddr *net.UDPAddr) {
-	// Filter out STUN punch packets
+	// Filter out STUN punch packets — just discard silently.
 	if string(data) == "STUN_PUNCH" {
 		return
 	}
@@ -296,12 +306,26 @@ func (c *Client) processPeerMessage(data []byte, fromAddr *net.UDPAddr) {
 	if msg, err := api.DeserializeMessage(data); err == nil {
 		switch msg.Type {
 		case api.PeerPing:
+			// Update peer address to actual source so subsequent sends (pong,
+			// shard chunks) reach the peer even under symmetric NAT, where the
+			// external port differs from the STUN-reported address.
+			if fromAddr != nil {
+				c.mutex.Lock()
+				if peer, ok := c.peers[msg.Sign.PubKey]; ok && !peer.ViaTURN {
+					peer.Address = fromAddr
+				}
+				c.mutex.Unlock()
+			}
 			c.sendPeerPong(msg.Sign.PubKey)
 			return
 		case api.PeerPong:
 			c.mutex.Lock()
 			if peer, ok := c.peers[msg.Sign.PubKey]; ok {
 				peer.LastPeerPong = time.Now()
+				// Keep address fresh; symmetric NAT may remap between sessions.
+				if fromAddr != nil && !peer.ViaTURN {
+					peer.Address = fromAddr
+				}
 			}
 			c.mutex.Unlock()
 			return
@@ -374,6 +398,51 @@ func (c *Client) processPeerMessage(data []byte, fromAddr *net.UDPAddr) {
 			c.mutex.RLock()
 			peer := c.peers[msg.Sign.PubKey]
 			c.mutex.RUnlock()
+
+			// Symmetric NAT fix: if the packet arrived from an address different
+			// from what the STUN server reported, update peer.Address to the
+			// actual reachable source. Then resend our own HandshakeInit to that
+			// address so the other side can complete its half of the key exchange
+			// (our original init went to the STUN-reported address and was dropped).
+			if peer != nil && fromAddr != nil {
+				var resendPrivBytes []byte
+				var resendAddr *net.UDPAddr
+				var myID, myQUICPort = "", 0
+
+				c.mutex.Lock()
+				if !peer.ViaTURN && (peer.Address == nil || peer.Address.String() != fromAddr.String()) {
+					peer.Address = fromAddr
+					if len(peer.EphemeralPrivKey) > 0 {
+						resendPrivBytes = make([]byte, len(peer.EphemeralPrivKey))
+						copy(resendPrivBytes, peer.EphemeralPrivKey)
+						resendAddr = fromAddr
+						myID = c.id
+						myQUICPort = c.quicPort
+					}
+				}
+				c.mutex.Unlock()
+
+				if len(resendPrivBytes) > 0 {
+					go func() {
+						ephPriv, err := ecdh.X25519().NewPrivateKey(resendPrivBytes)
+						if err != nil {
+							return
+						}
+						initMsg := api.NewHandshakeInitMessage(myID, ephPriv.PublicKey().Bytes(), myQUICPort)
+						initData, err := initMsg.Serialize()
+						if err != nil {
+							return
+						}
+						c.mutex.RLock()
+						conn := c.serverConn
+						c.mutex.RUnlock()
+						if conn != nil {
+							conn.WriteToUDP(initData, resendAddr) //nolint:errcheck — best-effort
+						}
+					}()
+				}
+			}
+
 			go c.completeHandshake(msg, peer)
 			return
 

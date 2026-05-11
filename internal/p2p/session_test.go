@@ -167,7 +167,7 @@ func TestCompleteHandshake_SymmetricKey(t *testing.T) {
 	clientA := &Client{
 		peers: map[string]*PeerInfo{"peerB": peerBOnA},
 	}
-	msgFromB := api.NewHandshakeInitMessage("peerB", ephB.PublicKey().Bytes())
+	msgFromB := api.NewHandshakeInitMessage("peerB", ephB.PublicKey().Bytes(), 0)
 	clientA.completeHandshake(msgFromB, peerBOnA)
 
 	// Build Client B: has stored ephB private key; receives A's public key.
@@ -178,7 +178,7 @@ func TestCompleteHandshake_SymmetricKey(t *testing.T) {
 	clientB := &Client{
 		peers: map[string]*PeerInfo{"peerA": peerAOnB},
 	}
-	msgFromA := api.NewHandshakeInitMessage("peerA", ephA.PublicKey().Bytes())
+	msgFromA := api.NewHandshakeInitMessage("peerA", ephA.PublicKey().Bytes(), 0)
 	clientB.completeHandshake(msgFromA, peerAOnB)
 
 	// Both sides must have completed the handshake.
@@ -212,11 +212,11 @@ func TestCompleteHandshake_CrossEncrypt(t *testing.T) {
 
 	peerBOnA := &PeerInfo{ID: "peerB", EphemeralPrivKey: ephA.Bytes()}
 	clientA := &Client{peers: map[string]*PeerInfo{"peerB": peerBOnA}}
-	clientA.completeHandshake(api.NewHandshakeInitMessage("peerB", ephB.PublicKey().Bytes()), peerBOnA)
+	clientA.completeHandshake(api.NewHandshakeInitMessage("peerB", ephB.PublicKey().Bytes(), 0), peerBOnA)
 
 	peerAOnB := &PeerInfo{ID: "peerA", EphemeralPrivKey: ephB.Bytes()}
 	clientB := &Client{peers: map[string]*PeerInfo{"peerA": peerAOnB}}
-	clientB.completeHandshake(api.NewHandshakeInitMessage("peerA", ephA.PublicKey().Bytes()), peerAOnB)
+	clientB.completeHandshake(api.NewHandshakeInitMessage("peerA", ephA.PublicKey().Bytes(), 0), peerAOnB)
 
 	// A encrypts a message; B decrypts it.
 	msg := []byte("encrypted across the handshake")

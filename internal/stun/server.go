@@ -145,7 +145,9 @@ func (s *Server) handleMessages(enableLogging bool) {
 			}
 			continue
 		}
-		go s.processMessage(buffer[:n], clientAddr, enableLogging)
+		msg := make([]byte, n)
+		copy(msg, buffer[:n])
+		go s.processMessage(msg, clientAddr, enableLogging)
 	}
 }
 

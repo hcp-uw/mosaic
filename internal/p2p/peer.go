@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hcp-uw/mosaic/internal/api"
+	quic "github.com/quic-go/quic-go"
 )
 
 const (
@@ -27,9 +28,13 @@ type PeerInfo struct {
 	ViaTURN      bool // true when Conn routes through the TURN relay
 
 	// Session encryption — set after X25519 handshake completes.
-	SessionKey      [32]byte
-	HandshakeDone   bool
+	SessionKey       [32]byte
+	HandshakeDone    bool
 	EphemeralPrivKey []byte // our ephemeral X25519 private key; cleared after handshake
+
+	// QUIC data channel — established after the X25519 handshake.
+	QUICPort int        // peer's QUIC listening port (from their HandshakeInit)
+	QUICConn *quic.Conn // nil until QUIC connection is established
 }
 
 // sealForPeer wraps data in AES-256-GCM using the peer's session key.
@@ -250,14 +255,15 @@ func (c *Client) ConnectToPeer(peer *PeerInfo) error {
 	peerID := peer.ID
 	pubKeyBytes := ephPriv.PublicKey().Bytes()
 	myID := c.id
+	quicPort := c.quicPort
 	c.mutex.Unlock()
 
-	go c.establishPeerConnection(peerAddr)
+	go c.establishPeerConnection(peerID, peerAddr)
 
 	// Send HandshakeInit after punch packets have had a chance to open the path.
 	go func() {
 		time.Sleep(300 * time.Millisecond)
-		msg := api.NewHandshakeInitMessage(myID, pubKeyBytes)
+		msg := api.NewHandshakeInitMessage(myID, pubKeyBytes, quicPort)
 		// Send directly (plaintext) — session key doesn't exist yet.
 		c.mutex.RLock()
 		p := c.peers[peerID]
@@ -272,14 +278,15 @@ func (c *Client) ConnectToPeer(peer *PeerInfo) error {
 }
 
 // establishPeerConnection performs UDP hole punching to establish peer connection
-func (c *Client) establishPeerConnection(peerAddr *net.UDPAddr) {
+func (c *Client) establishPeerConnection(peerID string, peerAddr *net.UDPAddr) {
 	c.mutex.RLock()
-	peerConn := c.GetPeerById(peerAddr.String()).Conn
+	peer := c.GetPeerById(peerID)
 	c.mutex.RUnlock()
 
-	if peerConn == nil {
+	if peer == nil || peer.Conn == nil {
 		return
 	}
+	peerConn := peer.Conn
 
 	punchMessage := []byte("STUN_PUNCH")
 	for range 3 {

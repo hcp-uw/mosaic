@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/hcp-uw/mosaic/internal/api"
+	quic "github.com/quic-go/quic-go"
 )
 
 func (c *Client) ConnectToStun() error {
@@ -40,6 +41,32 @@ func (c *Client) ConnectToStun() error {
 	c.serverConn = conn
 	c.registrationDone = make(chan error, 1)
 	c.setState(StateConnecting)
+
+	// Start QUIC transport on a separate UDP socket so STUN control messages
+	// and QUIC data frames never share a port (prevents packet misclassification).
+	quicUDP, quicUDPErr := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if quicUDPErr != nil {
+		fmt.Printf("[QUIC] Failed to open UDP socket: %v — QUIC disabled, using UDP fallback\n", quicUDPErr)
+	} else {
+		tlsConf, tlsErr := serverTLSConfig()
+		if tlsErr != nil {
+			fmt.Printf("[QUIC] TLS setup failed: %v — QUIC disabled, using UDP fallback\n", tlsErr)
+			quicUDP.Close()
+		} else {
+			qt := &quic.Transport{Conn: quicUDP}
+			ln, lnErr := qt.Listen(tlsConf, defaultQUICConfig)
+			if lnErr != nil {
+				fmt.Printf("[QUIC] Listener failed: %v — QUIC disabled, using UDP fallback\n", lnErr)
+				qt.Close()
+			} else {
+				c.quicTr = qt
+				c.quicListener = ln
+				c.quicPort = quicUDP.LocalAddr().(*net.UDPAddr).Port
+				fmt.Printf("[QUIC] Listening on port %d\n", c.quicPort)
+				go c.quicAcceptLoop()
+			}
+		}
+	}
 
 	go c.handleMessages()
 	go c.pingRoutine()
@@ -86,6 +113,16 @@ func (c *Client) DisconnectFromStun() error {
 	defer c.mutex.Unlock()
 
 	c.cancel()
+
+	if c.quicListener != nil {
+		c.quicListener.Close()
+		c.quicListener = nil
+	}
+	if c.quicTr != nil {
+		c.quicTr.Close()
+		c.quicTr = nil
+	}
+	c.quicPort = 0
 
 	if c.serverConn != nil {
 		c.serverConn.Close()

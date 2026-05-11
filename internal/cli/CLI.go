@@ -985,8 +985,32 @@ func wipeState() {
 		os.Exit(0)
 	}
 
-	// Kill any running daemon first so it doesn't hold stale in-memory state.
 	goos := runtime.GOOS
+
+	// Gracefully leave the P2P network first (notifies peers) if the daemon is up.
+	// Best-effort — if the daemon isn't running we skip straight to killing it.
+	if isDaemonRunning(goos) {
+		fmt.Print("Leaving network...")
+		resp, err := client.SendRequest("leaveNetwork", protocol.LeaveNetworkRequest{AccountID: helpers.GetAccountID()})
+		if err == nil {
+			var cmdResp protocol.LeaveNetworkResponse
+			if mapToStruct(resp.Data, &cmdResp) == nil && cmdResp.Username != "" {
+				fmt.Printf(" done (%s)\n", cmdResp.Username)
+			} else {
+				fmt.Println(" done")
+			}
+		} else {
+			fmt.Println(" skipped (not connected)")
+		}
+	}
+
+	// Stop the macOS menu bar app if present.
+	if goos == "darwin" {
+		exec.Command("pkill", "-x", "Mosaic").Run()           //nolint:errcheck
+		exec.Command("pkill", "-x", "MosaicFinderSync").Run() //nolint:errcheck
+	}
+
+	// Kill the daemon so it doesn't hold stale in-memory state.
 	if pidBytes, err := os.ReadFile(shared.DaemonPIDFile); err == nil {
 		pidStr := strings.TrimSpace(string(pidBytes))
 		if pid, err := strconv.Atoi(pidStr); err == nil {
