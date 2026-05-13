@@ -1,6 +1,17 @@
 # Mosaic Transfer Package
 
-This package handles all file transfer between nodes: Reed-Solomon encoding, binary wire protocol, AES-256-GCM encryption, shard assembly, and file reconstruction.
+This package handles all file transfer between nodes: Reed-Solomon encoding, binary wire protocol, AES-256-GCM encryption, shard assembly, and file reconstruction. The code is split across several files in `internal/transfer/`:
+
+| File | Responsibility |
+|------|---------------|
+| `transfer.go` | Package-level state: constants, types, globals, callbacks, progress counters |
+| `wire.go` | Binary frame encode/decode, adaptive UDP pacer, `sendFrameViaQUIC` |
+| `meta.go` | Shard metadata I/O (`meta.json`), `FindShardMeta*`, `missingDataShards` |
+| `crypto.go` | AES-256-GCM encryption/decryption, encrypted shard file I/O |
+| `upload.go` | `UploadFile`, `sendPlaintextShardToPeer` |
+| `receive.go` | `HandleBinaryShardChunk`, `finalizeShard`, `autoReconstruct`, `StoreShardData` |
+| `download.go` | `FetchFileBytes`, `DeleteLocalShards` |
+| `serve.go` | `StreamShardToPeer`, `HandleShardRequest`, `HandleShardStreamDone`, `HandleShardChunkMissing`, `StreamSpecificChunksToPeer` |
 
 ---
 
@@ -17,22 +28,25 @@ SHA-256 hash (identifies the file permanently)
     ▼
 Reed-Solomon encode → 10 data shards + 4 parity shards = 14 total
     │
-    ├── encrypt each shard in 32 KB chunks (AES-256-GCM)
-    │   write to ~/Mosaic/.shards/<fileHash>/ in length-prefixed format
-    │   fire shardStoredCb for each shard → records uploader in ShardMap
+    ├── for each shard that maps to this node:
+    │     encrypt in 8 KB chunks (AES-256-GCM)
+    │     write to ~/Mosaic/.shards/<fileHash>/ in length-prefixed format
+    │     fire shardStoredCb → records uploader in ShardMap
     │
-    └── for each shard, sequentially:
-            read each encrypted chunk from the shard file
-            pack into binary frame (see Wire Protocol below)
-            send to all peers via UDP
+    └── for each shard that maps to a peer:
+          also store encrypted copy locally (for serving re-requests)
+          fire shardStoredCb → records uploader in ShardMap
+          open QUIC stream to peer (falls back to UDP if not established)
+          encrypt each 8 KB chunk and send as binary frame
+          after all chunks: send ShardStreamDone
 ```
 
-The sender uses a **token-bucket rate limiter** (20,000 tokens/sec, refilled every 10ms) to avoid overwhelming the receiver's UDP buffer. Shards are sent one at a time (semaphore=1) because parallel sends caused ~30% packet loss.
+The sender uses an **adaptive pacer (AIMD)**: it starts at 2 ms between sends (500 sends/sec) and adjusts based on kernel write latency — speeding up when the OS send buffer has headroom, slowing down when it backs up. Each shard is sent to its target peer in a rate-limited goroutine; sends to different peers run concurrently.
 
 ### 2. Receive (`HandleBinaryShardChunk`)
 
 ```
-binary frame arrives via UDP
+binary frame arrives via QUIC or UDP
     │
     ▼
 decode binary header (no JSON parsing)
@@ -41,10 +55,13 @@ decode binary header (no JSON parsing)
 store encrypted chunk as-is in shardAssembly
 (no decryption — blind-courier model; see Encryption below)
     │
+    ├── signal shardActivityChans → FetchFileBytes idle timer resets immediately
+    │
     ▼ (when all chunks for this shard arrive)
 write shard to ~/Mosaic/.shards/<fileHash>/shard<N>_<fileHash>.dat
   in length-prefixed encrypted format
 write meta.json alongside shards
+signal shardReadyChans → unblocks FetchFileBytes for this shard
 fire shardStoredCb → records this node in ShardMap → manifest broadcast
     │
     ▼ (when all 10 data shards are on disk)
@@ -72,17 +89,22 @@ check which data shards (0–9) are present locally
     │     Reed-Solomon decode → return bytes
     │
     └── some missing?
-          for each missing shard: look up ShardMap in manifest → find holders
-          send ShardRequest to each holder
-          wait up to 60s for autoReconstruct to signal completion
+          for each missing shard (one at a time):
+            register shardReadyChans + shardActivityChans for this shard
+            send ShardRequest to all peers
+            wait: shardCh fires (shard landed) OR activityCh fires (chunk arrived, reset idle timer)
+            OR idle timer expires (10s first-chunk, 30s between chunks)
+          after all shards: wait for autoReconstruct to signal fileReadyChans
           read reconstructed file from ~/Mosaic/<filename>
 ```
+
+Shards are requested one at a time to avoid launching N concurrent `StreamShardToPeer` goroutines that would fight each other for bandwidth.
 
 ---
 
 ## Wire Protocol
 
-Every shard chunk is sent as a raw binary UDP frame. This replaces the old JSON + base64 encoding, cutting bandwidth by ~28% and eliminating two marshal/unmarshal round trips per chunk.
+Every shard chunk is sent as a raw binary frame over QUIC (preferred) or UDP. This replaced the old JSON + base64 encoding, cutting bandwidth by ~28% and eliminating marshal/unmarshal overhead per chunk.
 
 The first byte is always `0x01` (the magic byte). JSON messages always start with `{` (`0x7B`), so the router can distinguish binary shard frames from JSON control messages with a single byte check.
 
@@ -105,11 +127,39 @@ Offset  Size   Field
 53+N    M      AES-GCM encrypted chunk data
 ```
 
-Total header overhead: ~55 bytes + filename length.
-Each chunk: 32 KB plaintext → 32,796 bytes encrypted → ~32,851 bytes on wire.
-Well under the 65,507-byte UDP maximum.
+Total header overhead: ~55 bytes + filename length.  
+Each chunk: 8 KB plaintext → ~8,204 bytes encrypted (12-byte nonce + 16-byte GCM tag) → ~8,259 bytes on wire.  
+Well under the 65,507-byte UDP maximum; fragments into ~6 IPv4 packets at 1500-byte MTU.
 
-If a shard is smaller than 32 KB (e.g. small files produce small shards), `totalChunks = 1` and the single chunk contains only the real bytes — no zero-padding sent on the wire.
+If a shard is smaller than 8 KB (e.g. small files produce small shards), `totalChunks = 1` and the single chunk contains only the real bytes — no zero-padding sent on the wire.
+
+### QUIC transport
+
+`StreamShardToPeer` and `sendPlaintextShardToPeer` both try to open a QUIC unidirectional send stream first (`client.OpenShardStream`). QUIC provides reliable, in-order delivery with no per-packet retransmit overhead at the application layer. If the QUIC connection isn't established yet, the function falls back to UDP with the adaptive pacer.
+
+Only the lexicographically smaller P2P ID dials the QUIC connection — the other side accepts. This prevents both nodes from dialing simultaneously and creating duplicate connections.
+
+---
+
+## Selective Retransmit: ShardStreamDone / ShardChunkMissing
+
+After sending all chunks of a shard, the sender transmits a JSON `ShardStreamDone` message:
+
+```json
+{ "type": "shard_stream_done", "fileHash": "...", "shardIndex": 2, "totalChunks": 1280 }
+```
+
+The receiver (`HandleShardStreamDone`) checks its in-progress assembly:
+- If it has all `totalChunks` chunks → nothing to do.
+- If it is missing some → it replies with `ShardChunkMissing` listing the gap indices:
+
+```json
+{ "type": "shard_chunk_missing", "fileHash": "...", "shardIndex": 2, "missingChunks": [47, 312, 891] }
+```
+
+The original sender (`HandleShardChunkMissing`) calls `StreamSpecificChunksToPeer`, which reads the shard file, seeks past chunks that aren't needed, and re-sends only the missing ones. It then sends another `ShardStreamDone` so the receiver can verify it now has everything.
+
+This loop runs up to the point where the receiver has all chunks and `finalizeShard` completes — no full re-request of the shard is needed.
 
 ---
 
@@ -244,7 +294,7 @@ WriteNetworkManifestLocked → BroadcastNetworkManifest
 
 `ShardMap` is a G-set CRDT: entries are only ever added, never removed. Merging two ShardMaps takes the union of holder lists per shard. This means the map converges to the same state on every node regardless of the order messages arrive.
 
-When `FetchFileBytes` needs to request a missing shard, it calls `GetShardHolders(manifest, contentHash, shardIndex)` to find which peer IDs have it, then sends `ShardRequest` messages to each.
+When `FetchFileBytes` needs to request a missing shard, it calls `GetShardHolders(manifest, contentHash, shardIndex)` to find which peer IDs have it, then sends a `ShardRequest` to all peers.
 
 ---
 
@@ -270,34 +320,36 @@ For each shard in each locally stored file, if `shardIndex % numPeers == newPeer
 
 ### `StreamShardToPeer`
 
-Reads the encrypted shard file from disk, parses the length-prefixed chunks, and sends each as a binary frame to the target peer. No decryption or re-encryption — encrypted blobs are forwarded as-is through the rate limiter. The receiving peer's `HandleBinaryShardChunk` stores each chunk, `finalizeShard` reassembles the shard, and the new peer records itself in the ShardMap.
+Reads the encrypted shard file from disk, parses the length-prefixed chunks, and sends each as a binary frame to the target peer via QUIC (or UDP fallback). No decryption or re-encryption — encrypted blobs are forwarded as-is. The receiving peer's `HandleBinaryShardChunk` stores each chunk, `finalizeShard` reassembles the shard, and the new peer records itself in the ShardMap. After all chunks are sent, `ShardStreamDone` is sent so the receiver can trigger selective retransmit for any dropped chunks.
 
 ---
 
 ## Shard Request / Response
 
-`ShardRequest` and `ShardResponse` are JSON control messages (low-frequency). They are used by `FetchFileBytes` when a specific shard is missing locally.
+`ShardRequest` is a JSON control message sent when `FetchFileBytes` detects a missing shard. The holder responds by calling `StreamShardToPeer` — which sends the shard as binary frames, not a single JSON response. `ShardResponse` (old JSON-body response) is no longer used for the data path.
 
 ```
 FetchFileBytes detects missing shard i
     │
     ▼
-GetShardHolders(manifest, hash, i) → [nodeID1, nodeID2, ...]
-    │
-    ▼
 SendToAllPeers(ShardRequest{hash, shardIndex: i})
     │
     ▼ (on holder node)
-HandleShardRequest reads shard<i>_<hash>.dat → sends ShardResponse{data}
+HandleShardRequest → go StreamShardToPeer(...)
+  → binary frames sent chunk by chunk via QUIC/UDP
+  → ShardStreamDone sent at end
     │
     ▼ (back on requester)
-handleShardResponse → StoreShardData → shard written to disk
+HandleBinaryShardChunk stores each chunk → finalizeShard assembles shard
+  → shardReadyChans signaled → FetchFileBytes advances to next shard
   → shardStoredCb → ShardMap updated
   → if enough data shards: autoReconstruct → signals fileReadyChans
     │
     ▼
 FetchFileBytes unblocks, reads reconstructed file
 ```
+
+If chunks are dropped (UDP), `ShardStreamDone` triggers `ShardChunkMissing` which triggers `StreamSpecificChunksToPeer` for just the missing indices — no full re-request needed.
 
 ---
 
@@ -310,7 +362,7 @@ if len(data) > 0 && data[0] == 0x01 {
     go transfer.HandleBinaryShardChunk(data)
     return
 }
-// otherwise: JSON control message (ManifestSync, ShardRequest, ShardResponse, etc.)
+// otherwise: JSON control message (ManifestSync, ShardRequest, ShardStreamDone, etc.)
 ```
 
 In `internal/p2p/client.go`, `processPeerMessage` does the same check before attempting JSON deserialization, so binary frames never touch the JSON parser.
@@ -325,8 +377,8 @@ You can verify the full encode → store → decode pipeline without any peers:
 # 1. Install and start the daemon
 ./install.sh
 
-# 2. Login (auth server must be running)
-mos login account <username> <key>
+# 2. Login
+mos login <key>
 
 # 3. Upload a file — shards are saved locally even with no peers
 mos upload file /path/to/notes.md
@@ -344,4 +396,4 @@ mos download file notes.md
 diff /path/to/notes.md ~/Mosaic/notes.md
 ```
 
-No STUN server or second node needed for this test. The transfer package saves all 14 shards locally when it detects no peers are connected (`[Transfer] No peers connected — shards saved locally only`), and `FetchFileBytes` reads them back from disk, decrypting each shard before passing it to the RS decoder.
+No STUN server or second node needed for this test. The transfer package saves all 14 shards locally when it detects no peers are connected (`[Transfer] No peers connected — all shards saved locally`), and `FetchFileBytes` reads them back from disk, decrypting each shard before passing it to the RS decoder.

@@ -17,40 +17,18 @@ After pairing, all file transfer, manifest sync, and peer ping/pong go directly 
 
 ---
 
-## Authentication
-
-Every client must present a valid JWT when registering. The STUN server calls the auth server's `/auth/verify` endpoint to validate it. Clients without a valid token are rejected before any pairing happens.
-
-```
-Client → STUN:  ClientRegister { token: "<JWT>" }
-STUN   → Auth:  POST /auth/verify { token: "<JWT>" }
-Auth   → STUN:  200 OK  (or 401 Unauthorized)
-STUN   → Client: RegisterSuccess { id, queuePosition }  (or ServerError AUTH_REQUIRED)
-```
-
-The JWT is obtained at login (`mos login account <user> <key>`) and stored in `~/.mosaic-session`. The P2P client reads it automatically when connecting.
-
-To disable authentication (development only), start with `-auth ""`.
-
----
-
 ## Message Flow
 
 ```
 Node A                    STUN Server                Node B
   │                           │                         │
   │── ClientRegister ─────────►│                         │
-  │   { token: "<JWT>" }      │── POST /auth/verify ───►│ (Auth server)
-  │                           │◄── 200 OK ──────────────│
   │◄── RegisterSuccess ────────│                         │
   │    { id, queuePosition:1 }│                         │
   │◄── AssignedAsLeader ───────│                         │
   │                           │                         │
   │  (A keeps pinging STUN every 10s as leader)         │
   │                           │◄──── ClientRegister ─────│
-  │                           │      { token: "<JWT>" } │
-  │                           │── POST /auth/verify ───►│ (Auth server)
-  │                           │◄── 200 OK ───────────────│
   │                           │──── RegisterSuccess ────►│
   │                           │     { id, queuePosition:2}
   │◄── PeerAssignment ─────────│                         │
@@ -88,7 +66,7 @@ Mosaic uses a hybrid model: STUN tracks only the leader; peers track each other 
 
 ### Initial Assignment
 
-The first node to connect and pass JWT verification is assigned as **leader** (queue position 1). Subsequent nodes are paired with the leader directly via `PeerAssignment`.
+The first node to connect is assigned as **leader** (queue position 1). Subsequent nodes are paired with the leader directly via `PeerAssignment`.
 
 ### Queue Positions
 
@@ -132,7 +110,6 @@ If the leader's STUN pings fail 3 times in a row:
 
 | Threat | Mitigation |
 |---|---|
-| Unregistered node joins network | JWT required — rejected before any pairing |
 | Node claims a lower queue position to become leader | Queue positions are assigned and stored server-side; clients cannot influence them |
 | Node sends fake disconnect to trigger leader change | No client-initiated leader change exists — only STUN's cleanup routine triggers election |
 | Node repeatedly re-registers to reset queue position | Re-registration (same IP:port) refreshes the existing record — queue position is not re-assigned |
@@ -141,19 +118,16 @@ If the leader's STUN pings fail 3 times in a row:
 
 ## Known Limitations
 
-### ⚠️ STUN-restart window: malicious actor can seize leadership
+### ⚠️ STUN-restart window: first reconnector wins leadership
 
 **Scenario:** STUN server restarts (crash, reboot, deploy). All client records are lost. The first node to re-register gets queue position 1 and becomes leader.
 
-**Why this matters:** If a malicious authenticated node races to re-register before the legitimate leader, it gets promoted as leader and receives all subsequent `PeerAssignment` introductions. It can then intercept file-transfer coordination messages from new joiners.
-
 **Current mitigations:**
-- JWT required — the attacker must have a valid account
-- Queue positions cannot be manipulated — the attacker can only win by being first, not by cheating
+- Queue positions cannot be manipulated — a node can only win by being first, not by cheating
 
 **What a full fix would require:**
-- Persistent queue positions: STUN stores `(accountID → queuePosition)` in a database that survives restarts
-- Nodes send their account ID on re-registration so STUN can restore their original position
+- Persistent queue positions: STUN stores `(nodeID → queuePosition)` in a database that survives restarts
+- Nodes send their node ID on re-registration so STUN can restore their original position
 - This was not implemented because it requires STUN to maintain persistent state, which conflicts with the "STUN is stateless between restarts" design goal
 
 ### ⚠️ Member STUN records expire silently
@@ -166,7 +140,7 @@ Because members stop pinging STUN after pairing, their records are cleaned up by
 
 ### ⚠️ No transport security
 
-STUN messages are sent over plain UDP with no TLS or DTLS. The JWT token itself is transmitted in plaintext to STUN. In production, this should be wrapped in DTLS or the JWT should be hash-committed so the token cannot be replayed from a network capture.
+STUN messages are sent over plain UDP with no TLS or DTLS. In production, this should be wrapped in DTLS.
 
 ### ⚠️ Single point of coordination
 
@@ -177,14 +151,8 @@ STUN is not replicated. If STUN is down for more than 30 seconds, leader re-elec
 ## Running
 
 ```bash
-# Production (auth enabled, default port)
+# Default port
 go run ./cmd/mosaic-stun
-
-# Custom auth server
-go run ./cmd/mosaic-stun -auth http://178.128.151.84:8081
-
-# Disable auth (development only)
-go run ./cmd/mosaic-stun -auth ""
 
 # Custom port
 go run ./cmd/mosaic-stun -port 3479
@@ -192,10 +160,9 @@ go run ./cmd/mosaic-stun -port 3479
 
 **Flags:**
 
-| Flag    | Default                 | Description                                  |
-|---------|-------------------------|----------------------------------------------|
-| `-port` | `3478`                  | UDP port to listen on                        |
-| `-auth` | `http://localhost:8081` | Auth server URL. Empty string disables auth. |
+| Flag    | Default | Description              |
+|---------|---------|--------------------------|
+| `-port` | `3478`  | UDP port to listen on    |
 
 ---
 
@@ -212,10 +179,9 @@ go run ./cmd/mosaic-stun -port 3479
 
 | Property | Status |
 |---|---|
-| Unauthenticated clients rejected | ✅ JWT verified via auth server on every registration |
 | Leader election manipulation | ✅ Server-assigned queue positions, STUN-driven election |
 | Shard data encrypted in transit | ✅ AES-256-GCM (see transfer package) |
 | STUN-restart leadership race | ⚠️ First re-registrant wins; persistent queue positions not implemented |
 | Member queue position preserved across STUN restart | ⚠️ Records expire — members get new positions on re-registration |
-| Transport security | ⚠️ No TLS/DTLS — JWT transmitted in plaintext over UDP |
+| Transport security | ⚠️ No TLS/DTLS — messages transmitted in plaintext over UDP |
 | Metadata privacy (who talks to whom) | ⚠️ STUN server sees IP:port pairs during pairing |

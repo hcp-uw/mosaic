@@ -85,15 +85,20 @@ func (c *Client) quicConnAccept(conn *quic.Conn) {
 
 	c.mutex.Lock()
 	peer, ok := c.peers[dialerID]
-	if ok {
-		peer.QUICConn = conn
-	}
-	c.mutex.Unlock()
-
 	if !ok {
+		c.mutex.Unlock()
 		conn.CloseWithError(0, "unknown peer") //nolint:errcheck
 		return
 	}
+	if peer.QUICConn != nil {
+		// Our own outgoing dial already established a connection — reject
+		// this incoming duplicate to avoid leaking the connection.
+		c.mutex.Unlock()
+		conn.CloseWithError(0, "duplicate QUIC connection") //nolint:errcheck
+		return
+	}
+	peer.QUICConn = conn
+	c.mutex.Unlock()
 	fmt.Printf("[QUIC] Accepted connection from peer %s\n", dialerID)
 	c.quicAcceptStreams(dialerID, conn)
 }
@@ -145,6 +150,13 @@ func (c *Client) dialQUICToPeer(peerID string) {
 		return
 	}
 
+	// Only the lexicographically smaller ID dials so that exactly one QUIC
+	// connection is established per peer pair. The larger-ID side accepts the
+	// incoming connection via quicConnAccept instead.
+	if myID >= peerID {
+		return
+	}
+
 	remoteAddr := &net.UDPAddr{
 		IP:   peer.Address.IP,
 		Port: peer.QUICPort,
@@ -159,9 +171,20 @@ func (c *Client) dialQUICToPeer(peerID string) {
 	}
 
 	c.mutex.Lock()
-	if p, ok := c.peers[peerID]; ok {
-		p.QUICConn = conn
+	p, ok := c.peers[peerID]
+	if !ok {
+		c.mutex.Unlock()
+		conn.CloseWithError(0, "peer gone") //nolint:errcheck
+		return
 	}
+	if p.QUICConn != nil {
+		// The peer's incoming dial (or our own earlier dial) already set a
+		// connection — discard this duplicate rather than leaking it.
+		c.mutex.Unlock()
+		conn.CloseWithError(0, "duplicate QUIC connection") //nolint:errcheck
+		return
+	}
+	p.QUICConn = conn
 	c.mutex.Unlock()
 
 	fmt.Printf("[QUIC] Connected to peer %s\n", peerID)

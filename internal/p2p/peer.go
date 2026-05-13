@@ -154,8 +154,11 @@ func (c *Client) SendToPeer(peerId string, message *api.Message) error {
 }
 
 func (c *Client) SendToAllPeers(message *api.Message) error {
-	c.mutex.RLock()
+	// GetConnectedPeers acquires its own lock; don't hold a second RLock around
+	// this call — a concurrent Lock() (e.g. from QUIC setup) would deadlock.
 	allPeers := c.GetConnectedPeers()
+
+	c.mutex.RLock()
 	state := c.state
 	c.mutex.RUnlock()
 
@@ -217,8 +220,15 @@ func (c *Client) SendRawToAllPeers(data []byte) error {
 func (c *Client) IsPeerCommunicationAvailable() bool {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-
-	return len(c.GetConnectedPeers()) > 0 && c.state != StateDisconnected
+	if c.state == StateDisconnected {
+		return false
+	}
+	for _, p := range c.peers {
+		if p.Conn != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // ConnectToPeer attempts to establish direct connection to assigned peer using UDP hole punching.

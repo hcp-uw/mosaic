@@ -497,6 +497,57 @@ main() {
     print_success
 }
 
+# Wipe all local Mosaic state — mirrors 'mos wipe' without requiring confirmation input.
+do_wipe() {
+    set_platform_vars
+
+    echo -e "${YELLOW}WARNING: This will permanently delete all local Mosaic state:${NC}"
+    echo "  - ~/Mosaic/  (files, shards, manifests)"
+    echo "  - ~/.mosaic-* key/session files"
+    echo "  - Daemon PID, socket, and log files"
+    echo ""
+
+    # If 'mos' is installed, delegate entirely so the daemon can leave the
+    # network gracefully before anything is deleted.
+    if command -v mos &> /dev/null; then
+        echo "wipe" | mos wipe
+        exit $?
+    fi
+
+    # Fallback: replicate 'mos wipe' in pure shell for environments where mos
+    # isn't on PATH yet (e.g. fresh checkout before first install).
+    echo -n "Type \"wipe\" to confirm: "
+    read confirm
+    if [ "$confirm" != "wipe" ]; then
+        echo "Aborted."
+        exit 0
+    fi
+
+    stop_app
+    stop_daemon || true
+
+    # Remove ~/Mosaic/ and recreate it empty.
+    rm -rf "${HOME}/Mosaic"
+    mkdir -p "${HOME}/Mosaic"
+    echo -e "  ${GREEN}✓${NC} ~/Mosaic/ cleared"
+
+    # Remove all ~/.mosaic-* key/session files.
+    rm -f \
+        "${HOME}/.mosaic-login.key" \
+        "${HOME}/.mosaic-user.key" \
+        "${HOME}/.mosaic-network.key" \
+        "${HOME}/.mosaic-shard.key" \
+        "${HOME}/.mosaic-session"
+    echo -e "  ${GREEN}✓${NC} Key and session files removed"
+
+    # Remove daemon runtime files.
+    rm -f "${PID_FILE}" "${SOCK_FILE}" "${LOG_FILE}"
+    echo -e "  ${GREEN}✓${NC} Daemon runtime files removed"
+
+    echo ""
+    echo "State wiped. Run './install.sh' and 'mos login <key>' to start fresh."
+}
+
 # Handle command line arguments
 if [ "$1" = "--debug" ] || [ "$1" = "-d" ]; then
     set_platform_vars
@@ -507,6 +558,9 @@ elif [ "$1" = "--stop" ] || [ "$1" = "-s" ]; then
     stop_app
     stop_daemon
     exit $?
+elif [ "$1" = "--wipe" ] || [ "$1" = "-w" ]; then
+    do_wipe
+    exit $?
 elif [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
     echo "Mosaic Installation Script"
     echo ""
@@ -516,6 +570,7 @@ elif [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
     echo "  (no options)    Install Mosaic"
     echo "  --debug, -d     Show debug information"
     echo "  --stop, -s      Stop the daemon"
+    echo "  --wipe, -w      Wipe all local Mosaic state (same as 'mos wipe')"
     echo "  --help, -h      Show this help message"
     echo ""
     exit 0

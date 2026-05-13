@@ -193,6 +193,10 @@ func runClient(serverAddr string, errCh chan<- error) {
 			go handleManifestSync(mosaicDir, msg)
 		case api.ShardRequest:
 			go transfer.HandleShardRequest(msg, client)
+		case api.ShardStreamDone:
+			go transfer.HandleShardStreamDone(msg, client)
+		case api.ShardChunkMissing:
+			go transfer.HandleShardChunkMissing(msg, client)
 		case api.ShardResponse:
 			go handleShardResponse(msg)
 		case api.IdentityAnnounce:
@@ -237,7 +241,7 @@ func pushManifestToPeer(mosaicDir string, client *p2p.Client) {
 		return
 	}
 
-	msg := api.NewManifestSyncMessage(data)
+	msg := api.NewManifestSyncMessage(client.GetID(), data)
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if err := client.SendToAllPeers(msg); err == nil {
@@ -280,23 +284,6 @@ func handleManifestSync(mosaicDir string, msg *api.Message) {
 	if changed {
 		go BroadcastNetworkManifest(merged)
 	}
-
-	// Always send our current merged manifest back to the sender, regardless
-	// of whether we learned anything new. This ensures a freshly-joined peer
-	// with an empty manifest gets our full state (changed=false for us means
-	// we already had everything, but the sender may not).
-	go func(senderID string) {
-		c := GetP2PClient()
-		if c == nil {
-			return
-		}
-		data, err := filesystem.ManifestToJSON(merged)
-		if err != nil {
-			return
-		}
-		reply := api.NewManifestSyncMessage(data)
-		c.SendToPeer(senderID, reply) //nolint:errcheck
-	}(msg.Sign.PubKey)
 
 	// Replay our chain and sync local state with the network manifest.
 	accountID := helpers.GetAccountID()

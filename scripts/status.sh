@@ -23,12 +23,11 @@ check_server() {
 }
 
 echo "Mosaic server status:"
-check_server "Auth server" auth 8081
 check_server "STUN server" stun 3478
 check_server "TURN server" turn 3479
 echo ""
 echo "Recent logs:"
-for srv in auth stun turn; do
+for srv in stun turn; do
     log="${LOG_DIR}/${srv}.log"
     if [ -f "$log" ]; then
         echo "  --- ${srv} (last 3 lines) ---"

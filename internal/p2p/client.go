@@ -263,15 +263,17 @@ func (c *Client) completeHandshake(msg *api.Message, peer *PeerInfo) {
 	peer.EphemeralPrivKey = nil
 	peer.QUICPort = d.QUICPort
 	peerID := peer.ID
-	myID := c.id
 	c.mutex.Unlock()
 
 	fmt.Printf("[P2P] Session established with peer %s\n", peerID)
 	c.notifyHandshakeDone(peerID)
 
-	// The side with the lexicographically smaller ID dials QUIC to avoid
-	// duplicate connections (both sides receive HandshakeInit from each other).
-	if d.QUICPort > 0 && myID < peerID {
+	// Both sides attempt to dial QUIC. When one peer is behind NAT, only the
+	// NAT-side's outgoing dial (to the peer's public IP) succeeds; the public-IP
+	// peer's incoming dial hits the NAT-side's LOCAL port and fails silently.
+	// When both peers have public IPs both dials succeed, but the first-wins
+	// guard in dialQUICToPeer and quicConnAccept prevents duplicate connections.
+	if d.QUICPort > 0 {
 		go c.dialQUICToPeer(peerID)
 	}
 }
@@ -451,7 +453,8 @@ func (c *Client) processPeerMessage(data []byte, fromAddr *net.UDPAddr) {
 		case api.ManifestSync:
 			c.notifyMessageReceived(data)
 			return
-		case api.ShardPush, api.ShardRequest, api.ShardResponse, api.ShardChunk:
+		case api.ShardPush, api.ShardRequest, api.ShardResponse, api.ShardChunk,
+			api.ShardStreamDone, api.ShardChunkMissing:
 			c.notifyMessageReceived(data)
 			return
 		case api.IdentityAnnounce, api.IdentityChallenge, api.IdentityResponse:

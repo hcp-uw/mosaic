@@ -99,6 +99,12 @@ func (w *DirWatcher) handleEvent(event fsnotify.Event) {
 		return
 	}
 
+	// WRITE and CHMOD events are not actionable (they fire on every chunk
+	// written during reconstruction). Skip them without logging.
+	if event.Op&(fsnotify.Write|fsnotify.Chmod) != 0 {
+		return
+	}
+
 	fmt.Printf("[watcher] raw event: op=%s path=%s\n", event.Op, path)
 
 	// Check suppress list — daemon-initiated operations register here first.

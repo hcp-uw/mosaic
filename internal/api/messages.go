@@ -56,6 +56,16 @@ const (
 	// ShardDelete asks a holder to delete all locally-stored shards for a file.
 	// Sent by the file owner after a successful network manifest remove.
 	ShardDelete MessageType = "shard_delete"
+
+	// ShardStreamDone is sent by the sender after all chunks of a shard have
+	// been transmitted. The receiver uses it to detect missing chunks and
+	// request selective retransmission via ShardChunkMissing.
+	ShardStreamDone MessageType = "shard_stream_done"
+
+	// ShardChunkMissing is sent by the receiver after a ShardStreamDone when
+	// it has not received all chunks. It carries the list of missing chunk
+	// indices so the sender can retransmit only those chunks.
+	ShardChunkMissing MessageType = "shard_chunk_missing"
 )
 
 // Message represents the base message structure
@@ -445,8 +455,10 @@ type ManifestSyncData struct {
 }
 
 // NewManifestSyncMessage creates a manifest sync message for P2P broadcast.
-func NewManifestSyncMessage(manifestJSON []byte) *Message {
+// senderID is the P2P node ID so the receiver can send a reply back.
+func NewManifestSyncMessage(senderID string, manifestJSON []byte) *Message {
 	return &Message{
+		Sign:      NewSignature(senderID),
 		Type:      ManifestSync,
 		Timestamp: time.Now(),
 		Data:      ManifestSyncData{ManifestJSON: manifestJSON},
@@ -591,6 +603,66 @@ func (m *Message) GetShardChunkData() (*ShardChunkData, error) {
 		return nil, err
 	}
 	var d ShardChunkData
+	err = json.Unmarshal(b, &d)
+	return &d, err
+}
+
+// ShardStreamDoneData is sent by the uploader/sharer after all chunks of a
+// shard have been transmitted so the receiver can check for missing chunks.
+type ShardStreamDoneData struct {
+	FileHash    string `json:"fileHash"`
+	ShardIndex  int    `json:"shardIndex"`
+	TotalChunks int    `json:"totalChunks"`
+}
+
+// ShardChunkMissingData is sent by the receiver to request retransmission of
+// specific chunk indices that were not received.
+type ShardChunkMissingData struct {
+	FileHash      string `json:"fileHash"`
+	ShardIndex    int    `json:"shardIndex"`
+	MissingChunks []int  `json:"missingChunks"`
+}
+
+func NewShardStreamDoneMessage(senderID string, d ShardStreamDoneData) *Message {
+	return &Message{
+		Sign:      NewSignature(senderID),
+		Type:      ShardStreamDone,
+		Timestamp: time.Now(),
+		Data:      d,
+	}
+}
+
+func NewShardChunkMissingMessage(senderID string, d ShardChunkMissingData) *Message {
+	return &Message{
+		Sign:      NewSignature(senderID),
+		Type:      ShardChunkMissing,
+		Timestamp: time.Now(),
+		Data:      d,
+	}
+}
+
+func (m *Message) GetShardStreamDoneData() (*ShardStreamDoneData, error) {
+	if m.Type != ShardStreamDone {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d ShardStreamDoneData
+	err = json.Unmarshal(b, &d)
+	return &d, err
+}
+
+func (m *Message) GetShardChunkMissingData() (*ShardChunkMissingData, error) {
+	if m.Type != ShardChunkMissing {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d ShardChunkMissingData
 	err = json.Unmarshal(b, &d)
 	return &d, err
 }

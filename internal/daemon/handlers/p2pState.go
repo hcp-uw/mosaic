@@ -102,7 +102,7 @@ func BroadcastNetworkManifest(m filesystem.NetworkManifest) {
 		return
 	}
 
-	msg := api.NewManifestSyncMessage(data)
+	msg := api.NewManifestSyncMessage(c.GetID(), data)
 
 	if err := c.SendToAllPeers(msg); err != nil {
 		fmt.Println("BroadcastNetworkManifest: send error:", err)
