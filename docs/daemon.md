@@ -56,16 +56,28 @@ Watches `~/Mosaic/` using `fsnotify` and maps filesystem events to network opera
 
 | User action in Finder | Events seen | Network result |
 |----------------------|-------------|----------------|
-| Delete `notes.md` | `REMOVE notes.md` | Network delete |
-| Rename `notes.md` → `notes_v2.md` | `RENAME notes.md` + `CREATE notes_v2.md` within 75ms | Network rename |
-| Move `notes.md` out of `~/Mosaic/` | `RENAME notes.md` + no `CREATE` within 75ms | Network delete |
-| Copy `notes.md` (Cmd+C / Cmd+V) | `CREATE notes.md copy` | Ignored — copy is not an upload |
+| Delete cached `notes.md` | `REMOVE notes.md` | Network delete (after 500ms window) |
+| Delete stub `notes.md.mosaic` | `REMOVE notes.md.mosaic` | Remove from local manifest only (file still exists on network) |
+| Rename `notes.md` → `notes_v2.md` | `RENAME notes.md` + `CREATE notes_v2.md` within 500ms | Network rename + meta.json updated |
+| Rename stub `notes.md.mosaic` → `notes_v2.md.mosaic` | `RENAME` + `CREATE` within 500ms | Network rename (same as cached rename) |
+| Move `notes.md` out of `~/Mosaic/` | `RENAME notes.md` + no `CREATE` within 500ms | Network delete |
+| Drag a new file into `~/Mosaic/` | `CREATE newfile.txt` + no prior `RENAME` within 500ms | Upload to network |
+| Undo a delete (Cmd+Z) | `REMOVE notes.md` then `CREATE notes.md` (same name) | Manifest entry restored |
+| Copy `notes.md` (Cmd+C / Cmd+V) | `CREATE notes.md copy` | Upload to network (treated as new file) |
 
-**Rename detection:** macOS only fires a `RENAME` event on the old path — it doesn't tell you what the file became. The watcher starts a 75ms timer when it sees a `RENAME`. If a `CREATE` arrives inside `~/Mosaic/` before the timer fires, the two events are paired as a rename. If the timer expires with no `CREATE`, the file was moved out of the folder and is treated as a delete.
+**Rename detection:** macOS fires events in either order — `RENAME`+`CREATE` or `CREATE`+`RENAME`. The watcher handles both:
+- `RENAME` arrives first: the old path is parked in the `disappeared` map with a 500ms timer. If a `CREATE` arrives before the timer fires, the pair is matched as a rename. If no `CREATE` arrives, the action is a move-out or delete.
+- `CREATE` arrives first: it is parked in `recentCreates` for 500ms. If a `RENAME` arrives claiming a manifest entry, the pair is matched as a rename. If no `RENAME` arrives and the file is not in the manifest, it is treated as a drag-and-drop upload.
 
-**Suppression:** Daemon-initiated operations (e.g. deleting a stub after a fetch) call `SuppressNext(path)` before touching the file. This prevents the watcher from misinterpreting its own actions as user actions. Suppression auto-expires after 500ms if the event never fires.
+The CREATE-pair check runs before the `Cached` check, so stub renames (`.mosaic` files) are correctly detected as renames rather than stub deletions.
 
-**Ignored paths:** Hidden files (names starting with `.`) are always ignored — this covers the manifest, the `.tmp` atomic write file, and any macOS metadata files.
+**Stub deletions:** When the user removes a `.mosaic` stub, the file still exists on the network. The watcher removes only the local manifest entry — it does not broadcast a network delete. This matches the behavior of `mos delete file -s` (stub-only remove).
+
+**Rename + meta.json:** When a rename is detected and confirmed, `RenameFile` handler updates the shard metadata (`meta.json` inside `.shards/<hash>/`) so that `StreamShardToPeer` and `FetchFileBytes` serve the file under the new name.
+
+**Suppression:** Daemon-initiated operations (e.g. deleting a stub after a fetch, writing rename events) call `SuppressNext(path)` before touching the file. This prevents the watcher from misinterpreting its own actions as user actions. Suppression auto-expires after 500ms if the event never fires.
+
+**Ignored events:** `WRITE` and `CHMOD` events are silently dropped — they fire on every chunk written during reconstruction and would cause massive noise. Hidden files (names starting with `.`) are also always ignored — this covers the manifest, temp files, and macOS metadata.
 
 ---
 

@@ -11,7 +11,7 @@ This package handles all file transfer between nodes: Reed-Solomon encoding, bin
 | `upload.go` | `UploadFile`, `sendPlaintextShardToPeer` |
 | `receive.go` | `HandleBinaryShardChunk`, `finalizeShard`, `autoReconstruct`, `StoreShardData` |
 | `download.go` | `FetchFileBytes`, `DeleteLocalShards` |
-| `serve.go` | `StreamShardToPeer`, `HandleShardRequest`, `HandleShardStreamDone`, `HandleShardChunkMissing`, `StreamSpecificChunksToPeer` |
+| `serve.go` | `StreamShardToPeer`, `HandleShardRequest`, `HandleShardStreamDone`, `HandleShardStreamAck` |
 
 ---
 
@@ -89,6 +89,8 @@ check which data shards (0–9) are present locally
     │     Reed-Solomon decode → return bytes
     │
     └── some missing?
+          if no P2P client (not joined to the network):
+            return error: "N/M data shards missing — run 'mos join' to fetch from peers"
           for each missing shard (one at a time):
             register shardReadyChans + shardActivityChans for this shard
             send ShardRequest to all peers
@@ -141,7 +143,7 @@ Only the lexicographically smaller P2P ID dials the QUIC connection — the othe
 
 ---
 
-## Selective Retransmit: ShardStreamDone / ShardChunkMissing
+## Selective Retransmit: ShardStreamDone / ShardStreamAck
 
 After sending all chunks of a shard, the sender transmits a JSON `ShardStreamDone` message:
 
@@ -149,17 +151,24 @@ After sending all chunks of a shard, the sender transmits a JSON `ShardStreamDon
 { "type": "shard_stream_done", "fileHash": "...", "shardIndex": 2, "totalChunks": 1280 }
 ```
 
-The receiver (`HandleShardStreamDone`) checks its in-progress assembly:
-- If it has all `totalChunks` chunks → nothing to do.
-- If it is missing some → it replies with `ShardChunkMissing` listing the gap indices:
+The receiver (`HandleShardStreamDone`) **always** replies with a `ShardStreamAck`:
 
 ```json
-{ "type": "shard_chunk_missing", "fileHash": "...", "shardIndex": 2, "missingChunks": [47, 312, 891] }
+{ "type": "shard_stream_ack", "fileHash": "...", "shardIndex": 2, "missingChunks": [] }
 ```
 
-The original sender (`HandleShardChunkMissing`) calls `StreamSpecificChunksToPeer`, which reads the shard file, seeks past chunks that aren't needed, and re-sends only the missing ones. It then sends another `ShardStreamDone` so the receiver can verify it now has everything.
+`missingChunks` is empty if the receiver has all chunks. If it is missing some, the list contains their indices:
 
-This loop runs up to the point where the receiver has all chunks and `finalizeShard` completes — no full re-request of the shard is needed.
+```json
+{ "type": "shard_stream_ack", "fileHash": "...", "shardIndex": 2, "missingChunks": [47, 312, 891] }
+```
+
+Three cases handled by `HandleShardStreamDone`:
+1. Shard file already on disk (assembly completed) → `ack(missing=[])`
+2. No assembly entry for this shard (all chunks were dropped) → `ack(missing=[0..totalChunks-1])`
+3. Active assembly present → compute missing indices and `ack(missing=[...])`
+
+**Synchronous ack loop (sender side):** The sender blocks after `ShardStreamDone`, waiting up to 30 seconds for the `ShardStreamAck` on a per-shard channel keyed `"fileHash:shardIndex:peerID"`. If the ack reports missing chunks, only those chunks are retransmitted via O(missing) disk seeks — no full shard re-read. The loop continues sending `ShardStreamDone` and waiting for `ShardStreamAck` until the receiver confirms `missing=[]`, or the 30-second timeout fires. No full shard re-request is ever needed.
 
 ---
 
@@ -271,6 +280,10 @@ Shards are stored at `~/Mosaic/.shards/<fileHash>/`:
 
 `blockSize` is the shard block size used during RS encoding. The decoder must use the same value — stored here so reconstruction works correctly even after the encoder is gone.
 
+**Blind-courier privacy:** For nodes storing shards on behalf of another user, `fileName` and `fileSize` are **omitted** from `meta.json` (the fields carry `omitempty`). A peer shard directory holds only the RS parameters needed to serve and relay the shard — it reveals nothing about the file it belongs to. `fileName` and `fileSize` are written only by the file owner, either at upload time or when `EnsureShardMeta` runs during `FetchFileBytes` and discovers an existing privacy-stripped meta.
+
+`EnsureShardMeta` is idempotent for complete meta (where `fileName` is already set), but will update stripped meta (no `fileName`) when the file owner calls it — preserving existing RS parameters and filling in the missing identity fields.
+
 ---
 
 ## ShardMap and Shard Location Tracking
@@ -349,7 +362,7 @@ HandleBinaryShardChunk stores each chunk → finalizeShard assembles shard
 FetchFileBytes unblocks, reads reconstructed file
 ```
 
-If chunks are dropped (UDP), `ShardStreamDone` triggers `ShardChunkMissing` which triggers `StreamSpecificChunksToPeer` for just the missing indices — no full re-request needed.
+If chunks are dropped (UDP), `ShardStreamDone` triggers `ShardStreamAck` with missing indices, and the sender retransmits only those chunks inline — no full re-request needed. See [Selective Retransmit](#selective-retransmit-shardstreamdone--shardstreamack) above.
 
 ---
 

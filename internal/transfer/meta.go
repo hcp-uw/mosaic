@@ -10,26 +10,42 @@ import (
 	"github.com/hcp-uw/mosaic/internal/encoding"
 )
 
-// EnsureShardMeta writes a meta.json for the given file if one does not already
-// exist. Call this when you have file info from the network manifest but no
-// shards have been received yet, so that FetchFileBytes can proceed to request
-// missing shards from peers rather than bailing out immediately.
+// EnsureShardMeta writes or updates a meta.json for the given file. If no meta
+// exists it creates one. If meta exists but is privacy-stripped (no fileName —
+// written by a node acting as a courier for another user's shards), it fills in
+// the fileName and fileSize now that we know we are the file owner. RS parameters
+// from the existing meta are preserved so serving and reconstruction stay correct.
 func EnsureShardMeta(fileHash, fileName string, fileSize int) {
-	if FindShardMetaByHash(fileHash) != nil {
-		return
+	existing := FindShardMetaByHash(fileHash)
+	if existing != nil && existing.FileName != "" {
+		return // meta is already complete
 	}
 	shardDir := filepath.Join(ShardsDir(), fileHash)
 	if err := os.MkdirAll(shardDir, 0755); err != nil {
 		return
 	}
-	writeShardMeta(shardDir, ShardMeta{
+	m := ShardMeta{
 		FileName:        fileName,
 		FileHash:        fileHash,
 		FileSize:        fileSize,
 		TotalDataShards: DataShards,
 		TotalShards:     TotalShards,
 		BlockSize:       encoding.ComputeBlockSize(fileSize, DataShards),
-	})
+	}
+	if existing != nil {
+		// Preserve RS parameters written during shard assembly — they may differ
+		// from the defaults if the file was encoded with custom shard counts.
+		if existing.TotalDataShards > 0 {
+			m.TotalDataShards = existing.TotalDataShards
+		}
+		if existing.TotalShards > 0 {
+			m.TotalShards = existing.TotalShards
+		}
+		if existing.BlockSize > 0 {
+			m.BlockSize = existing.BlockSize
+		}
+	}
+	writeShardMeta(shardDir, m)
 }
 
 // FindShardMeta scans the local shard directory for a file matching filename
@@ -83,6 +99,23 @@ func missingDataShards(fileHash string, totalDataShards int) []int {
 		}
 	}
 	return missing
+}
+
+// UpdateShardMetaFileName rewrites the FileName field in the meta.json for
+// the shard set identified by fileHash. Call this after a network rename so
+// that StreamShardToPeer and FetchFileBytes use the new filename.
+func UpdateShardMetaFileName(fileHash, newName string) {
+	shardDir := filepath.Join(ShardsDir(), fileHash)
+	data, err := os.ReadFile(filepath.Join(shardDir, "meta.json"))
+	if err != nil {
+		return // no shards stored locally, nothing to update
+	}
+	var m ShardMeta
+	if err := json.Unmarshal(data, &m); err != nil {
+		return
+	}
+	m.FileName = newName
+	writeShardMeta(shardDir, m)
 }
 
 func writeShardMeta(shardDir string, m ShardMeta) {

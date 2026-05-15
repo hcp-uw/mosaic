@@ -28,9 +28,13 @@ const (
 // ShardMeta is stored alongside each shard set so FetchFileBytes can look up
 // fileHash and fileSize from just a filename, without consulting the manifest.
 type ShardMeta struct {
-	FileName        string `json:"fileName"`
+	// FileName and FileSize are set only by the file owner (written during upload
+	// or by EnsureShardMeta). Nodes storing shards for other users leave these
+	// empty — they only need the RS parameters to serve the shard.
+	FileName string `json:"fileName,omitempty"`
+	FileSize int    `json:"fileSize,omitempty"`
+
 	FileHash        string `json:"fileHash"`
-	FileSize        int    `json:"fileSize"`
 	TotalDataShards int    `json:"totalDataShards"`
 	TotalShards     int    `json:"totalShards"`
 	BlockSize       int    `json:"blockSize"` // shard block size used during encoding

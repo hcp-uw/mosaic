@@ -63,10 +63,16 @@ func HandleBinaryShardChunk(data []byte) {
 
 	if received == total {
 		assemblyMu.Lock()
-		finalAsm := assemblies[key]
-		delete(assemblies, key)
+		finalAsm, exists := assemblies[key]
+		if exists {
+			delete(assemblies, key)
+		}
 		assemblyMu.Unlock()
-		go finalizeShard(finalAsm)
+		// exists guards against the race where two goroutines both see
+		// received == total (duplicate UDP chunk) and the second reads nil.
+		if exists {
+			go finalizeShard(finalAsm)
+		}
 	}
 }
 
@@ -130,14 +136,22 @@ func finalizeShard(asm *shardAssembly) {
 		}
 	}
 
-	writeShardMeta(shardDir, ShardMeta{
-		FileName:        asm.fileName,
+	// Write RS parameters to meta.json so the shard can be served later.
+	// Preserve any existing fileName/fileSize (written by the file owner during
+	// upload or EnsureShardMeta). For shards belonging to other users we do NOT
+	// write their filename or file size — storing that metadata on behalf of
+	// other users would violate their privacy (blind-courier model).
+	meta := ShardMeta{
 		FileHash:        asm.fileHash,
-		FileSize:        asm.fileSize,
 		TotalDataShards: asm.totalDataShards,
 		TotalShards:     asm.totalShards,
 		BlockSize:       encoding.ComputeBlockSize(asm.fileSize, asm.totalDataShards),
-	})
+	}
+	if existing := FindShardMetaByHash(asm.fileHash); existing != nil && existing.FileName != "" {
+		meta.FileName = existing.FileName
+		meta.FileSize = existing.FileSize
+	}
+	writeShardMeta(shardDir, meta)
 
 	count := 0
 	for i := 0; i < asm.totalDataShards; i++ {
@@ -155,6 +169,21 @@ func finalizeShard(asm *shardAssembly) {
 
 func autoReconstruct(asm *shardAssembly) {
 	mosaicDir := shared.MosaicDir()
+
+	// Prefer fileName/fileSize from meta.json — the file owner writes these
+	// during upload or EnsureShardMeta. The asm values may be empty if the
+	// serving peer stripped private metadata before forwarding (privacy model).
+	fileName := asm.fileName
+	fileSize := asm.fileSize
+	if m := FindShardMetaByHash(asm.fileHash); m != nil {
+		if m.FileName != "" {
+			fileName = m.FileName
+		}
+		if m.FileSize > 0 {
+			fileSize = m.FileSize
+		}
+	}
+
 	outDir, err := os.MkdirTemp("", "mosaic-recon-*")
 	if err != nil {
 		fmt.Printf("[Transfer] Reconstruct: cannot create output dir: %v\n", err)
@@ -190,13 +219,13 @@ func autoReconstruct(asm *shardAssembly) {
 		return
 	}
 	// Use stored block size if available; fall back to computing from file size.
-	blockSize := encoding.ComputeBlockSize(asm.fileSize, asm.totalDataShards)
+	blockSize := encoding.ComputeBlockSize(fileSize, asm.totalDataShards)
 	if m := FindShardMetaByHash(asm.fileHash); m != nil && m.BlockSize > 0 {
 		blockSize = m.BlockSize
 	}
 	enc.SetBlockSize(blockSize)
 	fmt.Printf("[Transfer] Reconstructing %s…\n", asm.fileHash[:12])
-	if err := enc.DecodeShards(asm.fileHash, asm.fileSize); err != nil {
+	if err := enc.DecodeShards(asm.fileHash, fileSize); err != nil {
 		fmt.Printf("[Transfer] Reconstruct: decode failed: %v\n", err)
 		return
 	}
@@ -207,7 +236,7 @@ func autoReconstruct(asm *shardAssembly) {
 		return
 	}
 
-	destPath := filepath.Join(mosaicDir, asm.fileName)
+	destPath := filepath.Join(mosaicDir, fileName)
 	if err := copyFile(matches[0], destPath); err != nil {
 		fmt.Printf("[Transfer] Reconstruct: could not write %s: %v\n", destPath, err)
 		return

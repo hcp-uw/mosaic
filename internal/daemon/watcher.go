@@ -148,19 +148,9 @@ func (w *DirWatcher) onDisappeared(logicalName string) {
 		return
 	}
 
-	// If cached=false the physical file is a stub. The user deleted the stub
-	// directly (e.g. in Finder). Remove the local manifest entry so the file
-	// no longer appears in 'mos list file', but do NOT propagate a network delete
-	// (the file still exists on the network).
-	if !entry.Cached {
-		fmt.Printf("[watcher] stub deleted by user — removing %s from local manifest\n", logicalName)
-		if err := filesystem.RemoveFromManifest(w.mosaicDir, logicalName); err != nil {
-			fmt.Printf("[watcher] could not remove %s from local manifest: %v\n", logicalName, err)
-		}
-		return
-	}
-
 	// Check if a CREATE already arrived for a different name (CREATE before RENAME).
+	// Do this BEFORE the Cached check so that stub renames are caught as renames,
+	// not treated as stub deletions.
 	var matchedNew string
 	var matchedRC *recentCreate
 	w.recentCreates.Range(func(key, val any) bool {
@@ -181,7 +171,6 @@ func (w *DirWatcher) onDisappeared(logicalName string) {
 		return
 	}
 
-	// No CREATE yet — park the entry and wait.
 	// Cancel any existing timer for this name (duplicate events).
 	if existing, loaded := w.disappeared.Load(logicalName); loaded {
 		existing.(*disappearedEntry).timer.Stop()
@@ -190,12 +179,29 @@ func (w *DirWatcher) onDisappeared(logicalName string) {
 	fmt.Printf("[watcher] %s disappeared — waiting 500ms for CREATE pair\n", logicalName)
 
 	d := &disappearedEntry{entry: entry}
-	d.timer = time.AfterFunc(500*time.Millisecond, func() {
-		if _, stillPending := w.disappeared.LoadAndDelete(logicalName); stillPending {
-			fmt.Printf("[watcher] no CREATE arrived — committing delete for %s\n", logicalName)
-			w.deleteFromNetwork(entry)
-		}
-	})
+
+	if !entry.Cached {
+		// Stub removed by the user. Park briefly to catch a late CREATE (rename).
+		// If no CREATE pair arrives, remove only from the local manifest — do NOT
+		// propagate a network delete (the file still exists on the network).
+		d.timer = time.AfterFunc(500*time.Millisecond, func() {
+			if _, stillPending := w.disappeared.LoadAndDelete(logicalName); stillPending {
+				fmt.Printf("[watcher] stub removed by user — removing %s from local manifest\n", logicalName)
+				if err := filesystem.RemoveFromManifest(w.mosaicDir, logicalName); err != nil {
+					fmt.Printf("[watcher] could not remove %s from local manifest: %v\n", logicalName, err)
+				}
+			}
+		})
+	} else {
+		// Cached file removed — wait for a CREATE pair; if none arrives, commit
+		// a full network delete.
+		d.timer = time.AfterFunc(500*time.Millisecond, func() {
+			if _, stillPending := w.disappeared.LoadAndDelete(logicalName); stillPending {
+				fmt.Printf("[watcher] no CREATE arrived — committing delete for %s\n", logicalName)
+				w.deleteFromNetwork(entry)
+			}
+		})
+	}
 	w.disappeared.Store(logicalName, d)
 }
 

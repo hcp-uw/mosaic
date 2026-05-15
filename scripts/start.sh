@@ -42,7 +42,7 @@ fi
 if [ -f "${PID_DIR}/stun.pid" ] && kill -0 "$(cat ${PID_DIR}/stun.pid)" 2>/dev/null; then
     echo "STUN server already running (PID $(cat ${PID_DIR}/stun.pid))"
 else
-    ./bin/mosaic-stun >> "${LOG_DIR}/stun.log" 2>&1 &
+    ./bin/mosaic-stun > "${LOG_DIR}/stun.log" 2>&1 &
     echo $! > "${PID_DIR}/stun.pid"
     echo "✓ STUN server started (PID $!)"
 fi
@@ -51,7 +51,7 @@ fi
 if [ -f "${PID_DIR}/turn.pid" ] && kill -0 "$(cat ${PID_DIR}/turn.pid)" 2>/dev/null; then
     echo "TURN server already running (PID $(cat ${PID_DIR}/turn.pid))"
 else
-    ./bin/mosaic-turn -public-ip "$PUBLIC_IP" >> "${LOG_DIR}/turn.log" 2>&1 &
+    ./bin/mosaic-turn -public-ip "$PUBLIC_IP" > "${LOG_DIR}/turn.log" 2>&1 &
     echo $! > "${PID_DIR}/turn.pid"
     echo "✓ TURN server started (PID $!)"
 fi

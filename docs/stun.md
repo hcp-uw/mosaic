@@ -142,6 +142,12 @@ Because members stop pinging STUN after pairing, their records are cleaned up by
 
 STUN messages are sent over plain UDP with no TLS or DTLS. In production, this should be wrapped in DTLS.
 
+---
+
+## Non-JSON Packet Filtering
+
+Port 3478 is the well-known STUN port, so the server occasionally receives non-JSON UDP datagrams — null-byte probes, QUIC Initial packets from random scanners, and STUN/RFC-5389 binary frames from other software. The server silently drops any packet whose first byte is not `{` (0x7B) before attempting JSON deserialization. This prevents log spam from parse errors on malformed or binary payloads.
+
 ### ⚠️ Single point of coordination
 
 STUN is not replicated. If STUN is down for more than 30 seconds, leader re-election cannot happen (though existing peer-to-peer connections continue to work). Consider running a secondary STUN instance behind a DNS failover for production deployments.

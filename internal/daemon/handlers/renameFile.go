@@ -9,6 +9,7 @@ import (
 	"github.com/hcp-uw/mosaic/internal/cli/shared"
 	"github.com/hcp-uw/mosaic/internal/daemon/handlers/helpers"
 	filesystem "github.com/hcp-uw/mosaic/internal/fileSystem"
+	"github.com/hcp-uw/mosaic/internal/transfer"
 )
 
 // RenameFile renames a file on the network and updates all local state.
@@ -47,12 +48,24 @@ func RenameFile(req protocol.RenameFileRequest) protocol.RenameFileResponse {
 		}
 	}
 
+	// Capture content hash before renaming so we can update meta.json afterward.
+	var contentHash string
+	if entry, err := filesystem.GetManifestEntry(mosaicDir, oldName); err == nil {
+		contentHash = entry.ContentHash
+	}
+
 	// Update the manifest.
 	if err := filesystem.RenameInManifest(mosaicDir, oldName, newName); err != nil {
 		return protocol.RenameFileResponse{
 			Success: false,
 			Details: fmt.Sprintf("could not update manifest: %v", err),
 		}
+	}
+
+	// Update meta.json in the shards directory so StreamShardToPeer and
+	// FetchFileBytes serve the file under the new name.
+	if contentHash != "" {
+		transfer.UpdateShardMetaFileName(contentHash, newName)
 	}
 
 	// Update the network manifest: append "rename" block, write, broadcast.
