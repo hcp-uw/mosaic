@@ -58,14 +58,14 @@ const (
 	ShardDelete MessageType = "shard_delete"
 
 	// ShardStreamDone is sent by the sender after all chunks of a shard have
-	// been transmitted. The receiver uses it to detect missing chunks and
-	// request selective retransmission via ShardChunkMissing.
+	// been transmitted. The receiver replies with ShardStreamAck listing any
+	// missing chunk indices (empty = all received).
 	ShardStreamDone MessageType = "shard_stream_done"
 
-	// ShardChunkMissing is sent by the receiver after a ShardStreamDone when
-	// it has not received all chunks. It carries the list of missing chunk
-	// indices so the sender can retransmit only those chunks.
-	ShardChunkMissing MessageType = "shard_chunk_missing"
+	// ShardStreamAck is the receiver's reply to ShardStreamDone. MissingChunks
+	// lists chunk indices the receiver did not get; empty means success. The
+	// sender blocks on this before proceeding to the next shard.
+	ShardStreamAck MessageType = "shard_stream_ack"
 )
 
 // Message represents the base message structure
@@ -615,9 +615,9 @@ type ShardStreamDoneData struct {
 	TotalChunks int    `json:"totalChunks"`
 }
 
-// ShardChunkMissingData is sent by the receiver to request retransmission of
-// specific chunk indices that were not received.
-type ShardChunkMissingData struct {
+// ShardStreamAckData is the receiver's reply to ShardStreamDone.
+// MissingChunks lists chunk indices the receiver did not receive; nil/empty = all received.
+type ShardStreamAckData struct {
 	FileHash      string `json:"fileHash"`
 	ShardIndex    int    `json:"shardIndex"`
 	MissingChunks []int  `json:"missingChunks"`
@@ -632,10 +632,10 @@ func NewShardStreamDoneMessage(senderID string, d ShardStreamDoneData) *Message 
 	}
 }
 
-func NewShardChunkMissingMessage(senderID string, d ShardChunkMissingData) *Message {
+func NewShardStreamAckMessage(senderID string, d ShardStreamAckData) *Message {
 	return &Message{
 		Sign:      NewSignature(senderID),
-		Type:      ShardChunkMissing,
+		Type:      ShardStreamAck,
 		Timestamp: time.Now(),
 		Data:      d,
 	}
@@ -654,15 +654,15 @@ func (m *Message) GetShardStreamDoneData() (*ShardStreamDoneData, error) {
 	return &d, err
 }
 
-func (m *Message) GetShardChunkMissingData() (*ShardChunkMissingData, error) {
-	if m.Type != ShardChunkMissing {
+func (m *Message) GetShardStreamAckData() (*ShardStreamAckData, error) {
+	if m.Type != ShardStreamAck {
 		return nil, ErrInvalidMessageType
 	}
 	b, err := json.Marshal(m.Data)
 	if err != nil {
 		return nil, err
 	}
-	var d ShardChunkMissingData
+	var d ShardStreamAckData
 	err = json.Unmarshal(b, &d)
 	return &d, err
 }

@@ -152,6 +152,11 @@ func (s *Server) handleMessages(enableLogging bool) {
 }
 
 func (s *Server) processMessage(data []byte, clientAddr *net.UDPAddr, enableLogging bool) {
+	// Silently drop anything that isn't a JSON message (null-byte keepalives,
+	// QUIC frames, internet scanners, etc. all arrive on the same UDP port).
+	if len(data) == 0 || data[0] != '{' {
+		return
+	}
 	msg, err := api.DeserializeMessage(data)
 	if err != nil {
 		if enableLogging {

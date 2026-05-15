@@ -13,26 +13,75 @@ import (
 )
 
 // StreamShardToPeer reads a locally stored encrypted shard and forwards its
-// chunks to a specific peer using the binary wire protocol. The chunks are
-// sent as-is — no decryption or re-encryption needed (blind-courier model).
-// Uses QUIC when a stream can be opened; falls back to UDP per-chunk otherwise.
+// chunks to a specific peer using the binary wire protocol. After sending all
+// chunks it waits for a ShardStreamAck; if any chunks were missed it retransmits
+// only those and loops until the receiver confirms all chunks are present.
+// Uses QUIC when a stream can be opened; falls back to UDP otherwise.
 func StreamShardToPeer(fileHash string, meta *ShardMeta, shardIndex int, peerID string, client *p2p.Client) {
 	shardPath := filepath.Join(ShardsDir(), fileHash, fmt.Sprintf("shard%d_%s.dat", shardIndex, fileHash))
 
+	totalChunks, ok := streamEncryptedChunks(shardPath, meta, shardIndex, nil, peerID, client)
+	if !ok {
+		return
+	}
+
+	ackKey := fmt.Sprintf("%s:%d:%s", fileHash, shardIndex, peerID)
+
+	for {
+		// Register ack channel before sending ShardStreamDone to avoid a race
+		// where the ack arrives before we start waiting.
+		ackCh := make(chan []int, 1)
+		shardAckChans.Store(ackKey, ackCh)
+
+		client.SendToPeer(peerID, api.NewShardStreamDoneMessage(client.GetID(), api.ShardStreamDoneData{ //nolint:errcheck
+			FileHash:    fileHash,
+			ShardIndex:  shardIndex,
+			TotalChunks: totalChunks,
+		}))
+
+		var missing []int
+		select {
+		case missing = <-ackCh:
+		case <-time.After(30 * time.Second):
+			shardAckChans.Delete(ackKey)
+			fmt.Printf("[Transfer] Shard %d → %s: ack timeout\n", shardIndex, peerID[:8])
+			return
+		}
+		shardAckChans.Delete(ackKey)
+
+		if len(missing) == 0 {
+			fmt.Printf("[Transfer] Redistributed shard %d of %s → peer %s\n", shardIndex, fileHash[:12], peerID[:8])
+			return
+		}
+
+		fmt.Printf("[Transfer] Shard %d → %s: retransmitting %d/%d missing chunks\n",
+			shardIndex, peerID[:8], len(missing), totalChunks)
+
+		needed := make(map[int]struct{}, len(missing))
+		for _, idx := range missing {
+			needed[idx] = struct{}{}
+		}
+		streamEncryptedChunks(shardPath, meta, shardIndex, needed, peerID, client) //nolint:errcheck
+	}
+}
+
+// streamEncryptedChunks reads the on-disk encrypted shard file and sends
+// chunks to peerID via QUIC (preferred) or UDP. If onlyChunks is non-nil only
+// those chunk indices are sent (skipping others via sequential scan); otherwise
+// all chunks are sent. Returns (totalChunks, success).
+func streamEncryptedChunks(shardPath string, meta *ShardMeta, shardIndex int, onlyChunks map[int]struct{}, peerID string, client *p2p.Client) (int, bool) {
 	f, err := os.Open(shardPath)
 	if err != nil {
-		return
+		return 0, false
 	}
 	defer f.Close()
 
 	var hdr [4]byte
 	if _, err := io.ReadFull(f, hdr[:]); err != nil {
-		return
+		return 0, false
 	}
 	totalChunks := int(binary.LittleEndian.Uint32(hdr[:]))
 
-	// Try to open a QUIC stream for reliable, in-order delivery.
-	// Fall back to UDP if QUIC isn't established yet.
 	quicStream, quicErr := client.OpenShardStream(peerID)
 	if quicErr == nil {
 		defer quicStream.Close()
@@ -41,18 +90,24 @@ func StreamShardToPeer(fileHash string, meta *ShardMeta, shardIndex int, peerID 
 	for chunkIdx := 0; chunkIdx < totalChunks; chunkIdx++ {
 		var lenBuf [4]byte
 		if _, err := io.ReadFull(f, lenBuf[:]); err != nil {
-			fmt.Printf("[Transfer] StreamShardToPeer: read chunk %d len failed: %v\n", chunkIdx, err)
-			return
+			fmt.Printf("[Transfer] streamEncryptedChunks: read chunk %d len failed: %v\n", chunkIdx, err)
+			return totalChunks, false
 		}
 		n := int(binary.LittleEndian.Uint32(lenBuf[:]))
 		encryptedChunk := make([]byte, n)
 		if _, err := io.ReadFull(f, encryptedChunk); err != nil {
-			fmt.Printf("[Transfer] StreamShardToPeer: read chunk %d data failed: %v\n", chunkIdx, err)
-			return
+			fmt.Printf("[Transfer] streamEncryptedChunks: read chunk %d data failed: %v\n", chunkIdx, err)
+			return totalChunks, false
+		}
+
+		if onlyChunks != nil {
+			if _, send := onlyChunks[chunkIdx]; !send {
+				continue
+			}
 		}
 
 		frame, err := encodeBinaryShardChunk(binaryShardChunk{
-			fileHash:        fileHash,
+			fileHash:        meta.FileHash,
 			fileName:        meta.FileName,
 			fileSize:        meta.FileSize,
 			shardIndex:      shardIndex,
@@ -63,13 +118,13 @@ func StreamShardToPeer(fileHash string, meta *ShardMeta, shardIndex int, peerID 
 			data:            encryptedChunk,
 		})
 		if err != nil {
-			return
+			return totalChunks, false
 		}
 
 		if quicErr == nil {
 			if err := sendFrameViaQUIC(quicStream, frame); err != nil {
-				fmt.Printf("[Transfer] StreamShardToPeer: shard %d chunk %d → %s (QUIC) failed: %v\n", shardIndex, chunkIdx, peerID[:8], err)
-				return
+				fmt.Printf("[Transfer] streamEncryptedChunks: shard %d chunk %d → %s (QUIC) failed: %v\n", shardIndex, chunkIdx, peerID[:8], err)
+				return totalChunks, false
 			}
 		} else {
 			udpPacer.wait()
@@ -77,25 +132,12 @@ func StreamShardToPeer(fileHash string, meta *ShardMeta, shardIndex int, peerID 
 			err := client.SendRawToPeer(peerID, frame)
 			udpPacer.adjust(time.Since(t0), err == nil)
 			if err != nil {
-				fmt.Printf("[Transfer] StreamShardToPeer: shard %d chunk %d → %s failed: %v\n", shardIndex, chunkIdx, peerID, err)
-				return
+				fmt.Printf("[Transfer] streamEncryptedChunks: shard %d chunk %d → %s failed: %v\n", shardIndex, chunkIdx, peerID, err)
+				return totalChunks, false
 			}
 		}
 	}
-	transport := "UDP"
-	if quicErr == nil {
-		transport = "QUIC"
-	}
-	fmt.Printf("[Transfer] Redistributed shard %d of %s → peer %s (%s)\n", shardIndex, fileHash[:12], peerID[:8], transport)
-
-	// Notify the receiver that all chunks have been sent so it can detect
-	// any gaps and request selective retransmission.
-	doneMsg := api.NewShardStreamDoneMessage(client.GetID(), api.ShardStreamDoneData{
-		FileHash:    fileHash,
-		ShardIndex:  shardIndex,
-		TotalChunks: totalChunks,
-	})
-	client.SendToPeer(peerID, doneMsg) //nolint:errcheck — best-effort
+	return totalChunks, true
 }
 
 // HandleShardRequest responds to a peer requesting a shard.
@@ -147,30 +189,44 @@ func HandleShardRequest(msg *api.Message, client *p2p.Client) {
 }
 
 // HandleShardStreamDone is called when a peer signals it has finished sending
-// all chunks of a shard. The receiver checks how many chunks it actually has
-// and, if any are missing, replies with a ShardChunkMissing message so the
-// sender can retransmit only those chunks.
+// all chunks of a shard. We always reply with ShardStreamAck listing any chunk
+// indices we did not receive (empty = all present). The sender blocks on this
+// reply before proceeding, so it can retransmit missing chunks inline.
 func HandleShardStreamDone(msg *api.Message, client *p2p.Client) {
 	d, err := msg.GetShardStreamDoneData()
 	if err != nil {
 		return
 	}
 	senderID := msg.Sign.PubKey
-	key := fmt.Sprintf("%s:%d", d.FileHash, d.ShardIndex)
 
-	// If the shard file is already on disk, nothing to do.
+	sendAck := func(missing []int) {
+		client.SendToPeer(senderID, api.NewShardStreamAckMessage(client.GetID(), api.ShardStreamAckData{ //nolint:errcheck
+			FileHash:      d.FileHash,
+			ShardIndex:    d.ShardIndex,
+			MissingChunks: missing,
+		}))
+	}
+
+	// If the shard is already on disk, ack success immediately.
 	shardPath := filepath.Join(ShardsDir(), d.FileHash,
 		fmt.Sprintf("shard%d_%s.dat", d.ShardIndex, d.FileHash))
 	if _, err := os.Stat(shardPath); err == nil {
+		sendAck(nil)
 		return
 	}
 
+	key := fmt.Sprintf("%s:%d", d.FileHash, d.ShardIndex)
 	assemblyMu.Lock()
 	asm, ok := assemblies[key]
 	assemblyMu.Unlock()
 
 	if !ok {
-		// No assembly in progress — request the whole shard via normal path.
+		// No assembly in progress — all chunks are missing.
+		missing := make([]int, d.TotalChunks)
+		for i := range missing {
+			missing[i] = i
+		}
+		sendAck(missing)
 		return
 	}
 
@@ -183,121 +239,29 @@ func HandleShardStreamDone(msg *api.Message, client *p2p.Client) {
 	}
 	asm.mu.Unlock()
 
-	if len(missing) == 0 {
-		return
+	if len(missing) > 0 {
+		fmt.Printf("[Transfer] Shard %d of %s: %d/%d chunks missing — acking for retransmit\n",
+			d.ShardIndex, d.FileHash[:12], len(missing), d.TotalChunks)
 	}
-
-	fmt.Printf("[Transfer] Shard %d of %s: %d/%d chunks missing — requesting retransmit\n",
-		d.ShardIndex, d.FileHash[:12], len(missing), d.TotalChunks)
-	retxMsg := api.NewShardChunkMissingMessage(client.GetID(), api.ShardChunkMissingData{
-		FileHash:      d.FileHash,
-		ShardIndex:    d.ShardIndex,
-		MissingChunks: missing,
-	})
-	client.SendToPeer(senderID, retxMsg) //nolint:errcheck — best-effort
+	sendAck(missing)
 }
 
-// HandleShardChunkMissing is called when a receiver reports which chunks of a
-// shard it did not receive. We re-stream only those specific chunks so the
-// receiver can complete its assembly without a full re-request.
-func HandleShardChunkMissing(msg *api.Message, client *p2p.Client) {
-	d, err := msg.GetShardChunkMissingData()
+// HandleShardStreamAck is called when the receiver replies to our ShardStreamDone.
+// It delivers the missing-chunk list to the channel that StreamShardToPeer or
+// sendPlaintextShardToPeer is blocking on.
+func HandleShardStreamAck(msg *api.Message, _ *p2p.Client) {
+	d, err := msg.GetShardStreamAckData()
 	if err != nil {
 		return
 	}
-	if len(d.MissingChunks) == 0 {
-		return
-	}
-	requesterID := msg.Sign.PubKey
-	meta := FindShardMetaByHash(d.FileHash)
-	if meta == nil {
-		return
-	}
-	fmt.Printf("[Transfer] Retransmitting %d missing chunks of shard %d → %s\n",
-		len(d.MissingChunks), d.ShardIndex, requesterID[:8])
-	go StreamSpecificChunksToPeer(d.FileHash, meta, d.ShardIndex, d.MissingChunks, requesterID, client)
-}
-
-// StreamSpecificChunksToPeer reads a locally stored shard file and re-sends
-// only the chunk indices listed in missingChunks to peerID. After sending,
-// it transmits another ShardStreamDone so the receiver can verify completion.
-func StreamSpecificChunksToPeer(fileHash string, meta *ShardMeta, shardIndex int, missingChunks []int, peerID string, client *p2p.Client) {
-	shardPath := filepath.Join(ShardsDir(), fileHash,
-		fmt.Sprintf("shard%d_%s.dat", shardIndex, fileHash))
-
-	f, err := os.Open(shardPath)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-
-	var hdr [4]byte
-	if _, err := io.ReadFull(f, hdr[:]); err != nil {
-		return
-	}
-	totalChunks := int(binary.LittleEndian.Uint32(hdr[:]))
-
-	// Build a set for O(1) lookup.
-	needed := make(map[int]struct{}, len(missingChunks))
-	for _, idx := range missingChunks {
-		needed[idx] = struct{}{}
-	}
-
-	quicStream, quicErr := client.OpenShardStream(peerID)
-	if quicErr == nil {
-		defer quicStream.Close()
-	}
-
-	for chunkIdx := 0; chunkIdx < totalChunks; chunkIdx++ {
-		var lenBuf [4]byte
-		if _, err := io.ReadFull(f, lenBuf[:]); err != nil {
-			return
-		}
-		n := int(binary.LittleEndian.Uint32(lenBuf[:]))
-		encryptedChunk := make([]byte, n)
-		if _, err := io.ReadFull(f, encryptedChunk); err != nil {
-			return
-		}
-
-		if _, send := needed[chunkIdx]; !send {
-			continue
-		}
-
-		frame, err := encodeBinaryShardChunk(binaryShardChunk{
-			fileHash:        fileHash,
-			fileName:        meta.FileName,
-			fileSize:        meta.FileSize,
-			shardIndex:      shardIndex,
-			chunkIndex:      chunkIdx,
-			totalChunks:     totalChunks,
-			totalDataShards: meta.TotalDataShards,
-			totalShards:     meta.TotalShards,
-			data:            encryptedChunk,
-		})
-		if err != nil {
-			return
-		}
-
-		if quicErr == nil {
-			if err := sendFrameViaQUIC(quicStream, frame); err != nil {
-				return
-			}
-		} else {
-			udpPacer.wait()
-			t0 := time.Now()
-			err := client.SendRawToPeer(peerID, frame)
-			udpPacer.adjust(time.Since(t0), err == nil)
-			if err != nil {
-				return
-			}
+	// The ack sender is the peer we were pushing chunks to.
+	ackKey := fmt.Sprintf("%s:%d:%s", d.FileHash, d.ShardIndex, msg.Sign.PubKey)
+	if v, ok := shardAckChans.Load(ackKey); ok {
+		ch := v.(chan []int)
+		select {
+		case ch <- d.MissingChunks:
+		default:
+			// Channel already has a value; duplicate ack — drop.
 		}
 	}
-
-	// Send another ShardStreamDone so the receiver can verify it now has everything.
-	doneMsg := api.NewShardStreamDoneMessage(client.GetID(), api.ShardStreamDoneData{
-		FileHash:    fileHash,
-		ShardIndex:  shardIndex,
-		TotalChunks: totalChunks,
-	})
-	client.SendToPeer(peerID, doneMsg) //nolint:errcheck — best-effort
 }

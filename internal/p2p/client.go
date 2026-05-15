@@ -454,7 +454,7 @@ func (c *Client) processPeerMessage(data []byte, fromAddr *net.UDPAddr) {
 			c.notifyMessageReceived(data)
 			return
 		case api.ShardPush, api.ShardRequest, api.ShardResponse, api.ShardChunk,
-			api.ShardStreamDone, api.ShardChunkMissing:
+			api.ShardStreamDone, api.ShardStreamAck:
 			c.notifyMessageReceived(data)
 			return
 		case api.IdentityAnnounce, api.IdentityChallenge, api.IdentityResponse:

@@ -113,6 +113,11 @@ var (
 	// on each chunk arrival instead of polling every 5 seconds.
 	// key: "fileHash:shardIndex" → chan struct{}
 	shardActivityChans sync.Map
+
+	// shardAckChans allows the sender to block after ShardStreamDone until the
+	// receiver's ShardStreamAck arrives with the list of missing chunk indices.
+	// key: "fileHash:shardIndex:peerID" → chan []int
+	shardAckChans sync.Map
 )
 
 // SetShardRelayCallback registers a callback invoked when a shard arrives that

@@ -195,8 +195,8 @@ func runClient(serverAddr string, errCh chan<- error) {
 			go transfer.HandleShardRequest(msg, client)
 		case api.ShardStreamDone:
 			go transfer.HandleShardStreamDone(msg, client)
-		case api.ShardChunkMissing:
-			go transfer.HandleShardChunkMissing(msg, client)
+		case api.ShardStreamAck:
+			go transfer.HandleShardStreamAck(msg, client)
 		case api.ShardResponse:
 			go handleShardResponse(msg)
 		case api.IdentityAnnounce:
