@@ -118,6 +118,37 @@ func UpdateShardMetaFileName(fileHash, newName string) {
 	writeShardMeta(shardDir, m)
 }
 
+// StripAllShardMetaFileInfo rewrites every meta.json under ShardsDir to clear
+// FileName and FileSize so that the next account cannot read the previous
+// account's file names from shard metadata. RS parameters are preserved so
+// shards can still be served to peers as an anonymous courier.
+func StripAllShardMetaFileInfo() {
+	entries, err := os.ReadDir(ShardsDir())
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		shardDir := filepath.Join(ShardsDir(), e.Name())
+		data, err := os.ReadFile(filepath.Join(shardDir, "meta.json"))
+		if err != nil {
+			continue
+		}
+		var m ShardMeta
+		if err := json.Unmarshal(data, &m); err != nil {
+			continue
+		}
+		if m.FileName == "" && m.FileSize == 0 {
+			continue // already stripped
+		}
+		m.FileName = ""
+		m.FileSize = 0
+		writeShardMeta(shardDir, m)
+	}
+}
+
 func writeShardMeta(shardDir string, m ShardMeta) {
 	data, err := json.Marshal(m)
 	if err != nil {

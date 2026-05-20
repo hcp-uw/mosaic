@@ -54,7 +54,10 @@ func clientTLSConfig(myID string) *tls.Config {
 }
 
 var defaultQUICConfig = &quic.Config{
-	MaxIdleTimeout:        30 * time.Second,
+	// 5-minute idle timeout so large-file shard streams survive brief flow-control
+	// stalls without the connection being killed mid-transfer.
+	// KeepAlivePeriod keeps the connection alive between shard streams.
+	MaxIdleTimeout:        5 * time.Minute,
 	KeepAlivePeriod:       10 * time.Second,
 	MaxIncomingUniStreams: 1000,
 }
@@ -132,13 +135,17 @@ func (c *Client) handleQUICStream(stream *quic.ReceiveStream) {
 		if _, err := io.ReadFull(stream, frame); err != nil {
 			return
 		}
-		c.notifyMessageReceived(frame)
+		c.notifyMessageReceivedSync(frame)
 	}
 }
 
 // dialQUICToPeer establishes a QUIC connection to a peer and stores it in
-// PeerInfo. Called only by the side with the lexicographically smaller P2P ID
-// to avoid duplicate connections.
+// PeerInfo. Dial direction is determined by network topology: the node with a
+// public IP accepts; the NAT'd node dials outward to the public node's
+// reachable QUIC port. This is stable regardless of which node is the current
+// leader, so QUIC works correctly even after leadership changes. When both
+// nodes have the same reachability (both public or both private/NAT'd), a
+// lexicographic tiebreak on peer ID guarantees exactly one dialer.
 func (c *Client) dialQUICToPeer(peerID string) {
 	c.mutex.RLock()
 	peer := c.peers[peerID]
@@ -150,12 +157,20 @@ func (c *Client) dialQUICToPeer(peerID string) {
 		return
 	}
 
-	// Only the lexicographically smaller ID dials so that exactly one QUIC
-	// connection is established per peer pair. The larger-ID side accepts the
-	// incoming connection via quicConnAccept instead.
-	if myID >= peerID {
-		return
+	myHost, _, _ := net.SplitHostPort(myID)
+	mePublic := isPublicIP(net.ParseIP(myHost))
+	peerPublic := isPublicIP(peer.Address.IP)
+
+	switch {
+	case mePublic && !peerPublic:
+		return // we're publicly reachable; let the NAT'd peer dial us
+	case mePublic == peerPublic:
+		// Both public or both private: lexicographic tiebreak so exactly one side dials.
+		if myID > peerID {
+			return
+		}
 	}
+	// !mePublic && peerPublic: we're behind NAT, peer is public — we dial (fall through).
 
 	remoteAddr := &net.UDPAddr{
 		IP:   peer.Address.IP,
@@ -189,6 +204,26 @@ func (c *Client) dialQUICToPeer(peerID string) {
 
 	fmt.Printf("[QUIC] Connected to peer %s\n", peerID)
 	c.quicAcceptStreams(peerID, conn)
+}
+
+// isPublicIP reports whether ip is a globally routable address.
+// Returns false for loopback, link-local, RFC 1918 private, and CGNAT ranges.
+func isPublicIP(ip net.IP) bool {
+	if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+		return false
+	}
+	private := []net.IPNet{
+		{IP: net.ParseIP("10.0.0.0"), Mask: net.CIDRMask(8, 32)},
+		{IP: net.ParseIP("172.16.0.0"), Mask: net.CIDRMask(12, 32)},
+		{IP: net.ParseIP("192.168.0.0"), Mask: net.CIDRMask(16, 32)},
+		{IP: net.ParseIP("100.64.0.0"), Mask: net.CIDRMask(10, 32)}, // CGNAT
+	}
+	for _, block := range private {
+		if block.Contains(ip) {
+			return false
+		}
+	}
+	return true
 }
 
 // OpenShardStream opens a QUIC unidirectional send stream to a peer.

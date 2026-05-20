@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/hcp-uw/mosaic/internal/cli/shared"
 	"github.com/hcp-uw/mosaic/internal/daemon"
@@ -39,6 +40,9 @@ func main() {
 			fmt.Println("Shutting down Mosaic...")
 			if client := handlers.GetP2PClient(); client != nil {
 				_ = client.DisconnectFromStun()
+				// NodeLeave is sent over UDP; give the kernel time to flush the
+				// send buffer before os.Exit tears down the socket.
+				time.Sleep(300 * time.Millisecond)
 				handlers.SetP2PClient(nil)
 			}
 			filesystem.StopMount(mountPoint)

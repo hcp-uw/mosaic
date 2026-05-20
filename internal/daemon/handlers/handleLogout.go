@@ -9,6 +9,7 @@ import (
 	"github.com/hcp-uw/mosaic/internal/cli/shared"
 	"github.com/hcp-uw/mosaic/internal/daemon/handlers/helpers"
 	filesystem "github.com/hcp-uw/mosaic/internal/fileSystem"
+	"github.com/hcp-uw/mosaic/internal/transfer"
 )
 
 // HandleLogout clears all local identity state and cleans up account-specific
@@ -61,6 +62,11 @@ func HandleLogout(req protocol.LogoutRequest) protocol.LogoutResponse {
 	if err := filesystem.ClearManifest(mosaicDir); err != nil {
 		fmt.Printf("Daemon: warning — could not clear manifest: %v\n", err)
 	}
+
+	// Strip file names and sizes from all shard metadata so the next account
+	// cannot read the previous account's file list from .shards/*/meta.json.
+	// RS parameters are preserved so shards can still be served as a courier.
+	transfer.StripAllShardMetaFileInfo()
 
 	// Wipe all identity and key material.
 	_ = helpers.ClearSession()

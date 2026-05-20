@@ -85,10 +85,10 @@ func EmptyStorage(req protocol.EmptyStorageRequest) protocol.EmptyStorageRespons
 			fmt.Printf("EmptyStorage: could not remove cached file %s: %v\n", f.Name, err)
 		}
 
-		// Remove shard directory for this file.
-		shardDir := filepath.Join(transfer.ShardsDir(), f.ContentHash)
-		if err := os.RemoveAll(shardDir); err != nil && !os.IsNotExist(err) {
-			fmt.Printf("EmptyStorage: could not remove shard dir for %s: %v\n", f.Name, err)
+		// Remove shard directory for this file and signal all peers to do the same.
+		if f.ContentHash != "" {
+			transfer.DeleteLocalShards(f.ContentHash)
+			go signalShardDelete(f.ContentHash, nil)
 		}
 	}
 

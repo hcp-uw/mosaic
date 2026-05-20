@@ -342,6 +342,13 @@ func (c *Client) processPeerMessage(data []byte, fromAddr *net.UDPAddr) {
 				c.notifyError(fmt.Errorf("Failed to parse new joiner data %w", err))
 				return
 			}
+			// Guard: ignore if STUN assigned us our own ID (self-connection).
+			c.mutex.RLock()
+			selfID := c.id
+			c.mutex.RUnlock()
+			if data.JoinerID == selfID {
+				return
+			}
 
 			peerAddr, err := net.ResolveUDPAddr("udp", data.JoinerAddress)
 			if err != nil {
@@ -364,8 +371,14 @@ func (c *Client) processPeerMessage(data []byte, fromAddr *net.UDPAddr) {
 				c.notifyError(fmt.Errorf("failed to parse peer assignment: %w", err))
 				return
 			}
+			c.mutex.RLock()
+			selfID := c.id
+			c.mutex.RUnlock()
 
 			for id, addr := range data.Members {
+				if id == selfID {
+					continue // skip self
+				}
 				peerAddr, err := net.ResolveUDPAddr("udp", addr)
 				if err != nil {
 					c.notifyError(fmt.Errorf("failed to resolve peer address: %w", err))
@@ -453,8 +466,30 @@ func (c *Client) processPeerMessage(data []byte, fromAddr *net.UDPAddr) {
 		case api.ManifestSync:
 			c.notifyMessageReceived(data)
 			return
+		case api.TURNRelayAddr:
+			// The sender has switched to TURN and is telling us their relay address.
+			// Update their peer.Address so our future sends go to the TURN relay
+			// (which the TURN server forwards back to them) instead of to their
+			// NAT-private IP that our firewall would drop.
+			d, err := msg.GetTURNRelayAddrData()
+			if err != nil {
+				return
+			}
+			relayAddr, err := net.ResolveUDPAddr("udp", d.RelayAddr)
+			if err != nil {
+				return
+			}
+			c.mutex.Lock()
+			if peer, ok := c.peers[msg.Sign.PubKey]; ok {
+				peer.Address = relayAddr
+				fmt.Printf("[TURN] peer %s relay addr updated to %s\n", msg.Sign.PubKey, d.RelayAddr)
+			}
+			c.mutex.Unlock()
+			return
+
 		case api.ShardPush, api.ShardRequest, api.ShardResponse, api.ShardChunk,
-			api.ShardStreamDone, api.ShardStreamAck:
+			api.ShardStreamDone, api.ShardStreamAck,
+			api.ShardProbe, api.ShardProbeAck:
 			c.notifyMessageReceived(data)
 			return
 		case api.IdentityAnnounce, api.IdentityChallenge, api.IdentityResponse:
@@ -488,6 +523,15 @@ func (c *Client) processMessage(msg *api.Message) {
 		data, err := msg.GetPeerAssignmentData()
 		if err != nil {
 			c.notifyError(fmt.Errorf("failed to parse peer assignment: %w", err))
+			return
+		}
+
+		// Guard: if STUN paired us with our own stale session (self-connection
+		// after a rapid leave+rejoin), discard the assignment.
+		c.mutex.RLock()
+		selfID := c.id
+		c.mutex.RUnlock()
+		if data.PeerID == selfID {
 			return
 		}
 

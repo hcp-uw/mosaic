@@ -3,6 +3,7 @@ package handlers
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/hcp-uw/mosaic/internal/cli/shared"
 	"github.com/hcp-uw/mosaic/internal/daemon/handlers/helpers"
@@ -57,6 +58,14 @@ func SyncUserStubs() {
 				}
 				if err := filesystem.RemoveStub(mosaicDir, name); err != nil && !os.IsNotExist(err) {
 					fmt.Printf("syncUserStubs: could not remove stub for %s: %v\n", name, err)
+				}
+				// Remove the cached real file if present — manifest is already gone so
+				// the watcher will ignore the resulting REMOVE event.
+				realPath := filepath.Join(mosaicDir, name)
+				if _, serr := os.Stat(realPath); serr == nil {
+					if err := os.Remove(realPath); err != nil {
+						fmt.Printf("syncUserStubs: could not remove cached file %s: %v\n", name, err)
+					}
 				}
 				fmt.Printf("syncUserStubs: removed deleted file %s from local state\n", name)
 			}

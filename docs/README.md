@@ -13,5 +13,3 @@
 | [filesystem.md](filesystem.md) | fileSystem package: ~/Mosaic/ directory, stubs, manifest API |
 | [daemon.md](daemon.md) | Daemon internals: Unix socket, HTTP API, filesystem watcher |
 | [menu-bar-app.md](menu-bar-app.md) | macOS menu bar app and Finder extension |
-| [finder-sync-plan.md](finder-sync-plan.md) | Finder Sync extension design notes and cross-platform plan |
-| [tapestry.md](tapestry.md) | Tapestry: distributed event log design (in progress) |

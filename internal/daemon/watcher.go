@@ -105,19 +105,13 @@ func (w *DirWatcher) handleEvent(event fsnotify.Event) {
 		return
 	}
 
-	fmt.Printf("[watcher] raw event: op=%s path=%s\n", event.Op, path)
-
 	// Check suppress list — daemon-initiated operations register here first.
 	if _, suppressed := w.suppress.LoadAndDelete(path); suppressed {
-		fmt.Printf("[watcher] suppressed (daemon-initiated): %s\n", filename)
 		return
 	}
 
 	// Derive the logical (network) name, stripping .mosaic suffix for stubs.
 	logicalName, _ := strings.CutSuffix(filename, ".mosaic")
-
-	inManifest := filesystem.IsInManifest(w.mosaicDir, logicalName)
-	fmt.Printf("[watcher] handling %s | logical=%s | inManifest=%v\n", event.Op, logicalName, inManifest)
 
 	switch {
 	case event.Op&(fsnotify.Remove|fsnotify.Rename) != 0:
@@ -180,28 +174,15 @@ func (w *DirWatcher) onDisappeared(logicalName string) {
 
 	d := &disappearedEntry{entry: entry}
 
-	if !entry.Cached {
-		// Stub removed by the user. Park briefly to catch a late CREATE (rename).
-		// If no CREATE pair arrives, remove only from the local manifest — do NOT
-		// propagate a network delete (the file still exists on the network).
-		d.timer = time.AfterFunc(500*time.Millisecond, func() {
-			if _, stillPending := w.disappeared.LoadAndDelete(logicalName); stillPending {
-				fmt.Printf("[watcher] stub removed by user — removing %s from local manifest\n", logicalName)
-				if err := filesystem.RemoveFromManifest(w.mosaicDir, logicalName); err != nil {
-					fmt.Printf("[watcher] could not remove %s from local manifest: %v\n", logicalName, err)
-				}
-			}
-		})
-	} else {
-		// Cached file removed — wait for a CREATE pair; if none arrives, commit
-		// a full network delete.
-		d.timer = time.AfterFunc(500*time.Millisecond, func() {
-			if _, stillPending := w.disappeared.LoadAndDelete(logicalName); stillPending {
-				fmt.Printf("[watcher] no CREATE arrived — committing delete for %s\n", logicalName)
-				w.deleteFromNetwork(entry)
-			}
-		})
-	}
+	// Whether cached or stub: if no CREATE pair arrives within 500ms, commit a
+	// full network delete. Removing either form of the file (real bytes or stub
+	// placeholder) expresses intent to remove it from the network.
+	d.timer = time.AfterFunc(500*time.Millisecond, func() {
+		if _, stillPending := w.disappeared.LoadAndDelete(logicalName); stillPending {
+			fmt.Printf("[watcher] no CREATE arrived — committing network delete for %s\n", logicalName)
+			w.deleteFromNetwork(entry)
+		}
+	})
 	w.disappeared.Store(logicalName, d)
 }
 

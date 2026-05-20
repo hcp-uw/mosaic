@@ -98,11 +98,16 @@ func (c *Client) DisconnectFromStun() error {
 	// can evict us immediately instead of waiting for the 30-second pong timeout.
 	// Use writeToPeer so the message is session-encrypted when a handshake is done.
 	c.mutex.RLock()
-	msg := api.NewNodeLeaveMessage(c.id)
+	leaveMsg := api.NewNodeLeaveMessage(c.id)
 	for _, peer := range c.peers {
-		c.writeToPeer(peer, msg) //nolint:errcheck — best-effort
+		c.writeToPeer(peer, leaveMsg) //nolint:errcheck — best-effort
 	}
 	c.mutex.RUnlock()
+
+	// Tell the STUN server to remove us immediately so that a rapid rejoin does
+	// not get paired with our own stale session (self-connection bug).
+	deregMsg := api.NewClientDeregisterMessage()
+	c.sendToServer(deregMsg) //nolint:errcheck — best-effort; socket still open here
 
 	c.mutex.Lock()
 	defer c.mutex.Unlock()

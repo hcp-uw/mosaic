@@ -2,6 +2,7 @@ package transfer
 
 import (
 	"fmt"
+	"net"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -122,7 +123,39 @@ var (
 	// receiver's ShardStreamAck arrives with the list of missing chunk indices.
 	// key: "fileHash:shardIndex:peerID" → chan []int
 	shardAckChans sync.Map
+
+	// finalizingShards tracks shards whose last chunk has arrived but whose shard
+	// file is still being written to disk by finalizeShard. HandleShardStreamDone
+	// checks this so it doesn't falsely report "all chunks missing" during the
+	// window between assembly deletion and file write completion.
+	// key: "fileHash:shardIndex" → struct{}
+	finalizingShards sync.Map
+
+	// inProgressServes prevents duplicate concurrent StreamShardToPeer goroutines
+	// for the same (fileHash, shardIndex, peerID) triple. Without this, a slow ack
+	// timeout on the receiver causes it to re-request while the original serve
+	// goroutine is still running, producing cascading duplicate streams.
+	// key: "fileHash:shardIndex:peerID" → struct{}
+	inProgressServes sync.Map
+
+	// uploadCancelled is set by CancelUpload to stop the shard dispatch loop.
+	uploadCancelled atomic.Bool
+
+	// downloadCancelled is set by CancelDownload to break out of FetchFileBytes.
+	downloadCancelled atomic.Bool
 )
+
+// CancelUpload signals the active upload to stop at its next shard boundary.
+func CancelUpload() { uploadCancelled.Store(true) }
+
+// CancelDownload signals the active download to stop at its next shard boundary.
+func CancelDownload() { downloadCancelled.Store(true) }
+
+// ResetCancelFlags clears both cancel flags so the next op starts clean.
+func ResetCancelFlags() {
+	uploadCancelled.Store(false)
+	downloadCancelled.Store(false)
+}
 
 // SetShardRelayCallback registers a callback invoked when a shard arrives that
 // had pending relay requesters. The daemon uses this to forward the shard to
@@ -132,6 +165,20 @@ func SetShardRelayCallback(fn func(fileHash string, shardIndex int, requesterIDs
 	shardRelayCallback = fn
 	shardRelayCallbackMu.Unlock()
 }
+
+// ShortPeer extracts just the IP address from a peer ID that is in "ip:port"
+// form (as assigned by the STUN server). Falls back to the full ID when it
+// can't be parsed, so logs are never empty but also never misleadingly
+// truncated (the old peerID[:8] cut "205.175.106.5:51005" to "205.175.").
+func ShortPeer(peerID string) string {
+	if host, _, err := net.SplitHostPort(peerID); err == nil {
+		return host
+	}
+	return peerID
+}
+
+// shortPeer is the package-local alias.
+func shortPeer(peerID string) string { return ShortPeer(peerID) }
 
 func registerPendingShardRequest(fileHash string, shardIndex int, requesterID string) {
 	key := fmt.Sprintf("%s:%d", fileHash, shardIndex)

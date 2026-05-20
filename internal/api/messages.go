@@ -12,8 +12,9 @@ type MessageType string
 
 const (
 	// Client to Server messages
-	ClientRegister MessageType = "client_register"
-	ClientPing     MessageType = "client_ping"
+	ClientRegister   MessageType = "client_register"
+	ClientPing       MessageType = "client_ping"
+	ClientDeregister MessageType = "client_deregister"
 
 	// Server to Client messages
 	RegisterSuccess  MessageType = "register_success"
@@ -66,6 +67,20 @@ const (
 	// lists chunk indices the receiver did not get; empty means success. The
 	// sender blocks on this before proceeding to the next shard.
 	ShardStreamAck MessageType = "shard_stream_ack"
+
+	// ShardProbe is sent before redistribution to ask a peer whether it already
+	// holds a specific shard. The peer must respond with ShardProbeAck containing
+	// SHA-256(nonce || shard_file_bytes) as proof of possession.
+	ShardProbe MessageType = "shard_probe"
+
+	// ShardProbeAck is the peer's proof-of-possession reply to ShardProbe.
+	// A missing or wrong ContentHash means the peer does not hold the shard.
+	ShardProbeAck MessageType = "shard_probe_ack"
+
+	// TURNRelayAddr is sent by a node after it allocates a TURN relay so that
+	// the peer can route return traffic through the relay instead of sending
+	// directly to the NAT-private IP (which the firewall would drop).
+	TURNRelayAddr MessageType = "turn_relay_addr"
 )
 
 // Message represents the base message structure
@@ -192,6 +207,16 @@ func NewServerAssignedLeaderMessage() *Message {
 func NewClientRegisterMessage() *Message {
 	return &Message{
 		Type:      ClientRegister,
+		Timestamp: time.Now(),
+		Data:      ClientRegisterData{},
+	}
+}
+
+// NewClientDeregisterMessage creates a graceful-leave message sent to the STUN
+// server so it removes the client immediately instead of waiting for timeout.
+func NewClientDeregisterMessage() *Message {
+	return &Message{
+		Type:      ClientDeregister,
 		Timestamp: time.Now(),
 		Data:      ClientRegisterData{},
 	}
@@ -789,6 +814,67 @@ func NewNodeLeaveMessage(senderID string) *Message {
 	}
 }
 
+// ShardProbeData asks a peer to prove it holds a specific shard.
+// Nonce is 16 random bytes hex-encoded; the expected response is
+// SHA-256(nonce_bytes || shard_file_bytes), preventing replay attacks.
+type ShardProbeData struct {
+	FileHash   string `json:"file_hash"`
+	ShardIndex int    `json:"shard_index"`
+	Nonce      string `json:"nonce"`
+}
+
+// ShardProbeAckData is the peer's proof-of-possession reply to ShardProbe.
+// ContentHash is SHA-256(nonce_bytes || shard_file_bytes), or absent if the
+// peer does not hold the shard.
+type ShardProbeAckData struct {
+	FileHash    string `json:"file_hash"`
+	ShardIndex  int    `json:"shard_index"`
+	Nonce       string `json:"nonce"`
+	ContentHash string `json:"content_hash"`
+}
+
+func NewShardProbeMessage(senderID string, d ShardProbeData) *Message {
+	return &Message{
+		Sign:      NewSignature(senderID),
+		Type:      ShardProbe,
+		Timestamp: time.Now(),
+		Data:      d,
+	}
+}
+
+func NewShardProbeAckMessage(senderID string, d ShardProbeAckData) *Message {
+	return &Message{
+		Sign:      NewSignature(senderID),
+		Type:      ShardProbeAck,
+		Timestamp: time.Now(),
+		Data:      d,
+	}
+}
+
+func (m *Message) GetShardProbeData() (*ShardProbeData, error) {
+	if m.Type != ShardProbe {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d ShardProbeData
+	return &d, json.Unmarshal(b, &d)
+}
+
+func (m *Message) GetShardProbeAckData() (*ShardProbeAckData, error) {
+	if m.Type != ShardProbeAck {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d ShardProbeAckData
+	return &d, json.Unmarshal(b, &d)
+}
+
 // ShardDeleteData tells a holder to delete all local shards for a file.
 type ShardDeleteData struct {
 	ContentHash string `json:"contentHash"`
@@ -813,6 +899,34 @@ func (m *Message) GetShardDeleteData() (*ShardDeleteData, error) {
 		return nil, err
 	}
 	var d ShardDeleteData
+	return &d, json.Unmarshal(b, &d)
+}
+
+// TURNRelayAddrData carries the TURN relay transport address allocated by the sender.
+// The receiver should route all future traffic for this peer to RelayAddr so that
+// the TURN server can forward it back to the NAT-private node.
+type TURNRelayAddrData struct {
+	RelayAddr string `json:"relayAddr"`
+}
+
+func NewTURNRelayAddrMessage(senderID string, d TURNRelayAddrData) *Message {
+	return &Message{
+		Sign:      NewSignature(senderID),
+		Type:      TURNRelayAddr,
+		Timestamp: time.Now(),
+		Data:      d,
+	}
+}
+
+func (m *Message) GetTURNRelayAddrData() (*TURNRelayAddrData, error) {
+	if m.Type != TURNRelayAddr {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d TURNRelayAddrData
 	return &d, json.Unmarshal(b, &d)
 }
 

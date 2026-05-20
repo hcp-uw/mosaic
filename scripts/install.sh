@@ -32,9 +32,9 @@ set_platform_vars() {
             SOCK_EXT=".sock"
             ;;
         macOS)
-            BIN_DIR="/usr/local/bin"
+            BIN_DIR="$HOME/.local/bin"
             TEMP_DIR="/tmp"
-            NEEDS_SUDO=true
+            NEEDS_SUDO=false
             EXE_EXT=""
             SOCK_EXT=".sock"
             ;;
@@ -55,7 +55,7 @@ set_platform_vars() {
     CLI_BIN="mos${EXE_EXT}"
     DAEMON_BIN="mosaicd${EXE_EXT}"
     PID_FILE="${TEMP_DIR}/mosaicd.pid"
-    LOG_FILE="${TEMP_DIR}/mosaicd.log"
+    LOG_FILE="${HOME}/Mosaic/.mosaic-daemon.log"
     SOCK_FILE="${TEMP_DIR}/mosaicd${SOCK_EXT}"
 }
 
@@ -96,7 +96,8 @@ build_app() {
 
     local script_dir
     script_dir="$(cd "$(dirname "$0")" && pwd)"
-    local project="${script_dir}/MosaicApp/Mosaic.xcodeproj"
+    local repo_dir="${script_dir}/.."
+    local project="${repo_dir}/MosaicApp/Mosaic.xcodeproj"
 
     if [ ! -d "$project" ]; then
         echo -e "${YELLOW}⚠ MosaicApp/Mosaic.xcodeproj not found — skipping app build${NC}"
@@ -108,9 +109,14 @@ build_app() {
         return 0
     fi
 
+    # Remove stale Xcode builds so Spotlight doesn't show duplicate entries.
+    find "${HOME}/Library/Developer/Xcode/DerivedData" -maxdepth 4 \
+        -name "Mosaic.app" -path "*/Products/*" \
+        -exec rm -rf {} + 2>/dev/null || true
+
     printf "Building Mosaic.app..."
 
-    local derived="${script_dir}/MosaicApp/DerivedData"
+    local derived="${repo_dir}/MosaicApp/DerivedData"
 
     xcodebuild \
         -project "$project" \
@@ -127,7 +133,7 @@ build_app() {
         return 0
     fi
 
-    local app_path="${derived}/Build/Products/Release/Mosaic.app"
+    local app_path="${repo_dir}/MosaicApp/DerivedData/Build/Products/Release/Mosaic.app"
     if [ -d "$app_path" ]; then
         xattr -dr com.apple.quarantine "$app_path" 2>/dev/null || true
         echo -e " ${GREEN}✓${NC}"
@@ -160,8 +166,8 @@ start_app() {
     local candidates=(
         "/Applications/Mosaic.app"
         "${HOME}/Applications/Mosaic.app"
-        "${script_dir}/MosaicApp/build/Release/Mosaic.app"
-        "${script_dir}/MosaicApp/DerivedData/Build/Products/Release/Mosaic.app"
+        "${script_dir}/../MosaicApp/build/Release/Mosaic.app"
+        "${script_dir}/../MosaicApp/DerivedData/Build/Products/Release/Mosaic.app"
     )
 
     for candidate in "${candidates[@]}"; do
@@ -309,11 +315,9 @@ install_binaries() {
     echo -e " ${GREEN}✓${NC}"
     
     # Check if BIN_DIR is in PATH
-    if [ "$OS" != "macOS" ]; then
-        if [[ ":$PATH:" != *":${BIN_DIR}:"* ]]; then
-            echo -e "${YELLOW}  ⚠ ${BIN_DIR} is not in PATH — add to ~/.bashrc or ~/.zshrc:${NC}"
-            echo -e "    export PATH=\"${BIN_DIR}:\$PATH\""
-        fi
+    if [[ ":$PATH:" != *":${BIN_DIR}:"* ]]; then
+        echo -e "${YELLOW}  ⚠ ${BIN_DIR} is not in PATH — add to ~/.zshrc (or ~/.bashrc):${NC}"
+        echo -e "    export PATH=\"${BIN_DIR}:\$PATH\""
     fi
 }
 
@@ -464,7 +468,7 @@ print_success() {
     echo "  mos shutdown        - Stop daemon and cleanup"
     echo "  ./install.sh --stop - Stop daemon and menu bar app"
     echo ""
-    echo "Logs: ${LOG_FILE}"
+    echo "Logs: tail -f ${LOG_FILE}"
     echo ""
 }
 

@@ -45,6 +45,9 @@ func StartHTTPServer() error {
 	mux.HandleFunc("/upload-progress", handleUploadProgress)
 	mux.HandleFunc("/download-progress", handleDownloadProgress)
 	mux.HandleFunc("/join-sync-status", handleJoinSyncStatus)
+	mux.HandleFunc("/active-op", handleActiveOp)
+	mux.HandleFunc("/cancel-op", handleCancelOp)
+	mux.HandleFunc("/network-status", handleNetworkStatus)
 
 	port := httpPort()
 	fmt.Println("HTTP API listening on", port)
@@ -67,6 +70,26 @@ func handleDownloadProgress(w http.ResponseWriter, r *http.Request) {
 		Received int `json:"received"`
 		Needed   int `json:"needed"`
 	}{received, needed})
+}
+
+// POST /cancel-op — signals the active operation to stop at its next checkpoint.
+func handleCancelOp(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	handlers.CancelActiveOp()
+	writeJSON(w, http.StatusOK, map[string]bool{"cancelled": true})
+}
+
+// GET /active-op — returns the current in-flight operation, or null when idle.
+func handleActiveOp(w http.ResponseWriter, r *http.Request) {
+	op := handlers.GetActiveOp()
+	if op == nil {
+		writeJSON(w, http.StatusOK, nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, op)
 }
 
 // GET /join-sync-status — returns whether the post-join manifest+shard sync has settled.
@@ -160,6 +183,38 @@ func handleFileByName(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// GET /network-status — returns peer connection state for the status window.
+func handleNetworkStatus(w http.ResponseWriter, r *http.Request) {
+	type peerEntry struct {
+		ID         string `json:"id"`
+		Address    string `json:"address"`
+		ViaTURN    bool   `json:"viaTURN"`
+		QUICActive bool   `json:"quicActive"`
+	}
+	type response struct {
+		Connected bool        `json:"connected"`
+		PeerCount int         `json:"peerCount"`
+		Peers     []peerEntry `json:"peers"`
+	}
+
+	client := handlers.GetP2PClient()
+	if client == nil || !client.IsPeerCommunicationAvailable() {
+		writeJSON(w, http.StatusOK, response{Connected: false, Peers: []peerEntry{}})
+		return
+	}
+
+	raw := client.GetConnectedPeers()
+	peers := make([]peerEntry, 0, len(raw))
+	for _, p := range raw {
+		addr := ""
+		if p.Address != nil {
+			addr = p.Address.String()
+		}
+		peers = append(peers, peerEntry{ID: p.ID, Address: addr, ViaTURN: p.ViaTURN, QUICActive: p.QUICConn != nil})
+	}
+	writeJSON(w, http.StatusOK, response{Connected: true, PeerCount: len(peers), Peers: peers})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

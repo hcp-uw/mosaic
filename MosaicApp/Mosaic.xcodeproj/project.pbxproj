@@ -8,6 +8,11 @@
 
 /* Begin PBXBuildFile section */
 		0000000000000000000000E1 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0000000000000000000000D1 /* AppDelegate.swift */; };
+		0000000000000000000000E8 /* DownloadOverlayController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0000000000000000000000DB /* DownloadOverlayController.swift */; };
+		0000000000000000000000EA /* UploadOverlayController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0000000000000000000000DD /* UploadOverlayController.swift */; };
+		0000000000000000000000EB /* NetworkStatusController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0000000000000000000000DE /* NetworkStatusController.swift */; };
+		0000000000000000000000EC /* LogViewerController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0000000000000000000000EF /* LogViewerController.swift */; };
+		0000000000000000000000E9 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 0000000000000000000000DC /* Assets.xcassets */; };
 		0000000000000000000000E2 /* FinderSync.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0000000000000000000000D4 /* FinderSync.swift */; };
 		0000000000000000000000E3 /* DaemonClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0000000000000000000000D5 /* DaemonClient.swift */; };
 		0000000000000000000000E4 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 0000000000000000000000D8 /* Assets.xcassets */; };
@@ -54,6 +59,11 @@
 		0000000000000000000000D8 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		0000000000000000000000D9 /* FinderSync.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = FinderSync.framework; path = System/Library/Frameworks/FinderSync.framework; sourceTree = SDKROOT; };
 		0000000000000000000000DA /* DaemonClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonClient.swift; sourceTree = "<group>"; };
+		0000000000000000000000DB /* DownloadOverlayController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadOverlayController.swift; sourceTree = "<group>"; };
+		0000000000000000000000DD /* UploadOverlayController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UploadOverlayController.swift; sourceTree = "<group>"; };
+		0000000000000000000000DE /* NetworkStatusController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkStatusController.swift; sourceTree = "<group>"; };
+		0000000000000000000000EF /* LogViewerController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogViewerController.swift; sourceTree = "<group>"; };
+		0000000000000000000000DC /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		E136980B2F86E7500085E499 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -93,6 +103,11 @@
 			children = (
 				0000000000000000000000D1 /* AppDelegate.swift */,
 				0000000000000000000000DA /* DaemonClient.swift */,
+				0000000000000000000000DB /* DownloadOverlayController.swift */,
+				0000000000000000000000DD /* UploadOverlayController.swift */,
+				0000000000000000000000DE /* NetworkStatusController.swift */,
+				0000000000000000000000EF /* LogViewerController.swift */,
+				0000000000000000000000DC /* Assets.xcassets */,
 				0000000000000000000000D2 /* Info.plist */,
 				0000000000000000000000D3 /* Mosaic.entitlements */,
 			);
@@ -201,6 +216,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				0000000000000000000000E9 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -221,6 +237,10 @@
 			files = (
 				0000000000000000000000E1 /* AppDelegate.swift in Sources */,
 				0000000000000000000000E7 /* DaemonClient.swift in Sources */,
+				0000000000000000000000E8 /* DownloadOverlayController.swift in Sources */,
+				0000000000000000000000EA /* UploadOverlayController.swift in Sources */,
+				0000000000000000000000EB /* NetworkStatusController.swift in Sources */,
+				0000000000000000000000EC /* LogViewerController.swift in Sources */,
 				E136980C2F86E7500085E499 /* main.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -356,6 +376,7 @@
 		000000000000000000000023 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = Mosaic/Mosaic.entitlements;
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Manual;
@@ -377,6 +398,7 @@
 		000000000000000000000024 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = Mosaic/Mosaic.entitlements;
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Manual;

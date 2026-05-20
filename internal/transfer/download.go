@@ -56,6 +56,9 @@ func FetchFileBytes(filename string, client *p2p.Client, getHolders func(content
 		)
 
 		for _, idx := range missing {
+			if downloadCancelled.Load() {
+				return nil, fmt.Errorf("download cancelled")
+			}
 			// The shard may have arrived from join redistribution while we were
 			// waiting for earlier shards — skip if it's already on disk.
 			shardPath := filepath.Join(ShardsDir(), meta.FileHash,

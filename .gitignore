@@ -4,4 +4,4 @@ bin/
 *.log
 *.pid
 MosaicApp/DerivedData/
-*/notes.md
+*notes.md

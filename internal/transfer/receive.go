@@ -41,6 +41,7 @@ func HandleBinaryShardChunk(data []byte) {
 	assemblyMu.Unlock()
 
 	asm.mu.Lock()
+	isNew := asm.chunks[c.chunkIndex] == nil
 	asm.chunks[c.chunkIndex] = c.data // store encrypted blob as-is
 	received := len(asm.chunks)
 	total := asm.totalChunks
@@ -57,7 +58,7 @@ func HandleBinaryShardChunk(data []byte) {
 		}
 	}
 
-	if received%100 == 0 || received == total {
+	if isNew && received%100 == 0 && received < total {
 		fmt.Printf("[Recv] Shard %d: %d/%d chunks\n", c.shardIndex, received, total)
 	}
 
@@ -71,12 +72,18 @@ func HandleBinaryShardChunk(data []byte) {
 		// exists guards against the race where two goroutines both see
 		// received == total (duplicate UDP chunk) and the second reads nil.
 		if exists {
+			// Mark as in-flight before the goroutine starts so HandleShardStreamDone
+			// can see the shard is complete even before the file lands on disk.
+			finalizingShards.Store(key, struct{}{})
 			go finalizeShard(finalAsm)
 		}
 	}
 }
 
 func finalizeShard(asm *shardAssembly) {
+	shardKey := fmt.Sprintf("%s:%d", asm.fileHash, asm.shardIndex)
+	defer finalizingShards.Delete(shardKey)
+
 	shardDir := filepath.Join(ShardsDir(), asm.fileHash)
 	if err := os.MkdirAll(shardDir, 0755); err != nil {
 		fmt.Printf("[Transfer] Cannot create shard dir: %v\n", err)
@@ -99,13 +106,19 @@ func finalizeShard(asm *shardAssembly) {
 		fmt.Printf("[Transfer] Cannot write shard %d: %v\n", asm.shardIndex, err)
 		return
 	}
-	fmt.Printf("[Transfer] Shard %d assembled → %s\n", asm.shardIndex, shardPath)
+	fmt.Printf("[Transfer] Shard %d assembled (%s)\n", asm.shardIndex, asm.fileHash[:12])
+
+	// Track download progress for the active FetchFileBytes call.
+	downloadTargetMu.Lock()
+	if downloadTargetHash == asm.fileHash {
+		downloadShardsReceived.Add(1)
+	}
+	downloadTargetMu.Unlock()
 
 	// Unblock any FetchFileBytes call that was waiting for this specific shard.
 	// Must happen immediately after the shard lands on disk — not inside
 	// autoReconstruct — so the sequential per-shard wait loop doesn't have to
 	// wait for all data shards to accumulate before it can advance.
-	shardKey := fmt.Sprintf("%s:%d", asm.fileHash, asm.shardIndex)
 	if v, ok := shardReadyChans.LoadAndDelete(shardKey); ok {
 		ch := v.(chan struct{})
 		select {

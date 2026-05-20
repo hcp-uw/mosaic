@@ -122,16 +122,23 @@ func UploadFile(path string, client *p2p.Client) (fileHash string, fileSize int,
 
 	resetUploadProgress(TotalShards)
 
-	// Allow one goroutine per distinct peer target so sends to different peers
-	// run concurrently. Sends to the same peer are still ordered within the goroutine.
+	// Allow up to 3 concurrent QUIC streams per distinct peer target.
+	// HandleShardStreamDone on the receiver side polls up to 200 ms for
+	// in-flight QUIC frames before computing the missing list, so 3-way
+	// parallelism is safe: retransmits only trigger for genuinely dropped chunks.
 	numPeerTargets := numNodes - 1
 	if numPeerTargets < 1 {
 		numPeerTargets = 1
 	}
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, numPeerTargets)
+	sem := make(chan struct{}, numPeerTargets*3)
 
 	for i := 0; i < TotalShards; i++ {
+		if uploadCancelled.Load() {
+			fmt.Println("[Transfer] Upload cancelled")
+			wg.Wait()
+			return fileHash, fileSize, fmt.Errorf("upload cancelled")
+		}
 		srcPath := filepath.Join(outDir, ".bin", filename, fmt.Sprintf("shard%d_%s.dat", i, nameNoExt))
 		targetIndex := i % numNodes
 
@@ -169,7 +176,7 @@ func UploadFile(path string, client *p2p.Client) (fileHash string, fileSize int,
 				defer func() { <-sem }()
 				defer wg.Done()
 				if err := sendPlaintextShardToPeer(src, shardIdx, fileHash, filename, fileSize, netKey, peerID, client); err != nil {
-					fmt.Printf("[Transfer] Shard %d → peer %s failed: %v\n", shardIdx, peerID[:8], err)
+					fmt.Printf("[Transfer] Shard %d → peer %s failed: %v\n", shardIdx, shortPeer(peerID), err)
 				} else {
 					shardSentCbMu.Lock()
 					cb := shardSentCb
@@ -184,6 +191,9 @@ func UploadFile(path string, client *p2p.Client) (fileHash string, fileSize int,
 	}
 	wg.Wait()
 
+	// Clear progress so the overlay stops immediately after the upload finishes.
+	resetUploadProgress(0)
+
 	if len(connectedPeers) == 0 {
 		fmt.Println("[Transfer] No peers connected — all shards saved locally")
 		return fileHash, fileSize, nil
@@ -194,9 +204,8 @@ func UploadFile(path string, client *p2p.Client) (fileHash string, fileSize int,
 
 // sendPlaintextShardToPeer reads a plaintext shard file from the RS encoder's
 // temp directory, encrypts each chunk, and sends it as binary frames to one peer.
-// After sending all chunks it waits for a ShardStreamAck; if any chunks were
-// missed it retransmits only those and loops until the receiver confirms receipt.
-// Uses QUIC when a stream can be opened; falls back to UDP otherwise.
+// When QUIC is available the send is fire-and-forget: QUIC guarantees ordered
+// Uses ShardStreamDone/ShardStreamAck for delivery confirmation on both QUIC and UDP.
 func sendPlaintextShardToPeer(srcPath string, shardIndex int, fileHash, fileName string, fileSize int, key [32]byte, peerID string, client *p2p.Client) error {
 	info, err := os.Stat(srcPath)
 	if err != nil {
@@ -204,41 +213,58 @@ func sendPlaintextShardToPeer(srcPath string, shardIndex int, fileHash, fileName
 	}
 	totalChunks := int((info.Size() + chunkSize - 1) / chunkSize)
 
-	ackKey := fmt.Sprintf("%s:%d:%s", fileHash, shardIndex, peerID)
-
-	// First round: send all chunks.
 	if err := sendPlaintextChunks(srcPath, nil, shardIndex, fileHash, fileName, fileSize, totalChunks, key, peerID, client); err != nil {
 		return err
 	}
 
+	// Use ShardStreamDone/ShardStreamAck to confirm delivery and retransmit any
+	// missing chunks. ShardStreamDone is retried every 2s because it travels over
+	// UDP and can be dropped when the QUIC data path and the hole-punched control
+	// path diverge (common on remote VPS connections).
+	ackKey := fmt.Sprintf("%s:%d:%s", fileHash, shardIndex, peerID)
+	doneMsg := api.NewShardStreamDoneMessage(client.GetID(), api.ShardStreamDoneData{
+		FileHash:    fileHash,
+		ShardIndex:  shardIndex,
+		TotalChunks: totalChunks,
+	})
+
 	for {
-		// Register ack channel before sending ShardStreamDone to avoid a race
-		// where the ack arrives before we start waiting.
 		ackCh := make(chan []int, 1)
 		shardAckChans.Store(ackKey, ackCh)
 
-		client.SendToPeer(peerID, api.NewShardStreamDoneMessage(client.GetID(), api.ShardStreamDoneData{ //nolint:errcheck
-			FileHash:    fileHash,
-			ShardIndex:  shardIndex,
-			TotalChunks: totalChunks,
-		}))
+		client.SendToPeer(peerID, doneMsg) //nolint:errcheck
 
+		retryTick := time.NewTicker(2 * time.Second)
+		deadline := time.NewTimer(15 * time.Second)
 		var missing []int
-		select {
-		case missing = <-ackCh:
-		case <-time.After(30 * time.Second):
-			shardAckChans.Delete(ackKey)
-			return fmt.Errorf("ack timeout for shard %d → %s", shardIndex, peerID[:8])
+		var timedOut bool
+	waitAck:
+		for {
+			select {
+			case missing = <-ackCh:
+				break waitAck
+			case <-retryTick.C:
+				client.SendToPeer(peerID, doneMsg) //nolint:errcheck
+			case <-deadline.C:
+				timedOut = true
+				break waitAck
+			}
 		}
+		retryTick.Stop()
+		deadline.Stop()
 		shardAckChans.Delete(ackKey)
 
+		if timedOut {
+			return fmt.Errorf("ack timeout for shard %d → %s", shardIndex, shortPeer(peerID))
+		}
+
 		if len(missing) == 0 {
-			fmt.Printf("[Transfer] Shard %d → %s confirmed (%d chunks)\n", shardIndex, peerID[:8], totalChunks)
+			fmt.Printf("[Transfer] Shard %d → %s confirmed (%d chunks)\n", shardIndex, shortPeer(peerID), totalChunks)
 			return nil
 		}
 
 		fmt.Printf("[Transfer] Shard %d → %s: retransmitting %d/%d missing chunks\n",
-			shardIndex, peerID[:8], len(missing), totalChunks)
+			shardIndex, shortPeer(peerID), len(missing), totalChunks)
 		missingSet := make(map[int]struct{}, len(missing))
 		for _, idx := range missing {
 			missingSet[idx] = struct{}{}
@@ -264,6 +290,7 @@ func sendPlaintextChunks(srcPath string, onlyChunks map[int]struct{}, shardIndex
 	if quicErr == nil {
 		defer quicStream.Close()
 	}
+	usedQUIC := quicErr == nil
 
 	sendOne := func(plaintext []byte, chunkIndex int) error {
 		encrypted, err := encryptChunk(key, plaintext)
@@ -284,7 +311,7 @@ func sendPlaintextChunks(srcPath string, onlyChunks map[int]struct{}, shardIndex
 		if err != nil {
 			return fmt.Errorf("encode frame shard %d chunk %d: %w", shardIndex, chunkIndex, err)
 		}
-		if quicErr == nil {
+		if usedQUIC {
 			if werr := sendFrameViaQUIC(quicStream, frame); werr != nil {
 				return fmt.Errorf("QUIC send shard %d chunk %d: %w", shardIndex, chunkIndex, werr)
 			}

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -369,7 +370,7 @@ func statusNetwork() {
 	fmt.Println("──────────────")
 
 	if !r.Connected {
-		fmt.Println("  Connection:  not connected (run: mos join network <stun-ip>:3478)")
+		fmt.Println("  Connection:  not connected (run: mos join network")
 	} else {
 		role := "member"
 		if r.IsLeader {
@@ -394,6 +395,7 @@ func statusNetwork() {
 
 // Gets info about a specific node in the network
 func statusNode() {
+	waitForActiveOp()
 	resp, err := client.SendRequest("statusNode", protocol.NodeStatusRequest{})
 	exitOnErr(err, "Error getting node status.")
 
@@ -488,6 +490,7 @@ func loginWithKey(key string) {
 
 // Logs out of the current account
 func logoutAccount() {
+	waitForActiveOp()
 	resp, err := client.SendRequest("logout", protocol.LogoutRequest{})
 	exitOnErr(err, "Error logging out.")
 
@@ -547,6 +550,7 @@ func setStorage() {
 
 // Empties all storage allocated by the user in the network (deletes all their data from the network)
 func emptyStorage() {
+	waitForActiveOp()
 	resp, err := client.SendRequest("emptyStorage", protocol.EmptyStorageRequest{AccountID: helpers.GetAccountID()})
 	exitOnErr(err, "Error emptying storage.")
 
@@ -561,6 +565,7 @@ func emptyStorage() {
 
 // The user leaves the network, deleting all their data from the network as well?
 func leaveNetwork() {
+	waitForActiveOp()
 	resp, err := client.SendRequest("leaveNetwork", protocol.LeaveNetworkRequest{AccountID: helpers.GetAccountID()})
 	exitOnErr(err, "Error leaving network.")
 
@@ -626,6 +631,38 @@ func listManifest() {
 	fmt.Println()
 }
 
+// waitForActiveOp polls the daemon's /active-op endpoint and blocks until
+// no operation is running, printing a status line while waiting.
+func waitForActiveOp() {
+	httpClient := &http.Client{Timeout: 500 * time.Millisecond}
+	type opResp struct {
+		Kind        string `json:"kind"`
+		Description string `json:"description"`
+	}
+	waiting := false
+	for {
+		r, err := httpClient.Get("http://localhost:7777/active-op")
+		if err != nil {
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		r.Body.Close()
+		s := strings.TrimSpace(string(body))
+		if s == "null" || s == "" {
+			if waiting {
+				fmt.Print("\r" + strings.Repeat(" ", 60) + "\r")
+			}
+			return
+		}
+		var op opResp
+		if json.Unmarshal(body, &op) == nil && op.Description != "" {
+			fmt.Printf("\r  Waiting: %s...  ", op.Description)
+			waiting = true
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
 // Uploads a file to the network
 func uploadFile() {
 	filePath := args[3]
@@ -647,6 +684,8 @@ func uploadFile() {
 
 	fileSizeBytes := fileInfo.Size()
 	fmt.Printf("Uploading file: %s (%d KB)\n", fileInfo.Name(), fileSizeBytes/1024)
+
+	waitForActiveOp()
 
 	// Allow 60s base + 60s per GB so large files don't time out during SHA-256 and encoding.
 	uploadTimeout := 60*time.Second + time.Duration(fileSizeBytes/(1024*1024*1024)+1)*60*time.Second
@@ -710,12 +749,21 @@ func uploadFile() {
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
+	if !cmdResp.Success && cmdResp.Busy {
+		fmt.Printf("\nAnother operation is in progress (%s). Please try again in a moment.\n", cmdResp.BusyWith)
+		os.Exit(1)
+	}
 	if !cmdResp.Success {
 		fmt.Printf("\nError uploading file: %s\n", cmdResp.Details)
 		os.Exit(1)
 	}
-	fmt.Printf("\nFile '%v' uploaded successfully to network.\n- Time: %s\n- Available storage remaining: %d GB.\n\n",
-		cmdResp.FileName, elapsed.Round(time.Second), cmdResp.AvailableStorage)
+	if cmdResp.PeersReached > 0 {
+		fmt.Printf("\nFile '%v' saved locally and distributed to %d peer(s).\n- Time: %s\n- Available storage remaining: %d GB.\n\n",
+			cmdResp.FileName, cmdResp.PeersReached, elapsed.Round(time.Second), cmdResp.AvailableStorage)
+	} else {
+		fmt.Printf("\nFile '%v' saved locally (no peers connected — shards will be distributed when you join the network).\n- Time: %s\n- Available storage remaining: %d GB.\n\n",
+			cmdResp.FileName, elapsed.Round(time.Second), cmdResp.AvailableStorage)
+	}
 }
 
 // Uploads a folder to the network
@@ -763,6 +811,8 @@ func uploadFolder() {
 func downloadFile() {
 	filePath := args[3]
 	fmt.Printf("Downloading %s...\n", filePath)
+
+	waitForActiveOp()
 
 	done := make(chan struct{})
 	start := time.Now()
@@ -815,6 +865,10 @@ func downloadFile() {
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
+	if !cmdResp.Success && cmdResp.Busy {
+		fmt.Printf("\nAnother operation is in progress (%s). Please try again in a moment.\n", cmdResp.BusyWith)
+		os.Exit(1)
+	}
 	if !cmdResp.Success {
 		fmt.Printf("\nError downloading '%v': %s\n", cmdResp.FileName, cmdResp.Details)
 		os.Exit(1)
@@ -862,6 +916,7 @@ func deleteStub() {
 // Deletes a file from the network
 func deleteFile() {
 	filePath := args[3]
+	waitForActiveOp()
 	resp, err := client.SendRequest("deleteFile", protocol.DeleteFileRequest{FilePath: filePath})
 	exitOnErr(err, "Error deleting "+filePath+": ")
 
@@ -894,6 +949,7 @@ func deleteFolder() {
 func renameFile() {
 	oldName := args[3]
 	newName := args[4]
+	waitForActiveOp()
 	resp, err := client.SendRequest("renameFile", protocol.RenameFileRequest{FilePath: oldName, NewName: newName})
 	if err != nil {
 		fmt.Println("Error: could not reach daemon. Is mosaic-node running?")
@@ -1117,10 +1173,10 @@ func Shutdown() {
 		pidFile = shared.DaemonPIDFile
 		sockFile = shared.SocketPath
 		logFile = shared.DaemonLogFile
-		binDir = "/usr/local/bin"
+		binDir = filepath.Join(os.Getenv("HOME"), ".local", "bin")
 		cliName = "mos"
 		daemonName = "mosaicd"
-		needsSudo = true
+		needsSudo = false
 	case "linux":
 		pidFile = shared.DaemonPIDFile
 		sockFile = shared.SocketPath

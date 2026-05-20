@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"sort"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -150,18 +152,17 @@ func runClient(serverAddr string, errCh chan<- error) {
 			return
 		}
 		fmt.Printf("[P2P] Connected to peer %s\n", peer.ID)
-		go redistributeShardsToNewPeer(peer, client)
 		go announceIdentity(client)
 	})
 
-	// Push the manifest only after the session handshake is complete so the
-	// peer's response arrives encrypted and both sides can read it. Pushing
-	// from OnPeerAssigned (before handshake) means the peer's reply is already
-	// encrypted (its HandshakeDone fires first) but we can't decrypt it yet.
+	// Push the manifest and redistribute shards only after the session
+	// handshake is complete — redistribution probes use SendToPeer which
+	// requires the encrypted channel to be up on both sides.
 	client.OnHandshakeDone(func(peerID string) {
 		fmt.Printf("[P2P] Handshake done with %s — pushing manifest\n", peerID)
 		go pushManifestToPeer(mosaicDir, client)
 		go SyncUserStubs()
+		go redistributeShardsToNewPeer(peerID, client)
 	})
 
 	client.OnPeerLeft(func(peerID string) {
@@ -207,6 +208,10 @@ func runClient(serverAddr string, errCh chan<- error) {
 			go DeliverChallengeResponse(msg)
 		case api.ShardDelete:
 			go handleShardDelete(msg)
+		case api.ShardProbe:
+			go transfer.HandleShardProbe(msg, client)
+		case api.ShardProbeAck:
+			go transfer.HandleShardProbeAck(msg)
 		}
 	})
 
@@ -276,7 +281,9 @@ func handleManifestSync(mosaicDir string, msg *api.Message) {
 		fmt.Println("handleManifestSync: could not merge/write manifest:", err)
 		return
 	}
-	fmt.Printf("handleManifestSync: merged — %d chains (changed=%v)\n", len(merged.Chains), changed)
+	if changed {
+		fmt.Printf("[Manifest] Sync merged %d chains (updated)\n", len(merged.Chains))
+	}
 	markManifestSynced()
 
 	// If the merge brought in new information, broadcast the combined result
@@ -310,6 +317,14 @@ func handleManifestSync(mosaicDir string, msg *api.Message) {
 				if err := filesystem.RemoveStub(mosaicDir, name); err != nil && !os.IsNotExist(err) {
 					fmt.Printf("handleManifestSync: could not remove stub for %s: %v\n", name, err)
 				}
+				// Remove the cached real file if present — manifest is already gone so
+				// the watcher will ignore the resulting REMOVE event.
+				realPath := filepath.Join(mosaicDir, name)
+				if _, serr := os.Stat(realPath); serr == nil {
+					if err := os.Remove(realPath); err != nil {
+						fmt.Printf("handleManifestSync: could not remove cached file %s: %v\n", name, err)
+					}
+				}
 				fmt.Printf("handleManifestSync: removed deleted file %s from local state\n", name)
 			}
 		}
@@ -328,7 +343,9 @@ func handleManifestSync(mosaicDir string, msg *api.Message) {
 			fmt.Printf("handleManifestSync: could not write stub for %s: %v\n", f.Name, err)
 		}
 	}
-	fmt.Printf("handleManifestSync: synced %d files from network\n", len(files))
+	if changed && len(files) > 0 {
+		fmt.Printf("[Manifest] Synced %d files from network\n", len(files))
+	}
 }
 
 // handleShardDelete removes all locally-stored shards for the file identified
@@ -458,17 +475,19 @@ func handlePeerLeft(peerID string, mosaicDir string, client *p2p.Client) {
 		}
 	}
 	fmt.Printf("[P2P] Peer %s left — re-routed %d shards across %d remaining peers\n",
-		peerID[:8], sent, len(connected))
+		transfer.ShortPeer(peerID), sent, len(connected))
 }
 
-// redistributeShardsToNewPeer scans locally stored shards and sends to newPeer
+// redistributeShardsToNewPeer scans locally stored shards and sends to peerID
 // any shard whose index maps to that peer under the routing rule:
 //
 //	targetPeerIndex = shardIndex % numPeers
 //
-// Peers are ordered by sorting all node IDs (ours + connected peers) lexicographically,
-// giving a stable assignment that every node in the network can compute independently.
-func redistributeShardsToNewPeer(newPeer *p2p.PeerInfo, client *p2p.Client) {
+// Before sending, each candidate shard is probed: the peer must respond with
+// SHA-256(nonce || shard_bytes) to prove possession. Shards the peer can
+// already prove it holds are skipped, avoiding redundant retransmission when
+// a previously-connected node rejoins.
+func redistributeShardsToNewPeer(peerID string, client *p2p.Client) {
 	// Build stable ordering: our ID + all current peer IDs, sorted.
 	ourID := client.GetID()
 	connected := client.GetConnectedPeers()
@@ -482,7 +501,7 @@ func redistributeShardsToNewPeer(newPeer *p2p.PeerInfo, client *p2p.Client) {
 	numPeers := len(ids)
 	peerIdx := -1
 	for i, id := range ids {
-		if id == newPeer.ID {
+		if id == peerID {
 			peerIdx = i
 			break
 		}
@@ -496,6 +515,13 @@ func redistributeShardsToNewPeer(newPeer *p2p.PeerInfo, client *p2p.Client) {
 		return
 	}
 
+	type candidate struct {
+		fileHash string
+		meta     *transfer.ShardMeta
+		shardIdx int
+	}
+
+	var candidates []candidate
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -509,10 +535,103 @@ func redistributeShardsToNewPeer(newPeer *p2p.PeerInfo, client *p2p.Client) {
 			if shardIdx%numPeers != peerIdx {
 				continue
 			}
-			go transfer.StreamShardToPeer(fileHash, meta, shardIdx, newPeer.ID, client)
+			candidates = append(candidates, candidate{fileHash, meta, shardIdx})
 		}
 	}
-	fmt.Printf("[P2P] Redistribution to peer %s complete (%d peers total)\n", newPeer.ID[:8], numPeers)
+
+	if len(candidates) == 0 {
+		return
+	}
+
+	// Probe all candidate shards in parallel — each probe asks the peer to
+	// produce SHA-256(nonce || shard_bytes). Only shards the peer cannot prove
+	// it holds (wrong hash, no response within 3s) are redistributed.
+	type probeResult struct {
+		idx   int
+		hasIt bool
+	}
+	results := make(chan probeResult, len(candidates))
+	for i, c := range candidates {
+		go func(i int, c candidate) {
+			hasIt := transfer.ProbeShardAtPeer(c.fileHash, c.shardIdx, peerID, client)
+			results <- probeResult{i, hasIt}
+		}(i, c)
+	}
+
+	hasShards := make([]bool, len(candidates))
+	for range candidates {
+		r := <-results
+		hasShards[r.idx] = r.hasIt
+	}
+
+	// Stream shards with a concurrency cap so we don't flood the UDP send
+	// buffer. Firing all streams simultaneously caused "no buffer space
+	// available" crashes on the droplet when many shards were due.
+	//
+	// consecutiveFails tracks back-to-back ack timeouts. After 3 in a row we
+	// abort: the peer is unreachable and hammering it floods the firewall path
+	// for an extended time (21 shards × 15 s each = 5+ minutes of futile UDP).
+	const maxConcurrent = 2
+	sem := make(chan struct{}, maxConcurrent)
+	streamResults := make(chan bool, len(candidates))
+	var wg sync.WaitGroup
+	var sent, skipped int
+	var aborted bool
+
+	for i, c := range candidates {
+		if aborted {
+			break
+		}
+		if hasShards[i] {
+			skipped++
+			continue
+		}
+		sent++
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(c candidate) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			ok := transfer.StreamShardToPeer(c.fileHash, c.meta, c.shardIdx, peerID, client)
+			streamResults <- ok
+		}(c)
+
+		// Drain completed results (non-blocking) to detect consecutive failures
+		// early — if 3 ack timeouts land back-to-back the peer is unreachable and
+		// continuing would flood the firewall path for minutes.
+		consecutiveFails := 0
+	drainLoop:
+		for {
+			select {
+			case ok := <-streamResults:
+				if ok {
+					consecutiveFails = 0
+				} else {
+					consecutiveFails++
+					if consecutiveFails >= 3 {
+						fmt.Printf("[P2P] Redistribution to peer %s: aborting after 3 consecutive ack timeouts\n",
+							transfer.ShortPeer(peerID))
+						aborted = true
+						break drainLoop
+					}
+				}
+			default:
+				break drainLoop
+			}
+		}
+	}
+	wg.Wait()
+	for len(streamResults) > 0 {
+		<-streamResults
+	}
+
+	if skipped > 0 {
+		fmt.Printf("[P2P] Redistribution to peer %s: sent %d shards, skipped %d already present (%d peers total)\n",
+			transfer.ShortPeer(peerID), sent, skipped, numPeers)
+	} else {
+		fmt.Printf("[P2P] Redistribution to peer %s: sent %d shards (%d peers total)\n",
+			transfer.ShortPeer(peerID), sent, numPeers)
+	}
 }
 
 // handleShardResponse processes a shard received in reply to a ShardRequest.

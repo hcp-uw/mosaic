@@ -253,6 +253,18 @@ func (c *Client) ConnectToPeer(peer *PeerInfo) error {
 		return fmt.Errorf("failed to generate handshake key: %w", err)
 	}
 
+	// Evict any stale entry at the same IP so a reconnect after wipe/restart
+	// doesn't leave a ghost peer in the map alongside the new connection.
+	if peer.Address != nil {
+		for existingID, existingPeer := range c.peers {
+			if existingID != peer.ID && existingPeer.Address != nil &&
+				existingPeer.Address.IP.Equal(peer.Address.IP) {
+				delete(c.peers, existingID)
+				go c.notifyPeerLeft(existingID)
+			}
+		}
+	}
+
 	c.peers[peer.ID] = peer
 	c.peers[peer.ID].Conn = c.serverConn
 	c.peers[peer.ID].LastPeerPong = time.Now()
@@ -271,16 +283,21 @@ func (c *Client) ConnectToPeer(peer *PeerInfo) error {
 	go c.establishPeerConnection(peerID, peerAddr)
 
 	// Send HandshakeInit after punch packets have had a chance to open the path.
+	// Retry every second for up to 5 attempts in case a packet is dropped — UDP
+	// gives no delivery guarantee and a single lost init leaves both sides stuck.
 	go func() {
 		time.Sleep(300 * time.Millisecond)
 		msg := api.NewHandshakeInitMessage(myID, pubKeyBytes, quicPort)
-		// Send directly (plaintext) — session key doesn't exist yet.
-		c.mutex.RLock()
-		p := c.peers[peerID]
-		c.mutex.RUnlock()
-		if p != nil && p.Conn != nil {
-			data, _ := msg.Serialize()
+		data, _ := msg.Serialize()
+		for range 5 {
+			c.mutex.RLock()
+			p := c.peers[peerID]
+			c.mutex.RUnlock()
+			if p == nil || p.Conn == nil || p.HandshakeDone {
+				return
+			}
 			p.Conn.WriteTo(data, p.Address) //nolint:errcheck — best-effort
+			time.Sleep(1 * time.Second)
 		}
 	}()
 

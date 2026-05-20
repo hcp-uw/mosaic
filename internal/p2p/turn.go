@@ -22,6 +22,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/hcp-uw/mosaic/internal/api"
 	"github.com/pion/turn/v4"
 )
 
@@ -140,6 +141,17 @@ func (c *Client) ConnectViaTURN(peerID string) error {
 	go c.handleTURNMessages(peerID, ts)
 
 	fmt.Printf("[TURN] relay active for peer %s via %s\n", peerID, c.turnAddr)
+
+	// Tell the peer our relay address so they can route return traffic through
+	// TURN instead of sending directly to our NAT-private IP (which the
+	// firewall drops). The peer updates our address entry to the relay address,
+	// so all future sends from their side arrive at the TURN server and are
+	// forwarded back to us.
+	relayAddr := ts.relayConn.LocalAddr().String()
+	relayMsg := api.NewTURNRelayAddrMessage(c.id, api.TURNRelayAddrData{RelayAddr: relayAddr})
+	if err := c.SendToPeer(peerID, relayMsg); err != nil {
+		fmt.Printf("[TURN] could not notify peer %s of relay addr: %v\n", peerID, err)
+	}
 	return nil
 }
 

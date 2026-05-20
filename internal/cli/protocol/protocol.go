@@ -17,9 +17,12 @@ type UploadFileRequest struct {
 
 type UploadFileResponse struct {
 	Success          bool   `json:"success"`
+	Busy             bool   `json:"busy"`
+	BusyWith         string `json:"busyWith"`
 	Details          string `json:"details"`
 	FileName         string `json:"fileName"`
 	AvailableStorage int    `json:"availableStorage"`
+	PeersReached     int    `json:"peersReached"`
 }
 
 type UploadFolderRequest struct {
@@ -223,6 +226,8 @@ type DownloadFileRequest struct {
 
 type DownloadFileResponse struct {
 	Success          bool   `json:"success"`
+	Busy             bool   `json:"busy"`
+	BusyWith         string `json:"busyWith"`
 	Details          string `json:"details"`
 	FileName         string `json:"name"`
 	AvailableStorage int    `json:"availableStorage"`

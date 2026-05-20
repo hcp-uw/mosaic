@@ -40,6 +40,9 @@ Listens on `localhost:7777`. Used by the Swift menu bar app and Finder Sync exte
 | `GET` | `/files/{name}/info` | Metadata for a single file |
 | `DELETE` | `/files/{name}` | Delete file from network |
 | `POST` | `/files/{name}/fetch` | Download and cache file locally |
+| `GET` | `/upload-progress` | Shard dispatch counts for the active upload |
+| `GET` | `/download-progress` | Shard fetch counts for the active download |
+| `GET` | `/active-op` | Current in-flight operation, or `null` when idle |
 
 The fetch endpoint (`POST /files/{name}/fetch`) does more than just download:
 1. Calls `DownloadFile` handler to fetch bytes and write `~/Mosaic/<name>`
@@ -78,6 +81,54 @@ The CREATE-pair check runs before the `Cached` check, so stub renames (`.mosaic`
 **Suppression:** Daemon-initiated operations (e.g. deleting a stub after a fetch, writing rename events) call `SuppressNext(path)` before touching the file. This prevents the watcher from misinterpreting its own actions as user actions. Suppression auto-expires after 500ms if the event never fires.
 
 **Ignored events:** `WRITE` and `CHMOD` events are silently dropped — they fire on every chunk written during reconstruction and would cause massive noise. Hidden files (names starting with `.`) are also always ignored — this covers the manifest, temp files, and macOS metadata.
+
+---
+
+## Active operation serialization
+
+Heavy network operations — upload and download — are serialized through a global mutex in `internal/daemon/handlers/activeOp.go`. Only one such operation can run at a time. This prevents concurrent transfers from flooding the UDP send buffer, which caused OS-level "no buffer space available" crashes when redistribution and upload ran simultaneously.
+
+### How it works
+
+**Daemon side (`activeOp.go`):**
+
+```
+TryAcquireOp(kind, description) bool  // acquire if idle; returns false if busy
+GetActiveOp() *ActiveOp               // returns current op or nil
+ReleaseOp()                           // clear when done
+```
+
+`upload file` and `download file` handlers call `TryAcquireOp` at the start and `defer ReleaseOp()` at the end. If they can't acquire, they return a response with `"busy": true` and a human-readable `"busyWith"` field so the CLI can report a meaningful error.
+
+**CLI side (`CLI.go`):**
+
+`waitForActiveOp()` polls `GET /active-op` every 500ms and blocks until the response is `null`. It prints a "Waiting: <description>..." status line while blocking, then clears it when the op finishes.
+
+### Which commands wait
+
+| Command | Behaviour |
+|---------|-----------|
+| `mos upload file` | acquires the lock — is the heavy op |
+| `mos download file` | acquires the lock — is the heavy op |
+| `mos delete file` | waits — would delete shards mid-upload |
+| `mos rename file` | waits — broadcasts manifest mid-transfer is unsafe |
+| `mos status node` | waits — broadcasts identity challenge to all peers |
+| `mos empty storage` | waits — broadcasts manifest deletion |
+| `mos leave network` | waits — disconnecting peers mid-transfer corrupts the transfer |
+| `mos logout` | waits — same as leave + deletes shards |
+| `mos status network`, `mos list`, `mos status account` | no wait — local reads only |
+| `mos join network` | no wait — has its own `IsJoinSettling()` guard |
+| `mos wipe`, `mos shutdown` | no wait — lifecycle commands that must proceed |
+
+### HTTP endpoint
+
+`GET /active-op` returns the current operation as JSON or `null`:
+
+```json
+{ "kind": "upload", "description": "Uploading notes.md", "startedAt": "..." }
+```
+
+The Swift menu bar app can use this to show a progress indicator or disable fetch buttons while a transfer is running.
 
 ---
 

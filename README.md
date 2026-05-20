@@ -78,7 +78,7 @@ Your identity is an ECDSA P-256 keypair derived deterministically from your logi
 
 ```bash
 git clone https://github.com/hcp-uw/mosaic.git
-cd mosaic
+cd mosaic/scripts
 chmod +x install.sh
 ./install.sh
 ```
@@ -268,7 +268,6 @@ Current file state = replay all blocks in order. Merge = longer valid chain wins
 | [docs/transfer.md](docs/transfer.md) | File transfer: Reed-Solomon shards, binary wire protocol, AES-256-GCM |
 | [docs/deploy.md](docs/deploy.md) | Deploying the STUN/TURN server |
 | [docs/menu-bar-app.md](docs/menu-bar-app.md) | macOS menu bar app and Finder extension |
-| [docs/tapestry.md](docs/tapestry.md) | Tapestry: distributed event log design (in progress) |
 
 ---
 

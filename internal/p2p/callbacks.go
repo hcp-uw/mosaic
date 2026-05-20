@@ -91,9 +91,21 @@ func (c *Client) notifyError(err error) {
 	}
 }
 
-// notifyMessageReceived notifies callbacks about received messages
+// notifyMessageReceived notifies callbacks about received messages.
+// Each callback is invoked in a new goroutine so that a slow handler does not
+// block the caller (typically the UDP receive loop).
 func (c *Client) notifyMessageReceived(data []byte) {
 	for _, callback := range c.messageCallbacks {
 		go callback(data)
+	}
+}
+
+// notifyMessageReceivedSync calls callbacks synchronously on the calling
+// goroutine. Used by handleQUICStream where the data is always a binary shard
+// frame and spawning a goroutine per frame causes a pile-up that stalls QUIC
+// flow control.
+func (c *Client) notifyMessageReceivedSync(data []byte) {
+	for _, callback := range c.messageCallbacks {
+		callback(data)
 	}
 }

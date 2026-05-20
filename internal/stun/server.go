@@ -171,6 +171,8 @@ func (s *Server) processMessage(data []byte, clientAddr *net.UDPAddr, enableLogg
 		s.handleClientRegister(msg, clientAddr, enableLogging)
 	case api.ClientPing:
 		s.handleClientPing(msg, clientAddr, enableLogging)
+	case api.ClientDeregister:
+		s.handleClientDeregister(clientAddr, enableLogging)
 	default:
 		if enableLogging {
 			log.Printf("Unknown message type %s from %s", msg.Type, clientAddr)
@@ -289,6 +291,31 @@ func (s *Server) handleClientPing(msg *api.Message, clientAddr *net.UDPAddr, ena
 		if enableLogging {
 			log.Printf("Ping received from client %s", clientID)
 		}
+	}
+}
+
+// handleClientDeregister removes a client immediately on graceful leave and
+// re-elects a leader if the departing client was the current leader.
+func (s *Server) handleClientDeregister(clientAddr *net.UDPAddr, enableLogging bool) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	clientID := clientAddr.String()
+	client, exists := s.clients[clientID]
+	if !exists {
+		return
+	}
+
+	wasLeader := client.Leader
+	delete(s.clients, clientID)
+
+	if enableLogging {
+		log.Printf("Client %s deregistered (leader=%v)", clientID, wasLeader)
+	}
+
+	if wasLeader {
+		s.currentLeaderID = ""
+		s.electNewLeader(enableLogging)
 	}
 }
 

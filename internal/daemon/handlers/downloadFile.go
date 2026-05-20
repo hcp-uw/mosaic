@@ -18,6 +18,21 @@ func DownloadFile(req protocol.DownloadFileRequest) protocol.DownloadFileRespons
 	filename := removePath(req.FilePath)
 	fmt.Println("Daemon: fetching", filename, "from network")
 
+	if !TryAcquireOp(OpDownload, "Downloading "+filename) {
+		op := GetActiveOp()
+		desc := "another operation is in progress"
+		if op != nil {
+			desc = string(op.Kind) + " in progress"
+		}
+		return protocol.DownloadFileResponse{
+			Success:  false,
+			Busy:     true,
+			BusyWith: desc,
+			Details:  desc + " — try again in a moment",
+		}
+	}
+	defer ReleaseOp()
+
 	data, err := FetchFileBytes(filename)
 	if err != nil {
 		fmt.Println("Daemon: fetch failed for", filename, "-", err)

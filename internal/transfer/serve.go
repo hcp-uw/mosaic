@@ -17,51 +17,71 @@ import (
 // chunks it waits for a ShardStreamAck; if any chunks were missed it retransmits
 // only those and loops until the receiver confirms all chunks are present.
 // Uses QUIC when a stream can be opened; falls back to UDP otherwise.
-func StreamShardToPeer(fileHash string, meta *ShardMeta, shardIndex int, peerID string, client *p2p.Client) {
+// Returns true if the receiver acknowledged all chunks, false on ack timeout.
+func StreamShardToPeer(fileHash string, meta *ShardMeta, shardIndex int, peerID string, client *p2p.Client) bool {
 	shardPath := filepath.Join(ShardsDir(), fileHash, fmt.Sprintf("shard%d_%s.dat", shardIndex, fileHash))
 
 	totalChunks, ok := streamEncryptedChunks(shardPath, meta, shardIndex, nil, peerID, client)
 	if !ok {
-		return
+		return false
 	}
 
+	// Use ShardStreamDone/ShardStreamAck to confirm delivery and retransmit any
+	// missing chunks. ShardStreamDone is retried every 2s in case of UDP packet loss.
 	ackKey := fmt.Sprintf("%s:%d:%s", fileHash, shardIndex, peerID)
+	doneMsg := api.NewShardStreamDoneMessage(client.GetID(), api.ShardStreamDoneData{
+		FileHash:    fileHash,
+		ShardIndex:  shardIndex,
+		TotalChunks: totalChunks,
+	})
 
 	for {
-		// Register ack channel before sending ShardStreamDone to avoid a race
-		// where the ack arrives before we start waiting.
 		ackCh := make(chan []int, 1)
 		shardAckChans.Store(ackKey, ackCh)
 
-		client.SendToPeer(peerID, api.NewShardStreamDoneMessage(client.GetID(), api.ShardStreamDoneData{ //nolint:errcheck
-			FileHash:    fileHash,
-			ShardIndex:  shardIndex,
-			TotalChunks: totalChunks,
-		}))
+		client.SendToPeer(peerID, doneMsg) //nolint:errcheck
 
+		retryTick := time.NewTicker(2 * time.Second)
+		deadline := time.NewTimer(15 * time.Second)
 		var missing []int
-		select {
-		case missing = <-ackCh:
-		case <-time.After(30 * time.Second):
-			shardAckChans.Delete(ackKey)
-			fmt.Printf("[Transfer] Shard %d → %s: ack timeout\n", shardIndex, peerID[:8])
-			return
+		var timedOut bool
+	waitAck:
+		for {
+			select {
+			case missing = <-ackCh:
+				break waitAck
+			case <-retryTick.C:
+				client.SendToPeer(peerID, doneMsg) //nolint:errcheck
+			case <-deadline.C:
+				timedOut = true
+				break waitAck
+			}
 		}
+		retryTick.Stop()
+		deadline.Stop()
 		shardAckChans.Delete(ackKey)
 
+		if timedOut {
+			fmt.Printf("[Transfer] Shard %d → %s: ack timeout\n", shardIndex, shortPeer(peerID))
+			return false
+		}
+
 		if len(missing) == 0 {
-			fmt.Printf("[Transfer] Redistributed shard %d of %s → peer %s\n", shardIndex, fileHash[:12], peerID[:8])
-			return
+			fmt.Printf("[Transfer] Redistributed shard %d of %s → %s (%d chunks)\n",
+				shardIndex, fileHash[:12], shortPeer(peerID), totalChunks)
+			return true
 		}
 
 		fmt.Printf("[Transfer] Shard %d → %s: retransmitting %d/%d missing chunks\n",
-			shardIndex, peerID[:8], len(missing), totalChunks)
+			shardIndex, shortPeer(peerID), len(missing), totalChunks)
 
 		needed := make(map[int]struct{}, len(missing))
 		for _, idx := range missing {
 			needed[idx] = struct{}{}
 		}
-		streamEncryptedChunks(shardPath, meta, shardIndex, needed, peerID, client) //nolint:errcheck
+		if _, ok := streamEncryptedChunks(shardPath, meta, shardIndex, needed, peerID, client); !ok {
+			return false
+		}
 	}
 }
 
@@ -86,6 +106,7 @@ func streamEncryptedChunks(shardPath string, meta *ShardMeta, shardIndex int, on
 	if quicErr == nil {
 		defer quicStream.Close()
 	}
+	usedQUIC := quicErr == nil
 
 	for chunkIdx := 0; chunkIdx < totalChunks; chunkIdx++ {
 		var lenBuf [4]byte
@@ -121,9 +142,9 @@ func streamEncryptedChunks(shardPath string, meta *ShardMeta, shardIndex int, on
 			return totalChunks, false
 		}
 
-		if quicErr == nil {
+		if usedQUIC {
 			if err := sendFrameViaQUIC(quicStream, frame); err != nil {
-				fmt.Printf("[Transfer] streamEncryptedChunks: shard %d chunk %d → %s (QUIC) failed: %v\n", shardIndex, chunkIdx, peerID[:8], err)
+				fmt.Printf("[Transfer] streamEncryptedChunks: shard %d chunk %d → %s (QUIC) failed: %v\n", shardIndex, chunkIdx, shortPeer(peerID), err)
 				return totalChunks, false
 			}
 		} else {
@@ -165,8 +186,16 @@ func HandleShardRequest(msg *api.Message, client *p2p.Client) {
 		if meta == nil {
 			return
 		}
-		fmt.Printf("[Transfer] Serving shard %d of %s → %s\n", d.ShardIndex, d.FileHash[:12], requesterID[:8])
-		go StreamShardToPeer(d.FileHash, meta, d.ShardIndex, requesterID, client)
+		serveKey := fmt.Sprintf("%s:%d:%s", d.FileHash, d.ShardIndex, requesterID)
+		if _, loaded := inProgressServes.LoadOrStore(serveKey, struct{}{}); loaded {
+			// Already serving this shard to this peer — drop duplicate request.
+			return
+		}
+		fmt.Printf("[Transfer] Serving shard %d of %s → %s\n", d.ShardIndex, d.FileHash[:12], shortPeer(requesterID))
+		go func() {
+			defer inProgressServes.Delete(serveKey)
+			StreamShardToPeer(d.FileHash, meta, d.ShardIndex, requesterID, client)
+		}()
 		return
 	}
 
@@ -178,7 +207,7 @@ func HandleShardRequest(msg *api.Message, client *p2p.Client) {
 
 	// Register the original requester so the relay callback can forward when the
 	// shard arrives, then broadcast a one-hop relay to our own peers.
-	fmt.Printf("[Transfer] Shard %d of %s not local — relaying for %s\n", d.ShardIndex, d.FileHash[:12], requesterID[:8])
+	fmt.Printf("[Transfer] Shard %d of %s not local — relaying for %s\n", d.ShardIndex, d.FileHash[:12], shortPeer(requesterID))
 	registerPendingShardRequest(d.FileHash, d.ShardIndex, requesterID)
 	relay := api.NewShardRequestMessage(api.NewSignature(client.GetID()), api.ShardRequestData{
 		FileHash:   d.FileHash,
@@ -189,9 +218,14 @@ func HandleShardRequest(msg *api.Message, client *p2p.Client) {
 }
 
 // HandleShardStreamDone is called when a peer signals it has finished sending
-// all chunks of a shard. We always reply with ShardStreamAck listing any chunk
+// all chunks of a shard. We reply with ShardStreamAck listing any chunk
 // indices we did not receive (empty = all present). The sender blocks on this
 // reply before proceeding, so it can retransmit missing chunks inline.
+//
+// ShardStreamDone travels on the UDP control channel and can arrive before all
+// QUIC stream frames have propagated through the OS networking stack to this
+// goroutine. We poll briefly to let those frames settle before computing the
+// missing list, which prevents spurious retransmits on QUIC paths.
 func HandleShardStreamDone(msg *api.Message, client *p2p.Client) {
 	d, err := msg.GetShardStreamDoneData()
 	if err != nil {
@@ -207,21 +241,55 @@ func HandleShardStreamDone(msg *api.Message, client *p2p.Client) {
 		}))
 	}
 
-	// If the shard is already on disk, ack success immediately.
 	shardPath := filepath.Join(ShardsDir(), d.FileHash,
 		fmt.Sprintf("shard%d_%s.dat", d.ShardIndex, d.FileHash))
-	if _, err := os.Stat(shardPath); err == nil {
+	key := fmt.Sprintf("%s:%d", d.FileHash, d.ShardIndex)
+
+	// Poll up to 200 ms for QUIC frames that are still in-flight through the
+	// networking stack. Each iteration checks whether the shard is already
+	// complete (on disk, fully assembled, or being finalized) so we ack immediately.
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if _, statErr := os.Stat(shardPath); statErr == nil {
+			sendAck(nil)
+			return
+		}
+		if _, ok := finalizingShards.Load(key); ok {
+			sendAck(nil) // all chunks present; finalizeShard is writing the file
+			return
+		}
+		assemblyMu.Lock()
+		asm, asmOK := assemblies[key]
+		assemblyMu.Unlock()
+		if asmOK {
+			asm.mu.Lock()
+			have := len(asm.chunks)
+			asm.mu.Unlock()
+			if have >= d.TotalChunks {
+				sendAck(nil) // all chunks present; finalizeShard is in flight
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Drain timeout reached — compute what is actually missing and request retransmit.
+	if _, statErr := os.Stat(shardPath); statErr == nil {
+		sendAck(nil)
+		return
+	}
+	// Shard is being written to disk right now — all chunks present.
+	if _, ok := finalizingShards.Load(key); ok {
 		sendAck(nil)
 		return
 	}
 
-	key := fmt.Sprintf("%s:%d", d.FileHash, d.ShardIndex)
 	assemblyMu.Lock()
 	asm, ok := assemblies[key]
 	assemblyMu.Unlock()
 
 	if !ok {
-		// No assembly in progress — all chunks are missing.
+		// No assembly and not finalizing: all chunks are genuinely missing.
 		missing := make([]int, d.TotalChunks)
 		for i := range missing {
 			missing[i] = i
