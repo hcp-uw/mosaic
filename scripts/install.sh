@@ -511,20 +511,18 @@ do_wipe() {
     echo "  - Daemon PID, socket, and log files"
     echo ""
 
-    # If 'mos' is installed, delegate entirely so the daemon can leave the
-    # network gracefully before anything is deleted.
-    if command -v mos &> /dev/null; then
-        echo "wipe" | mos wipe
-        exit $?
-    fi
-
-    # Fallback: replicate 'mos wipe' in pure shell for environments where mos
-    # isn't on PATH yet (e.g. fresh checkout before first install).
     echo -n "Type \"wipe\" to confirm: "
     read confirm
     if [ "$confirm" != "wipe" ]; then
         echo "Aborted."
         exit 0
+    fi
+
+    # If 'mos' is installed, delegate so the daemon can leave the network
+    # gracefully before anything is deleted. Pipe the confirmed answer through.
+    if command -v mos &> /dev/null; then
+        echo "wipe" | mos wipe
+        exit $?
     fi
 
     stop_app

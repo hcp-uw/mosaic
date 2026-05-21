@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/hcp-uw/mosaic/internal/cli/shared"
+	"github.com/hcp-uw/mosaic/internal/daemon/handlers/helpers"
 	filesystem "github.com/hcp-uw/mosaic/internal/fileSystem"
 	"github.com/hcp-uw/mosaic/internal/transfer"
 )
@@ -64,11 +65,16 @@ func doFetchFileBytes(filename string) ([]byte, error) {
 	// manifest so FetchFileBytes can proceed to request shards from peers
 	// rather than failing immediately on a fresh node.
 	if transfer.FindShardMeta(filename) == nil && manifestLoaded {
-		for _, chain := range nm.Chains {
-			for _, f := range filesystem.ChainToFiles(chain) {
-				if f.Name == filename {
-					transfer.EnsureShardMeta(f.ContentHash, f.Name, f.Size)
-					break
+		if kp, kerr := filesystem.LoadOrCreateUserKey(shared.UserKeyPath()); kerr == nil {
+			metaKey := filesystem.MetaKeyFromKP(kp)
+			accountID := helpers.GetAccountID()
+			idx := filesystem.FindChainIndex(nm, accountID)
+			if idx != -1 {
+				for _, f := range filesystem.ChainToFiles(nm.Chains[idx], &metaKey) {
+					if f.Name == filename {
+						transfer.EnsureShardMeta(f.ContentHash, f.Name, f.Size)
+						break
+					}
 				}
 			}
 		}

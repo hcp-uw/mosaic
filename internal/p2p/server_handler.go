@@ -44,26 +44,31 @@ func (c *Client) ConnectToStun() error {
 
 	// Start QUIC transport on a separate UDP socket so STUN control messages
 	// and QUIC data frames never share a port (prevents packet misclassification).
-	quicUDP, quicUDPErr := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
-	if quicUDPErr != nil {
-		fmt.Printf("[QUIC] Failed to open UDP socket: %v — QUIC disabled, using UDP fallback\n", quicUDPErr)
+	// Skipped when force-UDP mode is active (dev/testing only).
+	if c.forceTransport == "udp" {
+		fmt.Println("[QUIC] Disabled (force-UDP mode)")
 	} else {
-		tlsConf, tlsErr := serverTLSConfig()
-		if tlsErr != nil {
-			fmt.Printf("[QUIC] TLS setup failed: %v — QUIC disabled, using UDP fallback\n", tlsErr)
-			quicUDP.Close()
+		quicUDP, quicUDPErr := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+		if quicUDPErr != nil {
+			fmt.Printf("[QUIC] Failed to open UDP socket: %v — QUIC disabled, using UDP fallback\n", quicUDPErr)
 		} else {
-			qt := &quic.Transport{Conn: quicUDP}
-			ln, lnErr := qt.Listen(tlsConf, defaultQUICConfig)
-			if lnErr != nil {
-				fmt.Printf("[QUIC] Listener failed: %v — QUIC disabled, using UDP fallback\n", lnErr)
-				qt.Close()
+			tlsConf, tlsErr := serverTLSConfig()
+			if tlsErr != nil {
+				fmt.Printf("[QUIC] TLS setup failed: %v — QUIC disabled, using UDP fallback\n", tlsErr)
+				quicUDP.Close()
 			} else {
-				c.quicTr = qt
-				c.quicListener = ln
-				c.quicPort = quicUDP.LocalAddr().(*net.UDPAddr).Port
-				fmt.Printf("[QUIC] Listening on port %d\n", c.quicPort)
-				go c.quicAcceptLoop()
+				qt := &quic.Transport{Conn: quicUDP}
+				ln, lnErr := qt.Listen(tlsConf, defaultQUICConfig)
+				if lnErr != nil {
+					fmt.Printf("[QUIC] Listener failed: %v — QUIC disabled, using UDP fallback\n", lnErr)
+					qt.Close()
+				} else {
+					c.quicTr = qt
+					c.quicListener = ln
+					c.quicPort = quicUDP.LocalAddr().(*net.UDPAddr).Port
+					fmt.Printf("[QUIC] Listening on port %d\n", c.quicPort)
+					go c.quicAcceptLoop()
+				}
 			}
 		}
 	}

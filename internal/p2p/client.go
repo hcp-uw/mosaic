@@ -23,6 +23,7 @@ type Client struct {
 	turnAddr         string // TURN server "host:port", empty = disabled
 	turnUsername     string
 	turnPassword     string
+	forceTransport   string // "quic", "udp", or "" (default: auto)
 	state            ClientState
 	peers            map[string]*PeerInfo
 	mutex            sync.RWMutex
@@ -59,6 +60,7 @@ type ClientConfig struct {
 	TURNPassword   string
 	PingInterval   time.Duration
 	ConnectTimeout time.Duration
+	ForceTransport string // dev only: "quic" or "udp"; "" = auto (default)
 }
 
 // DefaultClientConfig returns default client configuration with TURN fallback enabled.
@@ -91,6 +93,7 @@ func NewClient(config *ClientConfig) (*Client, error) {
 		turnAddr:         config.TURNAddress,
 		turnUsername:     config.TURNUsername,
 		turnPassword:     config.TURNPassword,
+		forceTransport:   config.ForceTransport,
 		state:            StateDisconnected,
 		peers:            make(map[string]*PeerInfo),
 		ctx:              ctx,
@@ -102,6 +105,16 @@ func NewClient(config *ClientConfig) (*Client, error) {
 		errorCallbacks:     make([]func(error), 0),
 		messageCallbacks:   make([]func([]byte), 0),
 	}, nil
+}
+
+// IsForceUDP reports whether only UDP should be used for shard data transport.
+func (c *Client) IsForceUDP() bool {
+	return c.forceTransport == "udp"
+}
+
+// IsForceQUIC reports whether only QUIC should be used for shard data transport.
+func (c *Client) IsForceQUIC() bool {
+	return c.forceTransport == "quic"
 }
 
 // GetState returns current client state
@@ -273,7 +286,7 @@ func (c *Client) completeHandshake(msg *api.Message, peer *PeerInfo) {
 	// peer's incoming dial hits the NAT-side's LOCAL port and fails silently.
 	// When both peers have public IPs both dials succeed, but the first-wins
 	// guard in dialQUICToPeer and quicConnAccept prevents duplicate connections.
-	if d.QUICPort > 0 {
+	if d.QUICPort > 0 && c.forceTransport != "udp" {
 		go c.dialQUICToPeer(peerID)
 	}
 }

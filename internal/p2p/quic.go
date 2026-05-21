@@ -60,6 +60,15 @@ var defaultQUICConfig = &quic.Config{
 	MaxIdleTimeout:        5 * time.Minute,
 	KeepAlivePeriod:       10 * time.Second,
 	MaxIncomingUniStreams: 1000,
+
+	// Large receive windows so the sender is never flow-controlled while the
+	// reader goroutine processes frames. Defaults (512 KB stream / 15 MB conn)
+	// limit throughput to ~10 MB/s on a 50 ms RTT link; these values raise the
+	// ceiling to ~640 MB/s per stream — well above any real-world NIC limit.
+	InitialStreamReceiveWindow:     4 * 1024 * 1024,  // 4 MB
+	MaxStreamReceiveWindow:         32 * 1024 * 1024, // 32 MB
+	InitialConnectionReceiveWindow: 16 * 1024 * 1024, // 16 MB
+	MaxConnectionReceiveWindow:     128 * 1024 * 1024, // 128 MB
 }
 
 // ──────────────────────────────────────────────────────────
@@ -228,8 +237,11 @@ func isPublicIP(ip net.IP) bool {
 
 // OpenShardStream opens a QUIC unidirectional send stream to a peer.
 // Returns an error if the QUIC connection for this peer is not yet established,
-// in which case callers should fall back to UDP.
+// or if force-UDP mode is active, in which case callers should fall back to UDP.
 func (c *Client) OpenShardStream(peerID string) (io.WriteCloser, error) {
+	if c.forceTransport == "udp" {
+		return nil, fmt.Errorf("QUIC disabled (force-UDP mode)")
+	}
 	c.mutex.RLock()
 	peer := c.peers[peerID]
 	c.mutex.RUnlock()

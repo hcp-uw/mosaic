@@ -127,7 +127,8 @@ func TestChainToFiles_AddRemove(t *testing.T) {
 	AppendBlock(&chain, BlockOpAdd, testFile("b.txt"), "", kp)
 	AppendBlock(&chain, BlockOpRemove, testFile("a.txt"), "", kp)
 
-	files := ChainToFiles(chain)
+	metaKey := MetaKeyFromKP(kp)
+	files := ChainToFiles(chain, &metaKey)
 	if len(files) != 1 || files[0].Name != "b.txt" {
 		t.Fatalf("expected [b.txt], got %v", files)
 	}
@@ -139,7 +140,8 @@ func TestChainToFiles_Rename(t *testing.T) {
 	AppendBlock(&chain, BlockOpAdd, testFile("old.txt"), "", kp)
 	AppendBlock(&chain, BlockOpRename, testFile("old.txt"), "new.txt", kp)
 
-	files := ChainToFiles(chain)
+	metaKey := MetaKeyFromKP(kp)
+	files := ChainToFiles(chain, &metaKey)
 	if len(files) != 1 || files[0].Name != "new.txt" {
 		t.Fatalf("expected [new.txt], got %v", files)
 	}
@@ -151,7 +153,8 @@ func TestChainToFiles_RemoveAll(t *testing.T) {
 	AppendBlock(&chain, BlockOpAdd, testFile("a.txt"), "", kp)
 	AppendBlock(&chain, BlockOpRemove, testFile("a.txt"), "", kp)
 
-	files := ChainToFiles(chain)
+	metaKey := MetaKeyFromKP(kp)
+	files := ChainToFiles(chain, &metaKey)
 	if len(files) != 0 {
 		t.Fatalf("expected empty file set, got %v", files)
 	}
@@ -428,7 +431,8 @@ func TestFullLifecycle(t *testing.T) {
 		t.Fatal("chain should be valid after full lifecycle")
 	}
 
-	files := ChainToFiles(m.Chains[idx])
+	metaKey := MetaKeyFromKP(kp)
+	files := ChainToFiles(m.Chains[idx], &metaKey)
 	if len(files) != 1 || files[0].Name != "renamed.txt" {
 		t.Fatalf("expected [renamed.txt], got %v", files)
 	}

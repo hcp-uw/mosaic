@@ -49,7 +49,12 @@ func ListManifest(_ protocol.ListManifestRequest) protocol.ListManifestResponse 
 		}
 	}
 
-	networkFiles := filesystem.ChainToFiles(m.Chains[idx])
+	kp, err := filesystem.LoadOrCreateUserKey(shared.UserKeyPath())
+	if err != nil {
+		return protocol.ListManifestResponse{Success: false, Details: fmt.Sprintf("could not load user key: %v", err)}
+	}
+	metaKey := filesystem.MetaKeyFromKP(kp)
+	networkFiles := filesystem.ChainToFiles(m.Chains[idx], &metaKey)
 	localEntries, _ := filesystem.ReadManifest(mosaicDir)
 
 	files := make([]protocol.ManifestFileEntry, 0, len(networkFiles))

@@ -17,16 +17,19 @@ import (
 // shardHoldersForFile returns the contentHash of filename and the deduplicated
 // set of node IDs that hold at least one shard for it (excluding this node).
 func shardHoldersForFile(nm filesystem.NetworkManifest, filename string) (contentHash string, holderIDs []string) {
-	// Find the contentHash by scanning all chains for a matching file name.
-	for _, chain := range nm.Chains {
-		for _, f := range filesystem.ChainToFiles(chain) {
-			if f.Name == filename {
-				contentHash = f.ContentHash
-				break
+	// Only the owner can delete their own files — scan only the own chain with the meta key.
+	kp, err := filesystem.LoadOrCreateUserKey(shared.UserKeyPath())
+	if err == nil {
+		metaKey := filesystem.MetaKeyFromKP(kp)
+		accountID := helpers.GetAccountID()
+		idx := filesystem.FindChainIndex(nm, accountID)
+		if idx != -1 {
+			for _, f := range filesystem.ChainToFiles(nm.Chains[idx], &metaKey) {
+				if f.Name == filename {
+					contentHash = f.ContentHash
+					break
+				}
 			}
-		}
-		if contentHash != "" {
-			break
 		}
 	}
 	if contentHash == "" || nm.ShardMap == nil {

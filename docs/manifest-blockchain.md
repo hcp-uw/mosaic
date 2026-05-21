@@ -27,25 +27,25 @@ A single operation in a user's history.
 
 ```go
 type ChainBlock struct {
-    Index     int              // 0-based position in the chain
-    PrevHash  string           // hex SHA-256 of the previous block; "" for the genesis block
-    Op        string           // "add" | "remove" | "rename"
-    File      NetworkFileEntry // the file affected by this operation
-    NewName   string           // only populated for "rename" operations
-    Timestamp string           // RFC3339 UTC
-    Signature []byte           // 64-byte ECDSA r||s; excluded when computing hash
+    Index         int              // 0-based position in the chain
+    PrevHash      string           // hex SHA-256 of the previous block; "" for the genesis block
+    Op            string           // "add" | "remove" | "rename"
+    File          NetworkFileEntry // public fields only: ContentHash present; Name/Size/Date zeroed
+    EncryptedMeta []byte           // AES-256-GCM: {name, size, dateAdded, newName} — owner-only
+    Timestamp     string           // RFC3339 UTC
+    Signature     []byte           // 64-byte ECDSA r||s; excluded when computing hash
 }
 ```
 
-`NetworkFileEntry` carries the file's metadata:
+`NetworkFileEntry` carries the file's metadata. Only `ContentHash` and `PrimaryNodeID` travel in plaintext; the identifying fields (`Name`, `Size`, `DateAdded`) are zeroed in the stored block and only accessible via `EncryptedMeta`:
 
 ```go
 type NetworkFileEntry struct {
-    Name          string // filename
-    Size          int    // bytes
-    PrimaryNodeID int    // which node holds the primary shard set
-    DateAdded     string // MM-DD-YYYY
-    ContentHash   string // SHA-256 hex of original file bytes
+    Name          string // zeroed in stored blocks; recovered by owner via EncryptedMeta
+    Size          int    // zeroed in stored blocks; recovered by owner via EncryptedMeta
+    PrimaryNodeID int    // which node holds the primary shard set (public)
+    DateAdded     string // zeroed in stored blocks; recovered by owner via EncryptedMeta
+    ContentHash   string // SHA-256 hex of original file bytes (public)
 }
 ```
 
@@ -93,7 +93,7 @@ This hash serves two roles:
 - It is the pre-image signed by ECDSA (`signBlock`)
 - It is stored in the next block's `PrevHash` field (the chain link)
 
-Because the hash is deterministic and covers every field of the block (index, prevHash, op, file, newName, timestamp), any change to any field produces a completely different hash.
+Because the hash is deterministic and covers every field of the stored block, any change to any field produces a completely different hash. Sensitive metadata (`File.Name`, `File.Size`, `File.DateAdded`, `NewName`) is zeroed before the block is stored, so the hash covers the block in its zeroed form — peers can verify the chain without needing to decrypt the metadata.
 
 ---
 
@@ -104,13 +104,23 @@ When a new block is created (in `AppendBlock`), it is signed immediately before 
 ```
 AppendBlock(chain, op, file, newName, kp):
     prevHash = blockHash(chain.Blocks[-1])   // or "" if empty
+
+    // Encrypt sensitive fields; only the owner can decrypt.
+    metaKey = SHA-256(kp.Private.D || "mosaic-block-meta")
+    encryptedMeta = AES-256-GCM(metaKey, json({name, size, dateAdded, newName}))
+
+    // Zero out the sensitive fields so they are not stored in plaintext.
+    file.Name = ""
+    file.Size = 0
+    file.DateAdded = ""
+
     b = ChainBlock{
-        Index:     len(chain.Blocks),
-        PrevHash:  prevHash,
-        Op:        op,
-        File:      file,
-        NewName:   newName,
-        Timestamp: now UTC,
+        Index:         len(chain.Blocks),
+        PrevHash:      prevHash,
+        Op:            op,
+        File:          file,          // ContentHash present; Name/Size/Date zeroed
+        EncryptedMeta: encryptedMeta,
+        Timestamp:     now UTC,
     }
     hash = SHA-256(json(b with Signature=nil))
     r, s = ECDSA_Sign(kp.Private, hash)
@@ -247,14 +257,15 @@ OnMessageReceived(data):
 
 ## File Name Visibility
 
-Chain blocks store file metadata in plaintext. Any peer who receives the manifest can see your file names, sizes, dates, and content hashes.
+File names, sizes, and dates are **encrypted at the block level** using AES-256-GCM with a key derived from the owner's private key (`SHA-256(privateKey.D || "mosaic-block-meta")`). Only the owner can decrypt this metadata. Peers receive blocks where these fields are zeroed out; only `ContentHash` and `PrimaryNodeID` travel in plaintext.
 
-This is a deliberate design choice for the public permissionless network model. The alternative — per-block ECIES encryption of the file metadata — would preserve privacy but prevent peers from verifying chain integrity (they cannot hash what they cannot read).
+This is a cryptographic guarantee, not a display-layer filter — the ciphertext is what is hashed and signed, so there is no plaintext version of the metadata anywhere in the distributed manifest.
 
 In practice:
 - **File content is never in the manifest.** The actual bytes are distributed as encrypted shards; the manifest only carries metadata.
 - **Content hashes are one-way.** A SHA-256 hash of a file reveals nothing about its contents.
-- **File names can be sensitive.** If this matters for your use case, the `File` field in `ChainBlock` can be ECIES-encrypted in a future version without changing the chain structure — the hash and signature would then cover the encrypted payload instead of the plaintext metadata.
+- **Non-owners see only the hash.** A peer storing your shards knows the content hash needed to serve them, but cannot read your file names, sizes, or dates — even by inspecting the raw manifest JSON.
+- **Chain verification still works.** Peers hash and verify the block with the zeroed fields, so `ValidateChain` requires no decryption.
 
 ---
 
@@ -312,7 +323,7 @@ Because this key is per-node, two nodes cannot decrypt each other's on-disk file
 
 ### What the chain does not protect against
 
-**Lying about having files.** The manifest records file names and content hashes, but there is no cryptographic proof that the actual bytes exist anywhere on the network. A user can append `add "secret_data.txt"` blocks for files they never uploaded. Peers will believe the file exists, stubs will be created on their machines, and download attempts will silently fail. There is currently no storage proof — the chain is a claim ledger, not a verified storage ledger.
+**Lying about having files.** The manifest records content hashes, but there is no cryptographic proof that the actual bytes exist anywhere on the network. A user can append `add` blocks for files they never uploaded. Other peers won't see the file name (it is encrypted), but their shard map may record the content hash as held by this node. Download attempts will silently fail. There is currently no storage proof — the chain is a claim ledger, not a verified storage ledger.
 
 **Manifest spam.** There is no rate limiting or block cap per user. Nothing prevents someone from appending thousands of `add`/`remove` blocks in a loop. Every peer stores and gossips the entire manifest, so a determined attacker can bloat the manifest for every node on the network. The chain structure itself gives no defence here.
 
@@ -324,7 +335,7 @@ Because this key is per-node, two nodes cannot decrypt each other's on-disk file
 
 **Compromised private key — no revocation.** If your private key leaks, an attacker can append to your chain forever. The network has no mechanism to signal that a key has been revoked. Any block signed by the leaked key is indistinguishable from a legitimate block. The only recovery path is to abandon the identity and create a new one, losing the history associated with the old chain.
 
-**File name privacy.** Chain blocks store file metadata in plaintext. Every peer who receives the manifest can read your file names, sizes, dates, and content hashes. File bytes never appear in the manifest, but the names alone can be sensitive. This is a deliberate trade-off for the current design: encrypting the metadata would prevent peers from verifying the chain (you cannot hash what you cannot read). Per-block encryption is architecturally possible in a future version without changing the chain structure.
+**File name privacy.** File names, sizes, and dates are AES-256-GCM encrypted per block with a key derived from the owner's private key. The plaintext never appears in the distributed manifest. The privacy guarantee is as strong as the secrecy of your login key — a peer who obtains your login key can re-derive the decryption key and read your metadata.
 
 ---
 

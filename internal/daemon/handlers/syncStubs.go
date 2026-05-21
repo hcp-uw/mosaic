@@ -40,7 +40,13 @@ func SyncUserStubs() {
 		return // user has no files in the network manifest yet
 	}
 
-	files := filesystem.ChainToFiles(m.Chains[idx])
+	kp, err := filesystem.LoadOrCreateUserKey(shared.UserKeyPath())
+	if err != nil {
+		fmt.Println("syncUserStubs: could not load user key:", err)
+		return
+	}
+	metaKey := filesystem.MetaKeyFromKP(kp)
+	files := filesystem.ChainToFiles(m.Chains[idx], &metaKey)
 
 	// Build a set of currently-live names so we can detect deletions.
 	networkNames := make(map[string]bool, len(files))

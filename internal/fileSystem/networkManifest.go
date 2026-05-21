@@ -51,13 +51,73 @@ const (
 //     resolve deterministically by choosing the chain with the lower hex hash at
 //     the first differing block.
 type ChainBlock struct {
-	Index     int              `json:"index"`             // 0-based position in chain
-	PrevHash  string           `json:"prevHash"`          // hex SHA-256 of previous block; "" for genesis
-	Op        string           `json:"op"`                // BlockOpAdd | BlockOpRemove | BlockOpRename
-	File      NetworkFileEntry `json:"file"`              // file affected by this operation
-	NewName   string           `json:"newName,omitempty"` // populated only for BlockOpRename
-	Timestamp string           `json:"timestamp"`         // RFC3339 UTC
-	Signature []byte           `json:"signature,omitempty"`
+	Index         int              `json:"index"`                   // 0-based position in chain
+	PrevHash      string           `json:"prevHash"`                // hex SHA-256 of previous block; "" for genesis
+	Op            string           `json:"op"`                      // BlockOpAdd | BlockOpRemove | BlockOpRename
+	File          NetworkFileEntry `json:"file"`                    // public: only ContentHash; Name/Size/Date zeroed in new blocks
+	EncryptedMeta []byte           `json:"encryptedMeta,omitempty"` // AES-256-GCM: {name, size, dateAdded, newName}
+	Timestamp     string           `json:"timestamp"`               // RFC3339 UTC
+	Signature     []byte           `json:"signature,omitempty"`
+}
+
+// blockMeta holds the private per-block metadata encrypted into EncryptedMeta.
+type blockMeta struct {
+	Name      string `json:"n"`
+	Size      int    `json:"s,omitempty"`
+	DateAdded string `json:"d,omitempty"`
+	NewName   string `json:"r,omitempty"`
+}
+
+// MetaKeyFromKP derives the AES-256 key used to encrypt block metadata from the
+// owner's ECDSA private key. Only the owner can decrypt their own chain's metadata.
+func MetaKeyFromKP(kp UserKeyPair) [32]byte {
+	h := sha256.New()
+	h.Write(kp.Private.D.Bytes())
+	h.Write([]byte("mosaic-block-meta"))
+	var key [32]byte
+	copy(key[:], h.Sum(nil))
+	return key
+}
+
+func encryptBlockMeta(m blockMeta, key [32]byte) ([]byte, error) {
+	plain, err := json.Marshal(m)
+	if err != nil {
+		return nil, err
+	}
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, err
+	}
+	return gcm.Seal(nonce, nonce, plain, nil), nil
+}
+
+func decryptBlockMeta(data []byte, key [32]byte) (blockMeta, error) {
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return blockMeta{}, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return blockMeta{}, err
+	}
+	if len(data) < gcm.NonceSize() {
+		return blockMeta{}, fmt.Errorf("ciphertext too short")
+	}
+	nonce, ct := data[:gcm.NonceSize()], data[gcm.NonceSize():]
+	plain, err := gcm.Open(nil, nonce, ct, nil)
+	if err != nil {
+		return blockMeta{}, err
+	}
+	var m blockMeta
+	return m, json.Unmarshal(plain, &m)
 }
 
 // UserChain is a user's append-only operation history.
@@ -201,13 +261,28 @@ func AppendBlock(chain *UserChain, op string, file NetworkFileEntry, newName str
 		prevHash = h
 	}
 
-	b := ChainBlock{
-		Index:     len(chain.Blocks),
-		PrevHash:  prevHash,
-		Op:        op,
-		File:      file,
+	// Encrypt sensitive metadata; zero it out in the stored block so peers only see ContentHash.
+	metaKey := MetaKeyFromKP(kp)
+	encMeta, err := encryptBlockMeta(blockMeta{
+		Name:      file.Name,
+		Size:      file.Size,
+		DateAdded: file.DateAdded,
 		NewName:   newName,
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	}, metaKey)
+	if err != nil {
+		return fmt.Errorf("AppendBlock: encrypt metadata: %w", err)
+	}
+	file.Name = ""
+	file.Size = 0
+	file.DateAdded = ""
+
+	b := ChainBlock{
+		Index:         len(chain.Blocks),
+		PrevHash:      prevHash,
+		Op:            op,
+		File:          file, // ContentHash present; Name/Size/Date zeroed
+		EncryptedMeta: encMeta,
+		Timestamp:     time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := signBlock(&b, kp.Private); err != nil {
 		return err
@@ -217,19 +292,57 @@ func AppendBlock(chain *UserChain, op string, file NetworkFileEntry, newName str
 }
 
 // ChainToFiles replays all blocks to compute the current set of files.
-func ChainToFiles(chain UserChain) []NetworkFileEntry {
+// Pass a non-nil metaKey (from MetaKeyFromKP) to decrypt file names and full metadata;
+// pass nil for non-owner chains — only ContentHash is returned in that case.
+// Backward-compatible: old blocks without EncryptedMeta fall back to reading plaintext File fields.
+func ChainToFiles(chain UserChain, metaKey *[32]byte) []NetworkFileEntry {
+	if metaKey == nil {
+		// Non-owner path: collect content hashes from add blocks only.
+		seen := make(map[string]struct{})
+		var result []NetworkFileEntry
+		for _, b := range chain.Blocks {
+			if b.Op == BlockOpAdd && b.File.ContentHash != "" {
+				if _, ok := seen[b.File.ContentHash]; !ok {
+					seen[b.File.ContentHash] = struct{}{}
+					result = append(result, NetworkFileEntry{ContentHash: b.File.ContentHash})
+				}
+			}
+		}
+		return result
+	}
+
+	// Owner path: decrypt metadata and do full replay.
 	files := make(map[string]NetworkFileEntry)
 	for _, b := range chain.Blocks {
+		var name, dateAdded, newName string
+		var size int
+		if len(b.EncryptedMeta) > 0 {
+			// New encrypted format.
+			meta, err := decryptBlockMeta(b.EncryptedMeta, *metaKey)
+			if err != nil {
+				continue
+			}
+			name, size, dateAdded, newName = meta.Name, meta.Size, meta.DateAdded, meta.NewName
+		} else {
+			// Old plaintext format (backward-compat for existing chains).
+			name = b.File.Name
+			size = b.File.Size
+			dateAdded = b.File.DateAdded
+		}
 		switch b.Op {
 		case BlockOpAdd:
-			files[b.File.Name] = b.File
+			entry := b.File
+			entry.Name = name
+			entry.Size = size
+			entry.DateAdded = dateAdded
+			files[name] = entry
 		case BlockOpRemove:
-			delete(files, b.File.Name)
+			delete(files, name)
 		case BlockOpRename:
-			if f, ok := files[b.File.Name]; ok {
-				delete(files, b.File.Name)
-				f.Name = b.NewName
-				files[b.NewName] = f
+			if f, ok := files[name]; ok {
+				delete(files, name)
+				f.Name = newName
+				files[newName] = f
 			}
 		}
 	}
@@ -302,12 +415,12 @@ func AppendBlockRename(m *NetworkManifest, userID int, oldName, newName string, 
 
 // GetUserFiles returns the current file list for userID by replaying the chain.
 // Returns nil if the user has no chain in the manifest.
-func GetUserFiles(m NetworkManifest, userID int) []NetworkFileEntry {
+func GetUserFiles(m NetworkManifest, userID int, metaKey *[32]byte) []NetworkFileEntry {
 	i := FindChainIndex(m, userID)
 	if i == -1 {
 		return nil
 	}
-	return ChainToFiles(m.Chains[i])
+	return ChainToFiles(m.Chains[i], metaKey)
 }
 
 // UserExistsInNetwork reports whether userID has a chain in the manifest.

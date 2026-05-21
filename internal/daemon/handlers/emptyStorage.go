@@ -47,7 +47,8 @@ func EmptyStorage(req protocol.EmptyStorageRequest) protocol.EmptyStorageRespons
 		}
 	}
 
-	files := filesystem.GetUserFiles(nm, accountID)
+	metaKey := filesystem.MetaKeyFromKP(kp)
+	files := filesystem.GetUserFiles(nm, accountID, &metaKey)
 	if len(files) == 0 {
 		return protocol.EmptyStorageResponse{
 			Success:          true,

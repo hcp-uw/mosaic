@@ -60,7 +60,7 @@ Watches `~/Mosaic/` using `fsnotify` and maps filesystem events to network opera
 | User action in Finder | Events seen | Network result |
 |----------------------|-------------|----------------|
 | Delete cached `notes.md` | `REMOVE notes.md` | Network delete (after 500ms window) |
-| Delete stub `notes.md.mosaic` | `REMOVE notes.md.mosaic` | Remove from local manifest only (file still exists on network) |
+| Delete stub `notes.md.mosaic` | `REMOVE notes.md.mosaic` | Full network delete (same as deleting the cached file) |
 | Rename `notes.md` → `notes_v2.md` | `RENAME notes.md` + `CREATE notes_v2.md` within 500ms | Network rename + meta.json updated |
 | Rename stub `notes.md.mosaic` → `notes_v2.md.mosaic` | `RENAME` + `CREATE` within 500ms | Network rename (same as cached rename) |
 | Move `notes.md` out of `~/Mosaic/` | `RENAME notes.md` + no `CREATE` within 500ms | Network delete |
@@ -74,7 +74,7 @@ Watches `~/Mosaic/` using `fsnotify` and maps filesystem events to network opera
 
 The CREATE-pair check runs before the `Cached` check, so stub renames (`.mosaic` files) are correctly detected as renames rather than stub deletions.
 
-**Stub deletions:** When the user removes a `.mosaic` stub, the file still exists on the network. The watcher removes only the local manifest entry — it does not broadcast a network delete. This matches the behavior of `mos delete file -s` (stub-only remove).
+**Stub deletions:** When the user removes a `.mosaic` stub, the watcher treats it as a full network delete — the same path as deleting a cached file. The network manifest is updated, peers are notified, and all shard holders delete their copies. To remove only the local stub without touching the network, use `mos delete file -s` explicitly.
 
 **Rename + meta.json:** When a rename is detected and confirmed, `RenameFile` handler updates the shard metadata (`meta.json` inside `.shards/<hash>/`) so that `StreamShardToPeer` and `FetchFileBytes` serve the file under the new name.
 

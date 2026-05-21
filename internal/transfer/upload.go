@@ -291,6 +291,28 @@ func sendPlaintextChunks(srcPath string, onlyChunks map[int]struct{}, shardIndex
 		defer quicStream.Close()
 	}
 	usedQUIC := quicErr == nil
+	if !usedQUIC && client.IsForceQUIC() {
+		return fmt.Errorf("QUIC required but unavailable for shard %d → %s: %w", shardIndex, shortPeer(peerID), quicErr)
+	}
+
+	// writeQUICDone appends a ShardStreamDone JSON frame to the QUIC stream as
+	// the very last frame before Close(). Because QUIC guarantees in-order
+	// delivery within a stream, the receiver always processes this AFTER every
+	// chunk frame — eliminating the UDP/QUIC timing race where a UDP
+	// ShardStreamDone arrives before the QUIC chunk data.
+	writeQUICDone := func() {
+		if !usedQUIC {
+			return
+		}
+		doneMsg := api.NewShardStreamDoneMessage(client.GetID(), api.ShardStreamDoneData{
+			FileHash:    fileHash,
+			ShardIndex:  shardIndex,
+			TotalChunks: totalChunks,
+		})
+		if doneData, serErr := doneMsg.Serialize(); serErr == nil {
+			sendFrameViaQUIC(quicStream, doneData) //nolint:errcheck — best-effort; UDP ShardStreamDone is also sent
+		}
+	}
 
 	sendOne := func(plaintext []byte, chunkIndex int) error {
 		encrypted, err := encryptChunk(key, plaintext)
@@ -350,6 +372,7 @@ func sendPlaintextChunks(srcPath string, onlyChunks map[int]struct{}, shardIndex
 				return fmt.Errorf("read shard %d chunk %d: %w", shardIndex, chunkIndex, err)
 			}
 		}
+		writeQUICDone()
 		return nil
 	}
 
@@ -362,6 +385,7 @@ func sendPlaintextChunks(srcPath string, onlyChunks map[int]struct{}, shardIndex
 			}
 		}
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			writeQUICDone()
 			return nil
 		}
 		if err != nil {

@@ -103,6 +103,10 @@ func runClient(serverAddr string, errCh chan<- error) {
 	resetJoinSyncState()
 
 	config := p2p.DefaultClientConfig(serverAddr, shared.DefaultTURNServer, shared.TURNUsername, shared.TURNPassword)
+	if t := os.Getenv("MOSAIC_TRANSPORT"); t == "quic" || t == "udp" {
+		config.ForceTransport = t
+		fmt.Printf("[P2P] Transport locked to %s (MOSAIC_TRANSPORT)\n", t)
+	}
 	client, err := p2p.NewClient(config)
 	if err != nil {
 		log.Printf("Failed to create P2P client: %v", err)
@@ -298,7 +302,13 @@ func handleManifestSync(mosaicDir string, msg *api.Message) {
 	if idx == -1 {
 		return // no files for this user yet
 	}
-	files := filesystem.ChainToFiles(merged.Chains[idx])
+	kp, kpErr := filesystem.LoadOrCreateUserKey(shared.UserKeyPath())
+	var chainMetaKey *[32]byte
+	if kpErr == nil {
+		k := filesystem.MetaKeyFromKP(kp)
+		chainMetaKey = &k
+	}
+	files := filesystem.ChainToFiles(merged.Chains[idx], chainMetaKey)
 
 	// Build a set of currently-live names so we can detect deletions.
 	networkNames := make(map[string]bool, len(files))
@@ -657,7 +667,7 @@ func handleShardResponse(msg *api.Message) {
 			return
 		}
 		for _, chain := range nm.Chains {
-			for _, f := range filesystem.ChainToFiles(chain) {
+			for _, f := range filesystem.ChainToFiles(chain, nil) {
 				if f.ContentHash == d.FileHash {
 					transfer.StoreShardData(d.FileHash, f.Name, f.Size, d.ShardIndex,
 						transfer.DataShards, transfer.TotalShards, d.Data)

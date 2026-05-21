@@ -107,6 +107,28 @@ func streamEncryptedChunks(shardPath string, meta *ShardMeta, shardIndex int, on
 		defer quicStream.Close()
 	}
 	usedQUIC := quicErr == nil
+	if !usedQUIC && client.IsForceQUIC() {
+		fmt.Printf("[Transfer] streamEncryptedChunks: QUIC required but unavailable for shard %d → %s: %v\n", shardIndex, shortPeer(peerID), quicErr)
+		return 0, false
+	}
+
+	// writeQUICDone appends a ShardStreamDone JSON frame as the last frame on
+	// the QUIC stream. QUIC guarantees in-order delivery within a stream, so
+	// the receiver always processes this AFTER every chunk frame — eliminating
+	// the timing race where a UDP ShardStreamDone arrives before QUIC chunk data.
+	writeQUICDone := func() {
+		if !usedQUIC {
+			return
+		}
+		doneMsg := api.NewShardStreamDoneMessage(client.GetID(), api.ShardStreamDoneData{
+			FileHash:    meta.FileHash,
+			ShardIndex:  shardIndex,
+			TotalChunks: totalChunks,
+		})
+		if doneData, serErr := doneMsg.Serialize(); serErr == nil {
+			sendFrameViaQUIC(quicStream, doneData) //nolint:errcheck — best-effort; UDP ShardStreamDone is also sent
+		}
+	}
 
 	for chunkIdx := 0; chunkIdx < totalChunks; chunkIdx++ {
 		var lenBuf [4]byte
@@ -158,6 +180,7 @@ func streamEncryptedChunks(shardPath string, meta *ShardMeta, shardIndex int, on
 			}
 		}
 	}
+	writeQUICDone()
 	return totalChunks, true
 }
 
@@ -245,10 +268,15 @@ func HandleShardStreamDone(msg *api.Message, client *p2p.Client) {
 		fmt.Sprintf("shard%d_%s.dat", d.ShardIndex, d.FileHash))
 	key := fmt.Sprintf("%s:%d", d.FileHash, d.ShardIndex)
 
-	// Poll up to 200 ms for QUIC frames that are still in-flight through the
+	// Poll up to 2 s for QUIC frames that are still in-flight through the
 	// networking stack. Each iteration checks whether the shard is already
 	// complete (on disk, fully assembled, or being finalized) so we ack immediately.
-	deadline := time.Now().Add(200 * time.Millisecond)
+	// 2 s rather than the old 200 ms because the QUIC in-stream done sentinel
+	// arrives in-order after all chunk frames, but the goroutines that store
+	// chunks (go HandleBinaryShardChunk) are scheduled asynchronously — on a
+	// busy receiver the last-chunk goroutine can lag the done-sentinel goroutine
+	// by more than 200 ms.
+	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, statErr := os.Stat(shardPath); statErr == nil {
 			sendAck(nil)

@@ -34,7 +34,12 @@ func StatusAccount(req protocol.StatusAccountRequest) protocol.StatusAccountResp
 		}
 	}
 
-	files := filesystem.GetUserFiles(nm, accountID)
+	kp, err := filesystem.LoadOrCreateUserKey(shared.UserKeyPath())
+	if err != nil {
+		return protocol.StatusAccountResponse{Success: false, Details: fmt.Sprintf("could not load user key: %v", err), Username: helpers.GetUsername()}
+	}
+	metaKey := filesystem.MetaKeyFromKP(kp)
+	files := filesystem.GetUserFiles(nm, accountID, &metaKey)
 
 	// Collect unique node IDs that hold at least one shard for any file this account owns.
 	seen := make(map[string]struct{})

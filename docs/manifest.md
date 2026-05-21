@@ -19,7 +19,7 @@ There are two separate manifests with different scopes and different security pr
 | **Scope** | Your files, on this node | All users, all nodes |
 | **Format** | Plaintext JSON | Blockchain chains, encrypted at rest |
 | **Location** | `~/Mosaic/.mosaic-manifest.json` | `~/Mosaic/.mosaic-network-manifest` |
-| **Who can read it** | Anyone with disk access | Any peer (file names are visible; content is not) |
+| **Who can read it** | Anyone with disk access | Any peer (only content hashes; file names encrypted per-block) |
 | **Tamper protection** | None (local-only) | Per-block ECDSA signatures + hash chain |
 | **Purpose** | Fast local lookups, Finder integration | P2P sync, cross-node access, public permissionless network |
 
@@ -379,7 +379,7 @@ Both key files are created with `0600` permissions — readable only by your use
      → AES-GCM encrypt updated manifest JSON
      → write atomically to .mosaic-network-manifest
 7. BroadcastNetworkManifest
-     → ManifestToJSON (outer AES removed, chain data stays plaintext)
+     → ManifestToJSON (outer AES removed; sensitive block fields remain AES-256-GCM encrypted)
      → SendToAllPeers via UDP
 8. WriteStub(mosaicDir, "notes.md", size, nodeID, contentHash)
      → creates notes.md.mosaic
@@ -500,5 +500,5 @@ If no holders are recorded for a shard, the node cannot request it — the reque
 
 - **Targeted shard routing on upload** — `UploadFile` currently uses `SendRawToAllPeers`, which sends all 14 shards to every peer. The correct behaviour is `shard[i] → peers[i % numPeers]`. Redistribution on peer join already uses the correct routing rule; upload-time routing is the remaining gap.
 - **Proof of Storage** — the `Tapestry` protobuf definition exists in `internal/tapestry/` and is designed for this. It will allow the network to verify that storage nodes actually hold the shards they claim to hold.
-- **File name privacy for public networks** — chain blocks currently store file names in plaintext. This is suitable for a public permissionless network but means any peer can see your file names. Per-block ECIES encryption of the file metadata field can be layered on top without changing the chain structure.
+- **Chain compaction (metadata)** — because sensitive metadata (`Name`, `Size`, `DateAdded`) is now encrypted per-block, old plaintext blocks that pre-date the encryption change are still readable in backward-compat mode. A migration step to re-encrypt old blocks under the owner's key would close this gap for long-lived chains.
 - **Chain compaction** — long-lived chains with many add/remove cycles accumulate dead blocks. A compaction step (folding the chain to a single "add" block per active file) would be useful once chain length becomes a concern.

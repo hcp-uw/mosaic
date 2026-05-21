@@ -190,7 +190,7 @@ systemctl restart ssh
 Once the STUN server is running, clients connect with:
 
 ```bash
-mos join <server-ip>:3478
+mos join network
 ```
 
 ---
