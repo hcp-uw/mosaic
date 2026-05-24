@@ -5,6 +5,7 @@ go 1.25.1
 require github.com/klauspost/reedsolomon v1.12.5
 
 require (
+	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	google.golang.org/protobuf v1.36.10
 	golang.org/x/sys v0.37.0 // indirect
