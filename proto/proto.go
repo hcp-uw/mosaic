@@ -9,7 +9,10 @@
 // are left for the caller to handle however it likes.
 package proto
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // Message types.
 const (
@@ -21,7 +24,35 @@ const (
 const (
 	MethodStoreShard    = "store_shard"
 	MethodRetrieveShard = "retrieve_shard"
+	MethodPing          = "ping" // node discovery: responders reveal their address
 )
+
+// RoutePrefix marks a line the relay should deliver to a single client (by
+// address) instead of broadcasting. The format is:
+//
+//	MOSAIC-TO <address> <payload>
+//
+// The recipient still receives the payload prefixed with the sender's address,
+// exactly like a broadcast line.
+const RoutePrefix = "MOSAIC-TO "
+
+// Route wraps line so the relay delivers it only to target.
+func Route(target, line string) string {
+	return RoutePrefix + target + " " + line
+}
+
+// SplitRoute reverses Route. ok is false for a normal (broadcast) line.
+func SplitRoute(line string) (target, payload string, ok bool) {
+	if !strings.HasPrefix(line, RoutePrefix) {
+		return "", "", false
+	}
+	rest := line[len(RoutePrefix):]
+	i := strings.IndexByte(rest, ' ')
+	if i < 0 {
+		return "", "", false
+	}
+	return rest[:i], rest[i+1:], true
+}
 
 // Message is a single RPC envelope, serialized as one newline-free JSON line.
 //
@@ -33,6 +64,16 @@ type Message struct {
 	Method string          `json:"method,omitempty"`
 	Params json.RawMessage `json:"params,omitempty"`
 	Result json.RawMessage `json:"result,omitempty"`
+
+	// From is the sender's relay address, filled in on receipt from the relay's
+	// line prefix. It is never serialized.
+	From string `json:"-"`
+}
+
+// PingResult is the reply to a ping; the caller identifies the responding node
+// by the address the relay attaches, so the body just confirms liveness.
+type PingResult struct {
+	OK bool `json:"ok"`
 }
 
 // StoreShardParams are the arguments to store_shard.

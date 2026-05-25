@@ -61,16 +61,26 @@ func (c *client) shardFile(path string) error {
 	sum := sha256.Sum256(data)
 	digest := hex.EncodeToString(sum[:])
 
+	nodes, err := c.discoverNodes(discoveryTimeout)
+	if err != nil {
+		return fmt.Errorf("discover nodes: %w", err)
+	}
+	if len(nodes) == 0 {
+		return fmt.Errorf("no other nodes connected to store shards on; aborting")
+	}
+	log.Printf("client: distributing %d shards across %d node(s)", numShards, len(nodes))
+
 	chunks := splitN(data, numShards)
 	addrs := make([]string, numShards)
 	for i, chunk := range chunks {
 		addr := fmt.Sprintf("%s.%02d", digest, i)
-		n, err := c.storeShardNet(addr, chunk, rpcTimeout)
+		target := nodes[i%len(nodes)] // round-robin: each shard to one node
+		ok, err := c.storeShardNet(target, addr, chunk, rpcTimeout)
 		if err != nil {
-			return fmt.Errorf("store shard %d: %w", i, err)
+			return fmt.Errorf("store shard %d on %s: %w", i, target, err)
 		}
-		if n == 0 {
-			return fmt.Errorf("shard %d (%s) was not stored by any peer; aborting (is anyone else connected?)", i, addr)
+		if !ok {
+			return fmt.Errorf("shard %d (%s) was not confirmed stored by %s; aborting", i, addr, target)
 		}
 		addrs[i] = addr
 	}

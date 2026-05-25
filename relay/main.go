@@ -1,8 +1,10 @@
 // Command relay is a message relay server.
 //
-// Clients connect over TCP. Every line a client sends is forwarded to all other
-// connected clients, prefixed with the sender's address. Clients never connect
-// to each other directly — the relay is the only thing they talk to.
+// Clients connect over TCP. By default every line a client sends is forwarded to
+// all other connected clients, prefixed with the sender's address. A line with
+// the proto.RoutePrefix header is instead delivered to a single addressed
+// client. Clients never connect to each other directly — the relay is the only
+// thing they talk to.
 package main
 
 import (
@@ -12,6 +14,8 @@ import (
 	"log"
 	"net"
 	"sync"
+
+	"github.com/hcp-uw/mosaic/proto"
 )
 
 // hub tracks connected clients and fans out messages between them.
@@ -50,6 +54,20 @@ func (h *hub) broadcast(from, line string) {
 	}
 }
 
+// sendTo delivers line to a single client by address.
+func (h *hub) sendTo(from, target, line string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	conn, ok := h.clients[target]
+	if !ok {
+		log.Printf("relay: %q -> %q: no such client", from, target)
+		return
+	}
+	if _, err := fmt.Fprintf(conn, "%s: %s\n", from, line); err != nil {
+		log.Printf("relay: failed sending to %s: %v", target, err)
+	}
+}
+
 func (h *hub) handle(conn net.Conn) {
 	defer conn.Close()
 	r := bufio.NewReader(conn)
@@ -70,6 +88,11 @@ func (h *hub) handle(conn net.Conn) {
 		}
 		line = trimLine(line)
 		if line == "" {
+			continue
+		}
+		if target, payload, ok := proto.SplitRoute(line); ok {
+			log.Printf("relay: %q -> %q: %s", addr, target, payload)
+			h.sendTo(addr, target, payload)
 			continue
 		}
 		log.Printf("relay: %q -> all: %s", addr, line)

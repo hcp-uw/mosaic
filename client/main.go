@@ -24,6 +24,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -78,6 +79,7 @@ func (c *client) receive() {
 			fmt.Println(raw) // plain chat text
 			continue
 		}
+		msg.From = sender
 		switch msg.Type {
 		case proto.TypeRequest:
 			c.handleRequest(msg)
@@ -104,8 +106,9 @@ func (c *client) routeResponse(sender string, msg *proto.Message) {
 
 // call sends a request and collects responses until stop returns true for one
 // of them or the timeout elapses. stop may be nil to always wait the full
-// timeout (useful when every peer is expected to answer).
-func (c *client) call(method string, params any, timeout time.Duration, stop func(*proto.Message) bool) ([]*proto.Message, error) {
+// timeout (useful when every node is expected to answer). If to is non-empty the
+// request is routed to that single node; otherwise it is broadcast.
+func (c *client) call(to, method string, params any, timeout time.Duration, stop func(*proto.Message) bool) ([]*proto.Message, error) {
 	pb, err := json.Marshal(params)
 	if err != nil {
 		return nil, err
@@ -125,6 +128,9 @@ func (c *client) call(method string, params any, timeout time.Duration, stop fun
 	line, err := proto.Encode(&proto.Message{Type: proto.TypeRequest, ID: id, Method: method, Params: pb})
 	if err != nil {
 		return nil, err
+	}
+	if to != "" {
+		line = proto.Route(to, line)
 	}
 	if err := c.send(line); err != nil {
 		return nil, err
@@ -163,7 +169,14 @@ func (c *client) handleRequest(req *proto.Message) {
 			c.respond(req, proto.RetrieveShardResult{Found: false, Error: "bad params: " + err.Error()})
 			return
 		}
-		c.respond(req, c.retrieveShard(p))
+		r := c.retrieveShard(p)
+		// Stay silent when we don't hold the shard: with shards distributed across
+		// nodes, only the one holder should answer.
+		if r.Found || r.Error != "" {
+			c.respond(req, r)
+		}
+	case proto.MethodPing:
+		c.respond(req, proto.PingResult{OK: true})
 	default:
 		log.Printf("client: ignoring unknown method %q", req.Method)
 	}
@@ -181,6 +194,11 @@ func (c *client) respond(req *proto.Message, result any) {
 	if err != nil {
 		log.Printf("client: encode response: %v", err)
 		return
+	}
+	// Direct the reply back to the caller when we know who asked, so responses
+	// don't fan out to every node.
+	if req.From != "" {
+		line = proto.Route(req.From, line)
 	}
 	if err := c.send(line); err != nil {
 		log.Printf("client: send response: %v", err)
@@ -211,37 +229,34 @@ func (c *client) retrieveShard(p proto.RetrieveShardParams) proto.RetrieveShardR
 	return proto.RetrieveShardResult{Found: true, Data: data}
 }
 
-// storeShardNet stores one shard across the network, returning how many peers
-// confirmed success.
-func (c *client) storeShardNet(address string, data []byte, timeout time.Duration) (int, error) {
-	// Stop as soon as one peer confirms: every connected peer still receives the
-	// broadcast and stores the shard, we just don't wait for all of them.
+// storeShardNet stores one shard on a specific node (by address) and reports
+// whether that node confirmed success.
+func (c *client) storeShardNet(node, address string, data []byte, timeout time.Duration) (bool, error) {
 	ok := func(m *proto.Message) bool {
 		var r proto.StoreShardResult
 		return json.Unmarshal(m.Result, &r) == nil && r.Success
 	}
-	resps, err := c.call(proto.MethodStoreShard, proto.StoreShardParams{Address: address, Data: data}, timeout, ok)
+	resps, err := c.call(node, proto.MethodStoreShard, proto.StoreShardParams{Address: address, Data: data}, timeout, ok)
 	if err != nil {
-		return 0, err
+		return false, err
 	}
-	n := 0
 	for _, m := range resps {
 		var r proto.StoreShardResult
 		if json.Unmarshal(m.Result, &r) == nil && r.Success {
-			n++
+			return true, nil
 		}
 	}
-	return n, nil
+	return false, nil
 }
 
-// retrieveShardNet fetches one shard from the network; the first peer that holds
-// it wins.
+// retrieveShardNet fetches one shard from the network; the node that holds it
+// answers (others stay silent).
 func (c *client) retrieveShardNet(address string, timeout time.Duration) ([]byte, error) {
 	found := func(m *proto.Message) bool {
 		var r proto.RetrieveShardResult
 		return json.Unmarshal(m.Result, &r) == nil && r.Found
 	}
-	resps, err := c.call(proto.MethodRetrieveShard, proto.RetrieveShardParams{Address: address}, timeout, found)
+	resps, err := c.call("", proto.MethodRetrieveShard, proto.RetrieveShardParams{Address: address}, timeout, found)
 	if err != nil {
 		return nil, err
 	}
@@ -254,6 +269,25 @@ func (c *client) retrieveShardNet(address string, timeout time.Duration) ([]byte
 	return nil, fmt.Errorf("shard %q not found on the network", address)
 }
 
+// discoverNodes pings the network and returns the addresses of the other nodes
+// that answered within timeout.
+func (c *client) discoverNodes(timeout time.Duration) ([]string, error) {
+	resps, err := c.call("", proto.MethodPing, struct{}{}, timeout, nil)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool)
+	var nodes []string
+	for _, m := range resps {
+		if m.From != "" && !seen[m.From] {
+			seen[m.From] = true
+			nodes = append(nodes, m.From)
+		}
+	}
+	sort.Strings(nodes)
+	return nodes, nil
+}
+
 // handleInput interprets one line of interactive input.
 func (c *client) handleInput(line string) {
 	fields := strings.Fields(line)
@@ -261,18 +295,36 @@ func (c *client) handleInput(line string) {
 		return
 	}
 	switch fields[0] {
+	case "nodes":
+		go func() {
+			nodes, err := c.discoverNodes(discoveryTimeout)
+			if err != nil {
+				log.Printf("client: nodes: %v", err)
+				return
+			}
+			fmt.Printf("[nodes] %d connected (this one + %d other):\n", len(nodes)+1, len(nodes))
+			for _, n := range nodes {
+				fmt.Printf("  - %s\n", n)
+			}
+		}()
 	case "store_shard":
 		if len(fields) != 3 {
 			fmt.Println("usage: store_shard <address> <data>")
 			return
 		}
 		go func() {
-			n, err := c.storeShardNet(fields[1], []byte(fields[2]), rpcTimeout)
+			nodes, err := c.discoverNodes(discoveryTimeout)
+			if err != nil || len(nodes) == 0 {
+				fmt.Printf("[store_shard] no other nodes to store on\n")
+				return
+			}
+			target := nodes[0]
+			ok, err := c.storeShardNet(target, fields[1], []byte(fields[2]), rpcTimeout)
 			if err != nil {
 				log.Printf("client: store_shard: %v", err)
 				return
 			}
-			fmt.Printf("[store_shard] %q stored on %d peer(s)\n", fields[1], n)
+			fmt.Printf("[store_shard] %q stored on %s: %v\n", fields[1], target, ok)
 		}()
 	case "retrieve_shard":
 		if len(fields) != 2 {
@@ -305,6 +357,11 @@ func splitPrefix(line string) (sender, payload string) {
 
 // rpcTimeout is how long calls wait for responses from the network.
 var rpcTimeout = 4 * time.Second
+
+// discoveryTimeout is the (shorter) window for collecting ping responses. We
+// can't know how many nodes to expect, so discovery always waits this long;
+// pings are cheap and answered fast, so it stays short.
+var discoveryTimeout = 1500 * time.Millisecond
 
 func main() {
 	relay := flag.String("relay", "127.0.0.1:9000", "relay address host:port")
