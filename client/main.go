@@ -1,9 +1,9 @@
 // Command client connects to a relay and exchanges messages with other clients.
 //
-// It registers by sending its name as the first line, then prints anything the
-// relay forwards to it. In interactive mode it also sends each line typed on
-// stdin. For scripted testing, pass -msg to send a single message and -wait to
-// listen for incoming messages for a fixed duration before exiting.
+// It prints anything the relay forwards to it. In interactive mode it also
+// sends each line typed on stdin. For scripted testing, pass -msg to send a
+// single message and -wait to listen for incoming messages for a fixed
+// duration before exiting.
 package main
 
 import (
@@ -18,7 +18,6 @@ import (
 
 func main() {
 	relay := flag.String("relay", "127.0.0.1:9000", "relay address host:port")
-	name := flag.String("name", "client", "this client's name")
 	msg := flag.String("msg", "", "optional message to send on connect")
 	wait := flag.Duration("wait", 0, "if >0, listen this long then exit instead of reading stdin")
 	flag.Parse()
@@ -29,11 +28,7 @@ func main() {
 	}
 	defer conn.Close()
 
-	// Register by sending our name as the first line.
-	if _, err := fmt.Fprintf(conn, "%s\n", *name); err != nil {
-		log.Fatalf("client: register: %v", err)
-	}
-	log.Printf("client: %q connected to relay %s", *name, *relay)
+	log.Printf("client: connected to relay %s", *relay)
 
 	// Print everything the relay forwards to us.
 	go func() {
