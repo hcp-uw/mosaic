@@ -1,6 +1,7 @@
-// Package shardstore persists shard data on the local filesystem under
-// ~/Mosaic/.shards. Each shard is one file; the address is base64url-encoded to
-// form a filesystem-safe filename, so any address string can be used as a key.
+// Package shardstore persists shard data on the local filesystem. Each shard is
+// one file inside a ".shards" directory under a configurable base directory
+// (~/Mosaic by default); the address is base64url-encoded to form a
+// filesystem-safe filename, so any address string can be used as a key.
 package shardstore
 
 import (
@@ -9,43 +10,44 @@ import (
 	"path/filepath"
 )
 
-// Dir returns the shard storage directory (~/Mosaic/.shards), creating it if
-// needed.
-func Dir() (string, error) {
+// Store persists shards under Dir.
+type Store struct {
+	Dir string // the .shards directory
+}
+
+// DefaultBase returns the default Mosaic base directory, ~/Mosaic.
+func DefaultBase() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(home, "Mosaic", ".shards")
+	return filepath.Join(home, "Mosaic"), nil
+}
+
+// New returns a Store rooted at base/.shards, creating the directory.
+func New(base string) (*Store, error) {
+	dir := filepath.Join(base, ".shards")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", err
+		return nil, err
 	}
-	return dir, nil
+	return &Store{Dir: dir}, nil
 }
 
-// pathFor maps an address to its on-disk file path within dir.
-func pathFor(dir, address string) string {
+// pathFor maps an address to its on-disk file path.
+func (s *Store) pathFor(address string) string {
 	name := base64.RawURLEncoding.EncodeToString([]byte(address))
-	return filepath.Join(dir, name)
+	return filepath.Join(s.Dir, name)
 }
 
-// Store writes data for address, overwriting any existing shard at that address.
-func Store(address string, data []byte) error {
-	dir, err := Dir()
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(pathFor(dir, address), data, 0o600)
+// Put writes data for address, overwriting any existing shard at that address.
+func (s *Store) Put(address string, data []byte) error {
+	return os.WriteFile(s.pathFor(address), data, 0o600)
 }
 
-// Retrieve returns the data stored for address. found is false (with a nil
-// error) when no shard exists for that address.
-func Retrieve(address string) (data []byte, found bool, err error) {
-	dir, err := Dir()
-	if err != nil {
-		return nil, false, err
-	}
-	b, err := os.ReadFile(pathFor(dir, address))
+// Get returns the data stored for address. found is false (with a nil error)
+// when no shard exists for that address.
+func (s *Store) Get(address string) (data []byte, found bool, err error) {
+	b, err := os.ReadFile(s.pathFor(address))
 	if os.IsNotExist(err) {
 		return nil, false, nil
 	}

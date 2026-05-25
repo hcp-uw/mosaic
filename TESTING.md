@@ -119,3 +119,52 @@ go run ./client -relay 45.32.226.71:9000 -wait 15s
 # sender
 go run ./client -relay 45.32.226.71:9000 -msg "hello via relay" -wait 3s
 ```
+
+## 5. File sharding (drop-to-shard, double-click-to-open)
+
+A file dropped into `~/Mosaic` is split into 14 shards, stored across the other
+clients, and replaced by a small `<name>.mosaic` stub (a JSON manifest). Opening
+the stub downloads the shards and reconstructs the original file.
+
+Shards live only on the *other* clients (the relay never echoes to the sender),
+so this needs at least one other client connected to hold them — e.g. node2.
+
+**Keep a peer connected to hold shards** (on node2):
+
+```sh
+ssh linuxuser@149.28.13.244 'cd ~/mosaic && go run ./client -relay 45.32.226.71:9000 -watch'
+```
+
+**Run the watcher on this computer** so files dropped into `~/Mosaic` get sharded:
+
+```sh
+go run ./client -relay 45.32.226.71:9000 -watch
+```
+
+Now drop a file into `~/Mosaic`; it becomes `<name>.mosaic`. To get it back:
+
+```sh
+go run ./client -relay 45.32.226.71:9000 -rehydrate ~/Mosaic/<name>.mosaic -open
+```
+
+### Double-click support (macOS)
+
+Install an app that opens `.mosaic` files on double-click:
+
+```sh
+deploy/install-mosaic-app.sh 45.32.226.71:9000
+```
+
+This builds the client, creates `~/Applications/Mosaic.app` registered as the
+handler for `.mosaic`, and points it at the given relay. Double-clicking a
+`.mosaic` stub then downloads and opens the original. (First time, you may need
+to right-click → Open With → Mosaic → "Always Open With".)
+
+### Reset file-sharing state
+
+In addition to clearing `~/Mosaic/.shards` (above), remove any stubs/files left
+in `~/Mosaic` between runs:
+
+```sh
+rm -f ~/Mosaic/*.mosaic
+```

@@ -1,13 +1,16 @@
-// Command client connects to a relay and exchanges messages with other clients.
+// Command client connects to a relay and participates in the Mosaic network.
 //
 // On top of the relay's plaintext transport it speaks the RPC layer defined in
-// package proto: typing "store_shard <address> <data>" sends a request to every
-// other client, each of which runs the method and returns a response. Lines
-// that aren't commands are forwarded as plain chat text.
+// package proto: store_shard and retrieve_shard let clients persist and fetch
+// shard data across the network.
 //
-// In interactive mode it reads commands from stdin. For scripted testing, pass
-// -msg to send a single line and -wait to listen for incoming messages for a
-// fixed duration before exiting.
+// Modes:
+//
+//	-watch              watch the Mosaic dir; shard any file dropped in into a
+//	                    .mosaic stub stored across the network.
+//	-rehydrate <stub>   reconstruct a .mosaic stub from the network and exit.
+//	(default)           interactive: type commands or chat lines.
+//	-msg / -wait        scripted single-message test mode.
 package main
 
 import (
@@ -27,22 +30,22 @@ import (
 	"github.com/hcp-uw/mosaic/shardstore"
 )
 
-// client wraps a relay connection with the bookkeeping the RPC layer needs:
-// serialized writes, a request-ID counter, and the set of requests we originated
-// (so we only surface responses to our own calls).
+// client wraps a relay connection with the RPC bookkeeping: serialized writes, a
+// request-ID counter, response channels keyed by request ID, and the local
+// shard store this node serves to the network.
 type client struct {
-	conn net.Conn
+	conn  net.Conn
+	store *shardstore.Store
 
 	writeMu sync.Mutex
+	seq     uint64
 
-	seq uint64
-
-	pendingMu sync.Mutex
-	pending   map[string]bool
+	mu      sync.Mutex
+	waiters map[string]chan *proto.Message
 }
 
-func newClient(conn net.Conn) *client {
-	return &client{conn: conn, pending: make(map[string]bool)}
+func newClient(conn net.Conn, store *shardstore.Store) *client {
+	return &client{conn: conn, store: store, waiters: make(map[string]chan *proto.Message)}
 }
 
 // send writes a single line to the relay, guarding against interleaved writes
@@ -58,23 +61,12 @@ func (c *client) nextID() string {
 	return fmt.Sprintf("%d-%d", os.Getpid(), atomic.AddUint64(&c.seq, 1))
 }
 
-func (c *client) markPending(id string) {
-	c.pendingMu.Lock()
-	c.pending[id] = true
-	c.pendingMu.Unlock()
-}
-
-func (c *client) isPending(id string) bool {
-	c.pendingMu.Lock()
-	defer c.pendingMu.Unlock()
-	return c.pending[id]
-}
-
 // receive reads forwarded lines and dispatches them: RPC requests are handled
-// and answered, responses to our own calls are printed, and anything that isn't
-// an RPC envelope is printed as plain text.
+// and answered, responses are routed to any waiting caller, and anything that
+// isn't an RPC envelope is printed as plain text.
 func (c *client) receive() {
 	sc := bufio.NewScanner(c.conn)
+	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024) // shards can be large
 	for sc.Scan() {
 		raw := sc.Text()
 		sender, payload := splitPrefix(raw)
@@ -87,12 +79,72 @@ func (c *client) receive() {
 		case proto.TypeRequest:
 			c.handleRequest(msg)
 		case proto.TypeResponse:
-			c.handleResponse(sender, msg)
+			c.routeResponse(sender, msg)
 		}
 	}
 }
 
-// handleRequest runs the requested method and sends back a response.
+// routeResponse delivers a response to the caller waiting on its request ID, if
+// any. Responses to other clients' calls (also forwarded to us) are dropped.
+func (c *client) routeResponse(sender string, msg *proto.Message) {
+	c.mu.Lock()
+	ch := c.waiters[msg.ID]
+	c.mu.Unlock()
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- msg:
+	default: // caller's buffer full; drop extra responses
+	}
+}
+
+// call sends a request and collects responses until stop returns true for one
+// of them or the timeout elapses. stop may be nil to always wait the full
+// timeout (useful when every peer is expected to answer).
+func (c *client) call(method string, params any, timeout time.Duration, stop func(*proto.Message) bool) ([]*proto.Message, error) {
+	pb, err := json.Marshal(params)
+	if err != nil {
+		return nil, err
+	}
+	id := c.nextID()
+	ch := make(chan *proto.Message, 32)
+
+	c.mu.Lock()
+	c.waiters[id] = ch
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		delete(c.waiters, id)
+		c.mu.Unlock()
+	}()
+
+	line, err := proto.Encode(&proto.Message{Type: proto.TypeRequest, ID: id, Method: method, Params: pb})
+	if err != nil {
+		return nil, err
+	}
+	if err := c.send(line); err != nil {
+		return nil, err
+	}
+
+	var out []*proto.Message
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		select {
+		case m := <-ch:
+			out = append(out, m)
+			if stop != nil && stop(m) {
+				return out, nil
+			}
+		case <-timer.C:
+			return out, nil
+		}
+	}
+}
+
+// handleRequest runs the requested method against the local store and sends back
+// a response.
 func (c *client) handleRequest(req *proto.Message) {
 	switch req.Method {
 	case proto.MethodStoreShard:
@@ -101,14 +153,14 @@ func (c *client) handleRequest(req *proto.Message) {
 			c.respond(req, proto.StoreShardResult{Success: false, Error: "bad params: " + err.Error()})
 			return
 		}
-		c.respond(req, storeShard(p))
+		c.respond(req, c.storeShard(p))
 	case proto.MethodRetrieveShard:
 		var p proto.RetrieveShardParams
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			c.respond(req, proto.RetrieveShardResult{Found: false, Error: "bad params: " + err.Error()})
 			return
 		}
-		c.respond(req, retrieveShard(p))
+		c.respond(req, c.retrieveShard(p))
 	default:
 		log.Printf("client: ignoring unknown method %q", req.Method)
 	}
@@ -122,12 +174,7 @@ func (c *client) respond(req *proto.Message, result any) {
 		log.Printf("client: marshal result: %v", err)
 		return
 	}
-	line, err := proto.Encode(&proto.Message{
-		Type:   proto.TypeResponse,
-		ID:     req.ID,
-		Method: req.Method,
-		Result: rb,
-	})
+	line, err := proto.Encode(&proto.Message{Type: proto.TypeResponse, ID: req.ID, Method: req.Method, Result: rb})
 	if err != nil {
 		log.Printf("client: encode response: %v", err)
 		return
@@ -137,84 +184,74 @@ func (c *client) respond(req *proto.Message, result any) {
 	}
 }
 
-// handleResponse prints responses to requests this client originated.
-func (c *client) handleResponse(sender string, msg *proto.Message) {
-	if !c.isPending(msg.ID) {
-		return // a response to someone else's call, forwarded to us
+// storeShard is the local handler for store_shard: it persists the shard.
+func (c *client) storeShard(p proto.StoreShardParams) proto.StoreShardResult {
+	if err := c.store.Put(p.Address, p.Data); err != nil {
+		log.Printf("client: store_shard(%q): %v", p.Address, err)
+		return proto.StoreShardResult{Success: false, Error: err.Error()}
 	}
-	switch msg.Method {
-	case proto.MethodStoreShard:
+	log.Printf("client: stored shard %q (%d bytes)", p.Address, len(p.Data))
+	return proto.StoreShardResult{Success: true}
+}
+
+// retrieveShard is the local handler for retrieve_shard: it reads the shard back.
+func (c *client) retrieveShard(p proto.RetrieveShardParams) proto.RetrieveShardResult {
+	data, found, err := c.store.Get(p.Address)
+	if err != nil {
+		log.Printf("client: retrieve_shard(%q): %v", p.Address, err)
+		return proto.RetrieveShardResult{Found: false, Error: err.Error()}
+	}
+	if !found {
+		return proto.RetrieveShardResult{Found: false}
+	}
+	log.Printf("client: served shard %q (%d bytes)", p.Address, len(data))
+	return proto.RetrieveShardResult{Found: true, Data: data}
+}
+
+// storeShardNet stores one shard across the network, returning how many peers
+// confirmed success.
+func (c *client) storeShardNet(address string, data []byte, timeout time.Duration) (int, error) {
+	// Stop as soon as one peer confirms: every connected peer still receives the
+	// broadcast and stores the shard, we just don't wait for all of them.
+	ok := func(m *proto.Message) bool {
 		var r proto.StoreShardResult
-		if err := json.Unmarshal(msg.Result, &r); err != nil {
-			log.Printf("client: bad store_shard result from %s: %v", sender, err)
-			return
+		return json.Unmarshal(m.Result, &r) == nil && r.Success
+	}
+	resps, err := c.call(proto.MethodStoreShard, proto.StoreShardParams{Address: address, Data: data}, timeout, ok)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, m := range resps {
+		var r proto.StoreShardResult
+		if json.Unmarshal(m.Result, &r) == nil && r.Success {
+			n++
 		}
-		if r.Success {
-			fmt.Printf("[store_shard] %s: success\n", sender)
-		} else {
-			fmt.Printf("[store_shard] %s: failure (%s)\n", sender, r.Error)
-		}
-	case proto.MethodRetrieveShard:
+	}
+	return n, nil
+}
+
+// retrieveShardNet fetches one shard from the network; the first peer that holds
+// it wins.
+func (c *client) retrieveShardNet(address string, timeout time.Duration) ([]byte, error) {
+	found := func(m *proto.Message) bool {
 		var r proto.RetrieveShardResult
-		if err := json.Unmarshal(msg.Result, &r); err != nil {
-			log.Printf("client: bad retrieve_shard result from %s: %v", sender, err)
-			return
+		return json.Unmarshal(m.Result, &r) == nil && r.Found
+	}
+	resps, err := c.call(proto.MethodRetrieveShard, proto.RetrieveShardParams{Address: address}, timeout, found)
+	if err != nil {
+		return nil, err
+	}
+	for _, m := range resps {
+		var r proto.RetrieveShardResult
+		if json.Unmarshal(m.Result, &r) == nil && r.Found {
+			return r.Data, nil
 		}
-		switch {
-		case r.Error != "":
-			fmt.Printf("[retrieve_shard] %s: error (%s)\n", sender, r.Error)
-		case r.Found:
-			fmt.Printf("[retrieve_shard] %s: found %d bytes: %s\n", sender, len(r.Data), string(r.Data))
-		default:
-			fmt.Printf("[retrieve_shard] %s: not found\n", sender)
-		}
-	default:
-		fmt.Printf("[response] %s: %s\n", sender, string(msg.Result))
 	}
+	return nil, fmt.Errorf("shard %q not found on the network", address)
 }
 
-// callStoreShard sends a store_shard request to all other clients.
-func (c *client) callStoreShard(address string, data []byte) error {
-	pb, err := json.Marshal(proto.StoreShardParams{Address: address, Data: data})
-	if err != nil {
-		return err
-	}
-	id := c.nextID()
-	line, err := proto.Encode(&proto.Message{
-		Type:   proto.TypeRequest,
-		ID:     id,
-		Method: proto.MethodStoreShard,
-		Params: pb,
-	})
-	if err != nil {
-		return err
-	}
-	c.markPending(id)
-	return c.send(line)
-}
-
-// callRetrieveShard sends a retrieve_shard request to all other clients.
-func (c *client) callRetrieveShard(address string) error {
-	pb, err := json.Marshal(proto.RetrieveShardParams{Address: address})
-	if err != nil {
-		return err
-	}
-	id := c.nextID()
-	line, err := proto.Encode(&proto.Message{
-		Type:   proto.TypeRequest,
-		ID:     id,
-		Method: proto.MethodRetrieveShard,
-		Params: pb,
-	})
-	if err != nil {
-		return err
-	}
-	c.markPending(id)
-	return c.send(line)
-}
-
-// handleInput interprets one line of user input: a recognized command is turned
-// into an RPC call, anything else is sent as plain chat text.
+// handleInput interprets one line of interactive input.
 func (c *client) handleInput(line string) {
 	fields := strings.Fields(line)
 	if len(fields) == 0 {
@@ -226,49 +263,32 @@ func (c *client) handleInput(line string) {
 			fmt.Println("usage: store_shard <address> <data>")
 			return
 		}
-		if err := c.callStoreShard(fields[1], []byte(fields[2])); err != nil {
-			log.Printf("client: store_shard: %v", err)
-		}
+		go func() {
+			n, err := c.storeShardNet(fields[1], []byte(fields[2]), rpcTimeout)
+			if err != nil {
+				log.Printf("client: store_shard: %v", err)
+				return
+			}
+			fmt.Printf("[store_shard] %q stored on %d peer(s)\n", fields[1], n)
+		}()
 	case "retrieve_shard":
 		if len(fields) != 2 {
 			fmt.Println("usage: retrieve_shard <address>")
 			return
 		}
-		if err := c.callRetrieveShard(fields[1]); err != nil {
-			log.Printf("client: retrieve_shard: %v", err)
-		}
+		go func() {
+			data, err := c.retrieveShardNet(fields[1], rpcTimeout)
+			if err != nil {
+				fmt.Printf("[retrieve_shard] %v\n", err)
+				return
+			}
+			fmt.Printf("[retrieve_shard] %q: %d bytes: %s\n", fields[1], len(data), string(data))
+		}()
 	default:
 		if err := c.send(line); err != nil {
 			log.Fatalf("client: send: %v", err)
 		}
 	}
-}
-
-// storeShard is the local handler for the store_shard method. It persists the
-// shard under ~/Mosaic/.shards.
-func storeShard(p proto.StoreShardParams) proto.StoreShardResult {
-	if err := shardstore.Store(p.Address, p.Data); err != nil {
-		log.Printf("client: store_shard(address=%q): %v", p.Address, err)
-		return proto.StoreShardResult{Success: false, Error: err.Error()}
-	}
-	log.Printf("client: store_shard(address=%q, %d bytes) — stored", p.Address, len(p.Data))
-	return proto.StoreShardResult{Success: true}
-}
-
-// retrieveShard is the local handler for the retrieve_shard method. It reads the
-// shard back from ~/Mosaic/.shards.
-func retrieveShard(p proto.RetrieveShardParams) proto.RetrieveShardResult {
-	data, found, err := shardstore.Retrieve(p.Address)
-	if err != nil {
-		log.Printf("client: retrieve_shard(address=%q): %v", p.Address, err)
-		return proto.RetrieveShardResult{Found: false, Error: err.Error()}
-	}
-	if !found {
-		log.Printf("client: retrieve_shard(address=%q) — not found", p.Address)
-		return proto.RetrieveShardResult{Found: false}
-	}
-	log.Printf("client: retrieve_shard(address=%q, %d bytes) — found", p.Address, len(data))
-	return proto.RetrieveShardResult{Found: true, Data: data}
 }
 
 // splitPrefix separates the relay's "<sender>: <payload>" framing. If the line
@@ -280,35 +300,66 @@ func splitPrefix(line string) (sender, payload string) {
 	return "", line
 }
 
+// rpcTimeout is how long calls wait for responses from the network.
+var rpcTimeout = 4 * time.Second
+
 func main() {
 	relay := flag.String("relay", "127.0.0.1:9000", "relay address host:port")
-	msg := flag.String("msg", "", "optional command/message to send on connect")
-	wait := flag.Duration("wait", 0, "if >0, listen this long then exit instead of reading stdin")
+	home := flag.String("home", "", "Mosaic base directory (default ~/Mosaic)")
+	watch := flag.Bool("watch", false, "watch the Mosaic dir and shard files dropped into it")
+	rehydrate := flag.String("rehydrate", "", "reconstruct the given .mosaic stub from the network, then exit")
+	openAfter := flag.Bool("open", false, "with -rehydrate, open the reconstructed file afterward")
+	timeout := flag.Duration("timeout", rpcTimeout, "RPC timeout waiting for network responses")
+	msg := flag.String("msg", "", "scripted: command/message to send on connect")
+	wait := flag.Duration("wait", 0, "scripted: listen this long then exit instead of reading stdin")
 	flag.Parse()
+	rpcTimeout = *timeout
+
+	base := *home
+	if base == "" {
+		b, err := shardstore.DefaultBase()
+		if err != nil {
+			log.Fatalf("client: resolve home: %v", err)
+		}
+		base = b
+	}
+	store, err := shardstore.New(base)
+	if err != nil {
+		log.Fatalf("client: shard store: %v", err)
+	}
 
 	conn, err := net.Dial("tcp", *relay)
 	if err != nil {
 		log.Fatalf("client: dial %s: %v", *relay, err)
 	}
 	defer conn.Close()
+	log.Printf("client: connected to relay %s (home %s)", *relay, base)
 
-	log.Printf("client: connected to relay %s", *relay)
-
-	c := newClient(conn)
+	c := newClient(conn, store)
 	go c.receive()
 
-	if *msg != "" {
+	switch {
+	case *rehydrate != "":
+		if err := c.rehydrate(*rehydrate, *openAfter); err != nil {
+			log.Fatalf("client: rehydrate: %v", err)
+		}
+		return
+	case *watch:
+		c.watch(base)
+		return
+	case *msg != "":
 		c.handleInput(*msg)
 		log.Printf("client: sent: %s", *msg)
-	}
-
-	if *wait > 0 {
+		if *wait > 0 {
+			time.Sleep(*wait)
+		}
+		return
+	case *wait > 0:
 		time.Sleep(*wait)
-		log.Printf("client: done listening, exiting")
 		return
 	}
 
-	// Interactive mode: each stdin line is a command or chat text.
+	// Interactive mode.
 	sc := bufio.NewScanner(os.Stdin)
 	for sc.Scan() {
 		c.handleInput(sc.Text())
