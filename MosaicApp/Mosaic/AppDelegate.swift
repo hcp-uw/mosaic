@@ -51,8 +51,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   // the app. Raise the download overlay if one is active; otherwise fall back
   // to the network status window if nothing visible is already on screen.
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-    if let overlay = overlay {
+    if let overlay = overlay, overlay.window?.isVisible == true {
       overlay.window?.orderFrontRegardless()
+    } else if let up = uploadOverlay, up.window?.isVisible == true {
+      up.window?.orderFrontRegardless()
     } else if !flag {
       openNetworkStatus()
     }
@@ -248,7 +250,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   // Cache only — no open.
   @objc private func cacheFileFromMenu(_ sender: NSMenuItem) {
     guard let filename = sender.representedObject as? String else { return }
-    DaemonClient.shared.fetch(filename) { _ in }
+    fetchWithOverlay(filename: filename)
   }
 
   // Cache and open.
@@ -289,26 +291,41 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
 private func fetchAndOpen(filename: String, realURL: URL) {
+    fetchWithOverlay(filename: filename, openWhenDone: realURL)
+}
+
+// Shows the download overlay while fetching filename.
+// If openWhenDone is non-nil, opens that URL once the file lands on disk.
+private func fetchWithOverlay(filename: String, openWhenDone realURL: URL? = nil) {
     overlay = DownloadOverlayController()
     overlay?.window?.orderFrontRegardless()
     overlay?.beginTracking(filename: filename)
 
-    // Use a box so both the fetch callback and the poll timer can invalidate
-    // the timer regardless of which fires first.
     var pollTimer: Timer?
+
+    // finish() closes the window after 1.2s; nil the reference after 1.5s so
+    // applicationShouldHandleReopen can't resurrect the closed window.
+    let finishOverlay = { [weak self] in
+        self?.overlay?.finish()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            self?.overlay = nil
+        }
+    }
 
     DaemonClient.shared.fetch(filename) { _ in
         DispatchQueue.main.async {
             pollTimer?.invalidate()
             pollTimer = nil
-            self.overlay?.finish()
-            if FileManager.default.fileExists(atPath: realURL.path) {
-                self.openFile(realURL)
-            } else {
-                let alert = NSAlert()
-                alert.messageText = "Could not fetch \(filename)"
-                alert.informativeText = "The daemon could not retrieve this file from the network."
-                alert.runModal()
+            finishOverlay()
+            if let url = realURL {
+                if FileManager.default.fileExists(atPath: url.path) {
+                    self.openFile(url)
+                } else {
+                    let alert = NSAlert()
+                    alert.messageText = "Could not fetch \(filename)"
+                    alert.informativeText = "The daemon could not retrieve this file from the network."
+                    alert.runModal()
+                }
             }
         }
     }
@@ -324,7 +341,7 @@ private func fetchAndOpen(filename: String, realURL: URL) {
                 if progress.needed > 0 && progress.received >= progress.needed {
                     t.invalidate()
                     pollTimer = nil
-                    self.overlay?.finish()
+                    finishOverlay()
                 }
             }
         }

@@ -36,5 +36,17 @@ if $DROPLET; then
 fi
 
 "$SCRIPT_DIR/install.sh"
-mos login test
+
+ENV_FILE="$SCRIPT_DIR/../.env"
+LOGIN_KEY=""
+if [ -f "$ENV_FILE" ]; then
+    LOGIN_KEY=$(grep -E '^Login_Key' "$ENV_FILE")
+fi
+
+if [ -n "$LOGIN_KEY" ]; then
+    mos login "$LOGIN_KEY"
+else
+    mos login test
+fi
+
 mos join network

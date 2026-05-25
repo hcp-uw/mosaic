@@ -209,14 +209,16 @@ func (p *adaptivePacer) ackSuccess() {
 }
 
 // ackLoss is called after a ShardStreamAck with missing chunks.
-// lossRate is missing/total. Slows down proportionally; uncapped so that
-// severe congestion (e.g. 68% loss) produces a strong backoff.
+// lossRate is missing/total. Uses a gentle linear factor (max 2x at 100% loss)
+// to avoid compounding exponential slowdown across sequential shards — the
+// global pacer is shared, so over-aggressive backoff on one shard slows all
+// subsequent sends.
 func (p *adaptivePacer) ackLoss(lossRate float64) {
 	if lossRate <= 0 {
 		return
 	}
 	p.mu.Lock()
-	factor := 1.0 + lossRate*10.0
+	factor := 1.0 + lossRate
 	p.interval = min(time.Duration(float64(p.interval)*factor), pacerMaxInterval)
 	p.mu.Unlock()
 }

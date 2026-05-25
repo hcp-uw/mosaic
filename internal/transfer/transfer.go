@@ -223,10 +223,15 @@ func GetUploadProgress() (dispatched, total int) {
 	return int(uploadShardsDispatched.Load()), int(uploadShardsTotal.Load())
 }
 
-// resetUploadProgress initialises the counters for a new upload.
+// resetUploadProgress initialises the counters for a new upload and resets the
+// UDP pacer so stale slowdowns from a previous upload don't carry over.
 func resetUploadProgress(total int) {
 	uploadShardsDispatched.Store(0)
 	uploadShardsTotal.Store(int32(total))
+	udpPacer.mu.Lock()
+	udpPacer.interval = pacerInitInterval
+	udpPacer.nextSend = time.Time{}
+	udpPacer.mu.Unlock()
 }
 
 // ResetJoinSync clears the join-sync counters at the start of a new join.

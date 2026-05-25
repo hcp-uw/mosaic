@@ -5,3 +5,4 @@ bin/
 *.pid
 MosaicApp/DerivedData/
 *notes.md
+.env

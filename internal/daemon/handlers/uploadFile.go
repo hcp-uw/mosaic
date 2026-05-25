@@ -132,11 +132,16 @@ func uploadFile(path string, keepLocal bool) protocol.UploadFileResponse {
 		}
 	}
 
+	peersReached := 0
+	if c := GetP2PClient(); c != nil {
+		peersReached = len(c.GetConnectedPeers())
+	}
 	return protocol.UploadFileResponse{
 		Success:          true,
 		Details:          "Upload complete — shards distributed and file announced to network",
 		FileName:         filename,
 		AvailableStorage: helpers.AvailableStorage(),
+		PeersReached:     peersReached,
 	}
 }
 
