@@ -145,7 +145,7 @@ func (c *client) rehydrate(stubPath string, openAfter bool) error {
 // into a .mosaic stub. Files that already have a stub sibling, hidden files, and
 // stubs themselves are left alone.
 func (c *client) watch(base string) {
-	log.Printf("client: watching %s — drop files in to shard them", base)
+	log.Printf("client: node serving the network; watching %s — drop files in to shard them", base)
 	seen := make(map[string]os.FileInfo) // path -> last poll's stat, for stability
 	for {
 		entries, err := os.ReadDir(base)

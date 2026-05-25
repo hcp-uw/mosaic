@@ -1,0 +1,14 @@
+[Unit]
+Description=Mosaic node (serves shards to the network and shards local files)
+After=network.target
+
+[Service]
+Type=simple
+User=linuxuser
+WorkingDirectory=/home/linuxuser/mosaic
+ExecStart=/home/linuxuser/mosaic/bin/client -relay 45.32.226.71:9000 -home /home/linuxuser/Mosaic -node
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

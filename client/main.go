@@ -4,9 +4,12 @@
 // package proto: store_shard and retrieve_shard let clients persist and fetch
 // shard data across the network.
 //
-// Modes:
+// Every client serves store_shard/retrieve_shard for the network as long as it
+// is connected; that is always on regardless of mode. The modes only choose what
+// the process does in the foreground:
 //
-//	-watch              watch the Mosaic dir; shard any file dropped in into a
+//	-node               run as a network node: stay connected (serving shards)
+//	                    and shard any file dropped into the Mosaic dir into a
 //	                    .mosaic stub stored across the network.
 //	-rehydrate <stub>   reconstruct a .mosaic stub from the network and exit.
 //	(default)           interactive: type commands or chat lines.
@@ -306,7 +309,7 @@ var rpcTimeout = 4 * time.Second
 func main() {
 	relay := flag.String("relay", "127.0.0.1:9000", "relay address host:port")
 	home := flag.String("home", "", "Mosaic base directory (default ~/Mosaic)")
-	watch := flag.Bool("watch", false, "watch the Mosaic dir and shard files dropped into it")
+	node := flag.Bool("node", false, "run as a network node: serve shards to the network and shard files dropped into the Mosaic dir")
 	rehydrate := flag.String("rehydrate", "", "reconstruct the given .mosaic stub from the network, then exit")
 	openAfter := flag.Bool("open", false, "with -rehydrate, open the reconstructed file afterward")
 	timeout := flag.Duration("timeout", rpcTimeout, "RPC timeout waiting for network responses")
@@ -344,7 +347,7 @@ func main() {
 			log.Fatalf("client: rehydrate: %v", err)
 		}
 		return
-	case *watch:
+	case *node:
 		c.watch(base)
 		return
 	case *msg != "":
