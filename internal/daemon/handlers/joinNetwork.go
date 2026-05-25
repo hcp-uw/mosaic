@@ -172,18 +172,21 @@ func runClient(serverAddr string, errCh chan<- error) {
 			return
 		}
 		fmt.Printf("[P2P] Connected to peer %s\n", peer.ID)
-		go redistributeShardsToNewPeer(peer, client)
 		go announceIdentity(client)
 	})
 
-	// Push the manifest only after the session handshake is complete so the
-	// peer's response arrives encrypted and both sides can read it. Pushing
-	// from OnPeerAssigned (before handshake) means the peer's reply is already
-	// encrypted (its HandshakeDone fires first) but we can't decrypt it yet.
+	// Wait until the session handshake is complete before sending anything that
+	// requires encryption or an ack. Pre-handshake, Droplet's HandshakeDone may
+	// flip mid-transfer causing some shard chunks to be AES-encrypted while
+	// Mac's session key isn't set yet — those chunks are silently dropped on
+	// the receiver side. The QUIC dial also starts only after handshake, so
+	// redistribution pre-handshake always falls back to unreliable UDP with
+	// half the chunks potentially discarded.
 	client.OnHandshakeDone(func(peerID string) {
-		fmt.Printf("[P2P] Handshake done with %s — pushing manifest\n", peerID)
+		fmt.Printf("[P2P] Handshake done with %s — pushing manifest and redistributing shards\n", peerID)
 		go pushManifestToPeer(mosaicDir, client)
 		go SyncUserStubs()
+		go redistributeShardsToNewPeer(peerID, client)
 	})
 
 	client.OnPeerLeft(func(peerID string) {
@@ -285,13 +288,11 @@ func handleManifestSync(mosaicDir string, msg *api.Message) {
 		fmt.Println("handleManifestSync: could not parse message:", err)
 		return
 	}
-	fmt.Printf("handleManifestSync: received — %d bytes decompressed JSON\n", len(syncData.ManifestJSON))
 	remote, err := filesystem.ManifestFromJSON(syncData.ManifestJSON)
 	if err != nil {
 		fmt.Println("handleManifestSync: could not parse remote manifest:", err)
 		return
 	}
-	fmt.Printf("handleManifestSync: parsed remote manifest — %d chains\n", len(remote.Chains))
 	aesKey, err := filesystem.LoadOrCreateNetworkKey(shared.NetworkKeyPath())
 	if err != nil {
 		fmt.Println("handleManifestSync: could not load network key:", err)
@@ -303,13 +304,14 @@ func handleManifestSync(mosaicDir string, msg *api.Message) {
 		fmt.Println("handleManifestSync: could not merge/write manifest:", err)
 		return
 	}
-	fmt.Printf("handleManifestSync: merged — %d chains (changed=%v)\n", len(merged.Chains), changed)
 	markManifestSynced()
 
-	// If the merge brought in new information, broadcast the combined result
-	// back to all peers so the network converges to the same state.
+	// If the merge brought in new information, forward the combined result to
+	// all OTHER peers. Exclude the sender to prevent an infinite ping-pong
+	// where both nodes keep bouncing the manifest back and forth.
 	if changed {
-		go BroadcastNetworkManifest(merged)
+		senderID := msg.Sign.PubKey
+		go BroadcastNetworkManifestExcluding(merged, senderID)
 	}
 
 	// Replay our chain and sync local state with the network manifest.
@@ -351,6 +353,7 @@ func handleManifestSync(mosaicDir string, msg *api.Message) {
 	}
 
 	// Add stubs for files we don't have locally yet.
+	var added []string
 	for _, f := range files {
 		if filesystem.IsInManifest(mosaicDir, f.Name) {
 			continue
@@ -362,8 +365,11 @@ func handleManifestSync(mosaicDir string, msg *api.Message) {
 		if err := filesystem.WriteStub(mosaicDir, f.Name, f.Size, accountID, f.ContentHash); err != nil {
 			fmt.Printf("handleManifestSync: could not write stub for %s: %v\n", f.Name, err)
 		}
+		added = append(added, f.Name)
 	}
-	fmt.Printf("handleManifestSync: synced %d files from network\n", len(files))
+	if len(added) > 0 {
+		fmt.Printf("[Manifest] Synced: added %v\n", added)
+	}
 }
 
 // handleShardDelete removes all locally-stored shards for the file identified
@@ -496,14 +502,15 @@ func handlePeerLeft(peerID string, mosaicDir string, client *p2p.Client) {
 		peerID[:8], sent, len(connected))
 }
 
-// redistributeShardsToNewPeer scans locally stored shards and sends to newPeer
+// redistributeShardsToNewPeer scans locally stored shards and sends to peerID
 // any shard whose index maps to that peer under the routing rule:
 //
 //	targetPeerIndex = shardIndex % numPeers
 //
 // Peers are ordered by sorting all node IDs (ours + connected peers) lexicographically,
 // giving a stable assignment that every node in the network can compute independently.
-func redistributeShardsToNewPeer(newPeer *p2p.PeerInfo, client *p2p.Client) {
+// Called from OnHandshakeDone so both the encrypted session and UDP path are ready.
+func redistributeShardsToNewPeer(peerID string, client *p2p.Client) {
 	// Build stable ordering: our ID + all current peer IDs, sorted.
 	ourID := client.GetID()
 	connected := client.GetConnectedPeers()
@@ -517,7 +524,7 @@ func redistributeShardsToNewPeer(newPeer *p2p.PeerInfo, client *p2p.Client) {
 	numPeers := len(ids)
 	peerIdx := -1
 	for i, id := range ids {
-		if id == newPeer.ID {
+		if id == peerID {
 			peerIdx = i
 			break
 		}
@@ -531,6 +538,7 @@ func redistributeShardsToNewPeer(newPeer *p2p.PeerInfo, client *p2p.Client) {
 		return
 	}
 
+	sent := 0
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -538,16 +546,23 @@ func redistributeShardsToNewPeer(newPeer *p2p.PeerInfo, client *p2p.Client) {
 		fileHash := e.Name()
 		meta := transfer.FindShardMetaByHash(fileHash)
 		if meta == nil {
+			fmt.Printf("[P2P] Redistribution: no meta.json for %s — skipping\n", fileHash[:12])
 			continue
 		}
 		for shardIdx := 0; shardIdx < meta.TotalShards; shardIdx++ {
 			if shardIdx%numPeers != peerIdx {
 				continue
 			}
-			go transfer.StreamShardToPeer(fileHash, meta, shardIdx, newPeer.ID, client)
+			shardPath := fmt.Sprintf("%s/%s/shard%d_%s.dat",
+				transfer.ShardsDir(), fileHash, shardIdx, fileHash)
+			if _, err := os.Stat(shardPath); err != nil {
+				continue // we don't have this shard locally
+			}
+			go transfer.StreamShardToPeer(fileHash, meta, shardIdx, peerID, client)
+			sent++
 		}
 	}
-	fmt.Printf("[P2P] Redistribution to peer %s complete (%d peers total)\n", newPeer.ID[:8], numPeers)
+	fmt.Printf("[P2P] Redistribution to %s: queued %d shards (%d peers total)\n", peerID[:8], sent, numPeers)
 }
 
 // handleShardResponse processes a shard received in reply to a ShardRequest.

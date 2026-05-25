@@ -178,6 +178,7 @@ func HandleShardRequest(msg *api.Message, client *p2p.Client) {
 		// Fast path: we have it — binary stream to the requester.
 		meta := FindShardMetaByHash(d.FileHash)
 		if meta == nil {
+			fmt.Printf("[Transfer] HandleShardRequest: shard %d of %s found on disk but meta.json missing — cannot serve\n", d.ShardIndex, d.FileHash[:12])
 			return
 		}
 		serveKey := fmt.Sprintf("%s:%d:%s", d.FileHash, d.ShardIndex, requesterID)
@@ -194,13 +195,10 @@ func HandleShardRequest(msg *api.Message, client *p2p.Client) {
 
 	// Slow path: we don't have it.
 	if d.Relayed {
-		// Already relayed once — stop here to prevent forwarding loops.
 		return
 	}
 
-	// Register the original requester so the relay callback can forward when the
-	// shard arrives, then broadcast a one-hop relay to our own peers.
-	fmt.Printf("[Transfer] Shard %d of %s not local — relaying for %s\n", d.ShardIndex, d.FileHash[:12], requesterID[:8])
+	fmt.Printf("[Transfer] Shard %d of %s not found locally — relaying for %s\n", d.ShardIndex, d.FileHash[:12], requesterID[:8])
 	registerPendingShardRequest(d.FileHash, d.ShardIndex, requesterID)
 	relay := api.NewShardRequestMessage(api.NewSignature(client.GetID()), api.ShardRequestData{
 		FileHash:   d.FileHash,

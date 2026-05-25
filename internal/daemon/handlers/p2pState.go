@@ -102,11 +102,39 @@ func BroadcastNetworkManifest(m filesystem.NetworkManifest) {
 		return
 	}
 
-	fmt.Printf("[Manifest] Broadcasting: %d chains, %d bytes raw JSON\n", len(m.Chains), len(data))
-
 	msg := api.NewManifestSyncMessage(c.GetID(), data)
 
 	if err := c.SendToAllPeers(msg); err != nil {
 		fmt.Println("BroadcastNetworkManifest: send error:", err)
+	}
+}
+
+// BroadcastNetworkManifestExcluding serializes m and sends it to all connected
+// peers except excludePeerID. Used by handleManifestSync so a merged manifest
+// is not echoed back to the peer that just sent it, which would create an
+// infinite ping-pong between two nodes.
+func BroadcastNetworkManifestExcluding(m filesystem.NetworkManifest, excludePeerID string) {
+	p2pClientMu.RLock()
+	c := p2pClient
+	p2pClientMu.RUnlock()
+
+	if c == nil {
+		return
+	}
+
+	data, err := filesystem.ManifestToJSON(m)
+	if err != nil {
+		fmt.Println("BroadcastNetworkManifestExcluding: could not serialize manifest:", err)
+		return
+	}
+
+	msg := api.NewManifestSyncMessage(c.GetID(), data)
+	for _, peer := range c.GetConnectedPeers() {
+		if peer.ID == excludePeerID {
+			continue
+		}
+		if err := c.SendToPeer(peer.ID, msg); err != nil {
+			fmt.Printf("BroadcastNetworkManifestExcluding: send to %s error: %v\n", peer.ID, err)
+		}
 	}
 }

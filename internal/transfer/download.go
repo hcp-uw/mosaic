@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/hcp-uw/mosaic/internal/api"
@@ -40,88 +41,98 @@ func FetchFileBytes(filename string, client *p2p.Client, getHolders func(content
 		fileReadyChans.Store(meta.FileHash, fileCh)
 		defer fileReadyChans.Delete(meta.FileHash)
 
-		// Request missing shards one at a time, mirroring the upload path's
-		// sequential-per-peer delivery (semaphore = 1 for 1 peer). Requesting
-		// all shards simultaneously causes the holder to launch N concurrent
-		// StreamShardToPeer goroutines that fight each other for bandwidth.
+		// Request missing shards with bounded parallelism. QUIC multiplexes
+		// streams independently so parallel requests don't fight for bandwidth
+		// the way parallel UDP bursts do — each stream gets its fair share of
+		// the connection's congestion window.
 		const (
-			// How long to wait before the first chunk of a shard arrives.
-			// A lost request or unreachable peer shows up quickly — 10 s is
-			// plenty for any connection faster than ~8 Kbps.
+			maxParallelShards      = 4
 			shardFirstChunkTimeout = 10 * time.Second
-			// How long to wait between consecutive chunks once a shard is
-			// actively streaming. Resets on every incoming chunk of that shard.
-			shardIdleTimeout = 30 * time.Second
-			shardMaxRetries  = 2
+			shardIdleTimeout       = 30 * time.Second
+			shardMaxRetries        = 2
 		)
 
+		type fetchErr struct {
+			idx int
+			err error
+		}
+		fetchErrCh := make(chan fetchErr, len(missing))
+		sem := make(chan struct{}, maxParallelShards)
+		var wg sync.WaitGroup
+
 		for _, idx := range missing {
-			// The shard may have arrived from join redistribution while we were
-			// waiting for earlier shards — skip if it's already on disk.
+			idx := idx
 			shardPath := filepath.Join(ShardsDir(), meta.FileHash,
 				fmt.Sprintf("shard%d_%s.dat", idx, meta.FileHash))
 			if _, err := os.Stat(shardPath); err == nil {
-				continue
+				continue // arrived from redistribution while we were setting up
 			}
 
-			holders := getHolders(meta.FileHash, idx)
-			if len(holders) == 0 {
-				fmt.Printf("[Transfer] No known holders for shard %d of %s — broadcasting to all peers\n", idx, filename)
-			} else {
-				fmt.Printf("[Transfer] Requesting shard %d of %s from %d known holder(s)\n", idx, filename, len(holders))
-			}
+			wg.Add(1)
+			sem <- struct{}{}
+			go func() {
+				defer wg.Done()
+				defer func() { <-sem }()
 
-			received := false
-			for attempt := 0; attempt <= shardMaxRetries && !received; attempt++ {
-				// Shard may have arrived via join redistribution or a concurrent
-				// assembly between attempts — skip re-requesting if it's on disk.
-				if _, err := os.Stat(shardPath); err == nil {
-					received = true
-					break
-				}
-				if attempt > 0 {
-					fmt.Printf("[Transfer] Shard %d of %s — retry %d/%d\n", idx, filename, attempt, shardMaxRetries)
+				holders := getHolders(meta.FileHash, idx)
+				if len(holders) == 0 {
+					fmt.Printf("[Transfer] No known holders for shard %d of %s — broadcasting to all peers\n", idx, filename)
+				} else {
+					fmt.Printf("[Transfer] Requesting shard %d of %s from %d known holder(s)\n", idx, filename, len(holders))
 				}
 
-				shardKey := fmt.Sprintf("%s:%d", meta.FileHash, idx)
-				shardCh := make(chan struct{}, 1)
-				shardReadyChans.Store(shardKey, shardCh)
-
-				// Register an activity channel so HandleBinaryShardChunk can
-				// reset the idle timer immediately on each chunk arrival.
-				activityCh := make(chan struct{}, 1)
-				shardActivityChans.Store(shardKey, activityCh)
-
-				msg := api.NewShardRequestMessage(sign, api.ShardRequestData{
-					FileHash:   meta.FileHash,
-					ShardIndex: idx,
-				})
-				_ = client.SendToAllPeers(msg)
-
-				// Start with the short first-chunk timeout; reset to the longer
-				// idle timeout on every incoming chunk of this shard.
-				idleTimer := time.NewTimer(shardFirstChunkTimeout)
-
-			waitShard:
-				for {
-					select {
-					case <-shardCh:
+				received := false
+				for attempt := 0; attempt <= shardMaxRetries && !received; attempt++ {
+					if _, err := os.Stat(shardPath); err == nil {
 						received = true
-						break waitShard
-					case <-activityCh:
-						idleTimer.Reset(shardIdleTimeout)
-					case <-idleTimer.C:
-						shardReadyChans.Delete(shardKey)
-						break waitShard
+						break
 					}
-				}
-				idleTimer.Stop()
-				shardActivityChans.Delete(shardKey)
-			}
+					if attempt > 0 {
+						fmt.Printf("[Transfer] Shard %d of %s — retry %d/%d\n", idx, filename, attempt, shardMaxRetries)
+					}
 
-			if !received {
-				return nil, fmt.Errorf("shard %d of %q timed out after %d retries", idx, filename, shardMaxRetries)
-			}
+					shardKey := fmt.Sprintf("%s:%d", meta.FileHash, idx)
+					shardCh := make(chan struct{}, 1)
+					shardReadyChans.Store(shardKey, shardCh)
+
+					activityCh := make(chan struct{}, 1)
+					shardActivityChans.Store(shardKey, activityCh)
+
+					msg := api.NewShardRequestMessage(sign, api.ShardRequestData{
+						FileHash:   meta.FileHash,
+						ShardIndex: idx,
+					})
+					_ = client.SendToAllPeers(msg)
+
+					idleTimer := time.NewTimer(shardFirstChunkTimeout)
+				waitShard:
+					for {
+						select {
+						case <-shardCh:
+							received = true
+							break waitShard
+						case <-activityCh:
+							idleTimer.Reset(shardIdleTimeout)
+						case <-idleTimer.C:
+							shardReadyChans.Delete(shardKey)
+							break waitShard
+						}
+					}
+					idleTimer.Stop()
+					shardActivityChans.Delete(shardKey)
+				}
+
+				if !received {
+					fetchErrCh <- fetchErr{idx, fmt.Errorf("shard %d of %q timed out after %d retries", idx, filename, shardMaxRetries)}
+				}
+			}()
+		}
+
+		wg.Wait()
+		close(fetchErrCh)
+
+		if e, ok := <-fetchErrCh; ok {
+			return nil, e.err
 		}
 
 		// All data shards are on disk — wait for autoReconstruct to write the file.

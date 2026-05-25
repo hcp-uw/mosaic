@@ -169,8 +169,10 @@ func (c *Client) handleQUICStream(peerID string, stream *quic.ReceiveStream) {
 }
 
 // dialQUICToPeer establishes a QUIC connection to a peer and stores it in
-// PeerInfo. Called only by the side with the lexicographically smaller P2P ID
-// to avoid duplicate connections.
+// PeerInfo. Both sides always attempt to dial so that the NAT-side's outgoing
+// connection always succeeds regardless of lexicographic ID ordering.
+// When both dials succeed (e.g. both peers have public IPs) the duplicate-
+// connection guard in dialQUICToPeer and quicConnAccept drops the second one.
 func (c *Client) dialQUICToPeer(peerID string) {
 	c.mutex.RLock()
 	peer := c.peers[peerID]
@@ -182,10 +184,8 @@ func (c *Client) dialQUICToPeer(peerID string) {
 		return
 	}
 
-	// Only the lexicographically smaller ID dials so that exactly one QUIC
-	// connection is established per peer pair. The larger-ID side accepts the
-	// incoming connection via quicConnAccept instead.
-	if myID >= peerID {
+	// Skip if we already have a connection (e.g. the peer dialed us first).
+	if c.HasQUICConnection(peerID) {
 		return
 	}
 
@@ -210,8 +210,7 @@ func (c *Client) dialQUICToPeer(peerID string) {
 		return
 	}
 	if p.QUICConn != nil {
-		// The peer's incoming dial (or our own earlier dial) already set a
-		// connection — discard this duplicate rather than leaking it.
+		// The peer's incoming dial already set a connection — drop this duplicate.
 		c.mutex.Unlock()
 		conn.CloseWithError(0, "duplicate QUIC connection") //nolint:errcheck
 		return
