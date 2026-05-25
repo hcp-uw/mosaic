@@ -1,7 +1,1 @@
-files
-output
-bin/
-*.log
-*.pid
-MosaicApp/DerivedData/
-*notes.md
+.DS_Store
