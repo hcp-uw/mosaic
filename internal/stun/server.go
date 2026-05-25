@@ -199,12 +199,20 @@ func (s *Server) handleClientRegister(msg *api.Message, clientAddr *net.UDPAddr,
 
 	clientID := clientAddr.String()
 
-	// Reconnecting client — refresh ping time and re-pair if needed.
+	// Reconnecting client (same IP:port seen again, e.g. NAT port reuse on quick
+	// leave+rejoin). Refresh the address, re-send RegisterSuccess so the client's
+	// ConnectToStun call unblocks, and re-pair so it gets fresh peer assignments.
 	if existing, exists := s.clients[clientID]; exists {
 		existing.Address = clientAddr
 		existing.LastPing = time.Now()
 		if enableLogging {
 			log.Printf("Client %s reconnected", clientID)
+		}
+		s.sendRegistrationSuccess(clientID, clientAddr, existing.QueuePosition)
+		if existing.Leader {
+			s.sendLeaderAssignment(clientAddr)
+		} else {
+			s.pairWithLeader(existing, enableLogging)
 		}
 		return
 	}

@@ -139,6 +139,9 @@ func handleConn(conn net.Conn) {
 	case "debugSendMsg":
 		var debugReq protocol.DebugSendMsgRequest
 		handleWith(enc, req.Data, &debugReq, handlers.DebugSendMsg, "Debug send failed.")
+	case "debugTransfer":
+		var debugTfrReq protocol.DebugTransferRequest
+		handleWith(enc, req.Data, &debugTfrReq, handlers.DebugTransfer, "Debug transfer failed.")
 
 	default:
 		err := enc.Encode(&protocol.Response{Ok: false, Message: "unknown command"})

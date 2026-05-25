@@ -56,9 +56,6 @@ func FetchFileBytes(filename string, client *p2p.Client, getHolders func(content
 		)
 
 		for _, idx := range missing {
-			if downloadCancelled.Load() {
-				return nil, fmt.Errorf("download cancelled")
-			}
 			// The shard may have arrived from join redistribution while we were
 			// waiting for earlier shards — skip if it's already on disk.
 			shardPath := filepath.Join(ShardsDir(), meta.FileHash,
@@ -139,14 +136,6 @@ func FetchFileBytes(filename string, client *p2p.Client, getHolders func(content
 		case <-time.After(30 * time.Second):
 			return nil, fmt.Errorf("reconstruction of %q timed out", filename)
 		}
-	}
-
-	// Guard against reaching the local-decode path when shards are still missing.
-	// This happens when the caller has no P2P client (e.g. after logout without rejoining).
-	// Falling through would produce a confusing "too few shards given" error.
-	if len(missing) > 0 {
-		return nil, fmt.Errorf("%d/%d data shards missing for %q — run 'mos join' to connect to the network and fetch them from peers",
-			len(missing), meta.TotalDataShards, filename)
 	}
 
 	// All shards present locally — decrypt to a temp dir then reconstruct.

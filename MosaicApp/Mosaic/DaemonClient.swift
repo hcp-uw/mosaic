@@ -146,7 +146,6 @@ class DaemonClient {
     let id: String
     let address: String
     let viaTURN: Bool
-    let quicActive: Bool
   }
 
   struct NetworkStatus: Decodable {

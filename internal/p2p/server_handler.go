@@ -44,31 +44,26 @@ func (c *Client) ConnectToStun() error {
 
 	// Start QUIC transport on a separate UDP socket so STUN control messages
 	// and QUIC data frames never share a port (prevents packet misclassification).
-	// Skipped when force-UDP mode is active (dev/testing only).
-	if c.forceTransport == "udp" {
-		fmt.Println("[QUIC] Disabled (force-UDP mode)")
+	quicUDP, quicUDPErr := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if quicUDPErr != nil {
+		fmt.Printf("[QUIC] Failed to open UDP socket: %v — QUIC disabled, using UDP fallback\n", quicUDPErr)
 	} else {
-		quicUDP, quicUDPErr := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
-		if quicUDPErr != nil {
-			fmt.Printf("[QUIC] Failed to open UDP socket: %v — QUIC disabled, using UDP fallback\n", quicUDPErr)
+		tlsConf, tlsErr := serverTLSConfig()
+		if tlsErr != nil {
+			fmt.Printf("[QUIC] TLS setup failed: %v — QUIC disabled, using UDP fallback\n", tlsErr)
+			quicUDP.Close()
 		} else {
-			tlsConf, tlsErr := serverTLSConfig()
-			if tlsErr != nil {
-				fmt.Printf("[QUIC] TLS setup failed: %v — QUIC disabled, using UDP fallback\n", tlsErr)
-				quicUDP.Close()
+			qt := &quic.Transport{Conn: quicUDP}
+			ln, lnErr := qt.Listen(tlsConf, defaultQUICConfig)
+			if lnErr != nil {
+				fmt.Printf("[QUIC] Listener failed: %v — QUIC disabled, using UDP fallback\n", lnErr)
+				qt.Close()
 			} else {
-				qt := &quic.Transport{Conn: quicUDP}
-				ln, lnErr := qt.Listen(tlsConf, defaultQUICConfig)
-				if lnErr != nil {
-					fmt.Printf("[QUIC] Listener failed: %v — QUIC disabled, using UDP fallback\n", lnErr)
-					qt.Close()
-				} else {
-					c.quicTr = qt
-					c.quicListener = ln
-					c.quicPort = quicUDP.LocalAddr().(*net.UDPAddr).Port
-					fmt.Printf("[QUIC] Listening on port %d\n", c.quicPort)
-					go c.quicAcceptLoop()
-				}
+				c.quicTr = qt
+				c.quicListener = ln
+				c.quicPort = quicUDP.LocalAddr().(*net.UDPAddr).Port
+				fmt.Printf("[QUIC] Listening on port %d\n", c.quicPort)
+				go c.quicAcceptLoop()
 			}
 		}
 	}
@@ -103,16 +98,11 @@ func (c *Client) DisconnectFromStun() error {
 	// can evict us immediately instead of waiting for the 30-second pong timeout.
 	// Use writeToPeer so the message is session-encrypted when a handshake is done.
 	c.mutex.RLock()
-	leaveMsg := api.NewNodeLeaveMessage(c.id)
+	msg := api.NewNodeLeaveMessage(c.id)
 	for _, peer := range c.peers {
-		c.writeToPeer(peer, leaveMsg) //nolint:errcheck — best-effort
+		c.writeToPeer(peer, msg) //nolint:errcheck — best-effort
 	}
 	c.mutex.RUnlock()
-
-	// Tell the STUN server to remove us immediately so that a rapid rejoin does
-	// not get paired with our own stale session (self-connection bug).
-	deregMsg := api.NewClientDeregisterMessage()
-	c.sendToServer(deregMsg) //nolint:errcheck — best-effort; socket still open here
 
 	c.mutex.Lock()
 	defer c.mutex.Unlock()

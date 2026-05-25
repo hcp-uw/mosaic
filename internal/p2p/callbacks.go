@@ -91,21 +91,47 @@ func (c *Client) notifyError(err error) {
 	}
 }
 
-// notifyMessageReceived notifies callbacks about received messages.
-// Each callback is invoked in a new goroutine so that a slow handler does not
-// block the caller (typically the UDP receive loop).
+// notifyMessageReceived notifies callbacks about received messages
 func (c *Client) notifyMessageReceived(data []byte) {
 	for _, callback := range c.messageCallbacks {
 		go callback(data)
 	}
 }
 
-// notifyMessageReceivedSync calls callbacks synchronously on the calling
-// goroutine. Used by handleQUICStream where the data is always a binary shard
-// frame and spawning a goroutine per frame causes a pile-up that stalls QUIC
-// flow control.
-func (c *Client) notifyMessageReceivedSync(data []byte) {
-	for _, callback := range c.messageCallbacks {
-		callback(data)
+// SetQUICBinaryFrameHandler registers a handler called SYNCHRONOUSLY from the
+// QUIC stream-reader goroutine for every 0x01 binary shard frame. Calling it
+// synchronously ensures the assembly map is fully updated before the stream-done
+// notification fires, eliminating the race where ShardStreamAck was computed
+// before the last chunk was stored.
+func (c *Client) SetQUICBinaryFrameHandler(fn func(peerID string, data []byte)) {
+	c.quicCallbackMu.Lock()
+	c.quicBinaryFrameHandler = fn
+	c.quicCallbackMu.Unlock()
+}
+
+func (c *Client) callQUICBinaryFrameHandler(peerID string, data []byte) {
+	c.quicCallbackMu.Lock()
+	fn := c.quicBinaryFrameHandler
+	c.quicCallbackMu.Unlock()
+	if fn != nil {
+		fn(peerID, data) // synchronous — must be fast (in-memory only)
+	}
+}
+
+// SetQUICStreamDoneCallback registers a callback invoked (in a goroutine) when
+// a QUIC receive stream reaches EOF. peerID is the sender; lastFrame is the last
+// binary chunk frame read from the stream, used to identify the shard.
+func (c *Client) SetQUICStreamDoneCallback(fn func(peerID string, lastFrame []byte)) {
+	c.quicCallbackMu.Lock()
+	c.quicStreamDoneFn = fn
+	c.quicCallbackMu.Unlock()
+}
+
+func (c *Client) notifyQUICStreamDone(peerID string, lastFrame []byte) {
+	c.quicCallbackMu.Lock()
+	fn := c.quicStreamDoneFn
+	c.quicCallbackMu.Unlock()
+	if fn != nil {
+		go fn(peerID, lastFrame)
 	}
 }

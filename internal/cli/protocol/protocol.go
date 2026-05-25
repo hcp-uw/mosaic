@@ -318,3 +318,10 @@ type DebugSendMsgResponse struct {
 	Details   string `json:"details"`
 	PeerCount int    `json:"peerCount"`
 }
+
+type DebugTransferRequest struct{}
+
+type DebugTransferResponse struct {
+	Success bool   `json:"success"`
+	Details string `json:"details"`
+}

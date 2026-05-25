@@ -12,6 +12,10 @@ PATHS_FILE="internal/cli/shared/paths.go"
 
 # Extract the IP from DefaultServerIP = "..." if no arg provided.
 if [ -n "${1:-}" ]; then
+    if [[ "$1" == -* ]]; then
+        echo "deploy.sh does not accept flags. Usage: ./scripts/deploy.sh [droplet-ip]"
+        exit 1
+    fi
     DROPLET_IP="$1"
 else
     DROPLET_IP=$(grep 'DefaultServerIP = ' "$PATHS_FILE" | grep -oE '"[^"]+"' | tr -d '"')

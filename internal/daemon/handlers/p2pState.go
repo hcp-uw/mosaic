@@ -102,6 +102,8 @@ func BroadcastNetworkManifest(m filesystem.NetworkManifest) {
 		return
 	}
 
+	fmt.Printf("[Manifest] Broadcasting: %d chains, %d bytes raw JSON\n", len(m.Chains), len(data))
+
 	msg := api.NewManifestSyncMessage(c.GetID(), data)
 
 	if err := c.SendToAllPeers(msg); err != nil {

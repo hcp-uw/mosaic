@@ -188,10 +188,9 @@ func handleFileByName(w http.ResponseWriter, r *http.Request) {
 // GET /network-status — returns peer connection state for the status window.
 func handleNetworkStatus(w http.ResponseWriter, r *http.Request) {
 	type peerEntry struct {
-		ID         string `json:"id"`
-		Address    string `json:"address"`
-		ViaTURN    bool   `json:"viaTURN"`
-		QUICActive bool   `json:"quicActive"`
+		ID      string `json:"id"`
+		Address string `json:"address"`
+		ViaTURN bool   `json:"viaTURN"`
 	}
 	type response struct {
 		Connected bool        `json:"connected"`
@@ -212,7 +211,7 @@ func handleNetworkStatus(w http.ResponseWriter, r *http.Request) {
 		if p.Address != nil {
 			addr = p.Address.String()
 		}
-		peers = append(peers, peerEntry{ID: p.ID, Address: addr, ViaTURN: p.ViaTURN, QUICActive: p.QUICConn != nil})
+		peers = append(peers, peerEntry{ID: p.ID, Address: addr, ViaTURN: p.ViaTURN})
 	}
 	writeJSON(w, http.StatusOK, response{Connected: true, PeerCount: len(peers), Peers: peers})
 }

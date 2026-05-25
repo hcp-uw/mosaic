@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/hcp-uw/mosaic/internal/cli/shared"
 )
@@ -15,11 +16,12 @@ const (
 	ParityShards = 4
 	TotalShards  = DataShards + ParityShards
 
-	// 8 KB chunks — each frame (~8,133 bytes total after AES-GCM and binary header)
-	// fragments into ~6 IPv4 packets at 1500-byte MTU, vs ~42 for 60 KB chunks.
-	// Fewer fragments per datagram means far fewer chunk losses on lossy paths
-	// (university WiFi, TURN relay) where a single dropped fragment kills the chunk.
-	chunkSize = 8 * 1024
+	// chunkSize is the UDP send unit. Keeping it at 8 KB limits IP fragmentation
+	// on lossy paths (WiFi, TURN relay) where one dropped fragment kills the chunk.
+	// QUIC handles reliability internally, so chunkSizeQUIC can be much larger —
+	// 256 KB = 4 chunks per 1 MB shard vs 128, cutting per-shard overhead 32×.
+	chunkSize     = 8 * 1024
+	chunkSizeQUIC = 256 * 1024
 
 	// binaryMagic is the first byte of every binary shard frame.
 	// JSON messages always start with '{' (0x7B) so 0x01 is unambiguous.
@@ -51,12 +53,13 @@ type shardAssembly struct {
 	shardIndex      int
 	totalDataShards int
 	totalShards     int
+	firstChunkAt    time.Time // when the first chunk arrived; used for per-shard timing logs
 }
 
 var (
 	assemblyMu    sync.Mutex
 	assemblies    = make(map[string]*shardAssembly) // key: "fileHash:shardIndex"
-	reconstructed sync.Map                          // fileHash → true; prevents duplicate reconstruction
+	reconstructed sync.Map // fileHash → true; prevents duplicate reconstruction
 
 	// shardStoredCb is called after a shard is successfully written to disk.
 	// The daemon registers this to update the network manifest and broadcast.
@@ -259,6 +262,39 @@ func ClearDownloadTarget() {
 // GetDownloadProgress returns (received, needed) for the active FetchFileBytes call.
 func GetDownloadProgress() (received, needed int) {
 	return int(downloadShardsReceived.Load()), int(downloadShardsNeeded.Load())
+}
+
+// TransferDiagnostics is a point-in-time snapshot of transfer-layer state,
+// used by the mos debug transfer command to produce per-tick log lines.
+type TransferDiagnostics struct {
+	ActiveAssemblies int           // shards currently being assembled from incoming chunks
+	PendingAcks      int           // shard sends currently blocked waiting for ShardStreamAck
+	UDPPacerInterval time.Duration // current inter-chunk sleep on the UDP fallback path
+	UploadDispatched int           // shards dispatched in the active upload (0 if idle)
+	UploadTotal      int           // total shards in the active upload (0 if idle)
+}
+
+// GetTransferDiagnostics returns a snapshot of current transfer-layer state.
+func GetTransferDiagnostics() TransferDiagnostics {
+	assemblyMu.Lock()
+	activeAsm := len(assemblies)
+	assemblyMu.Unlock()
+
+	pendingAcks := 0
+	shardAckChans.Range(func(_, _ any) bool { pendingAcks++; return true })
+
+	udpPacer.mu.Lock()
+	pacerInterval := udpPacer.interval
+	udpPacer.mu.Unlock()
+
+	dispatched, total := GetUploadProgress()
+	return TransferDiagnostics{
+		ActiveAssemblies: activeAsm,
+		PendingAcks:      pendingAcks,
+		UDPPacerInterval: pacerInterval,
+		UploadDispatched: dispatched,
+		UploadTotal:      total,
+	}
 }
 
 // testShardsDir is overridden in tests to redirect shard I/O to a temp dir.

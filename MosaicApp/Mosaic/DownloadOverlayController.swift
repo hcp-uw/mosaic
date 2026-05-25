@@ -38,6 +38,9 @@ class DownloadOverlayController: NSWindowController {
         panel.title = "Mosaic"
         panel.isMovableByWindowBackground = true
         panel.contentView = GradientBackgroundView()
+        // Float above all other apps' windows so it stays visible when the
+        // user switches away and back. Without this it drops behind Finder etc.
+        panel.level = .floating
 
         super.init(window: panel)
         setupUI()

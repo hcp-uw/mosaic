@@ -47,20 +47,6 @@ func uploadFile(path string, keepLocal bool) protocol.UploadFileResponse {
 	}
 
 	filename := removePath(path)
-	if !TryAcquireOp(OpUpload, "Uploading "+filename) {
-		op := GetActiveOp()
-		desc := "another operation is in progress"
-		if op != nil {
-			desc = string(op.Kind) + " in progress"
-		}
-		return protocol.UploadFileResponse{
-			Success:  false,
-			Busy:     true,
-			BusyWith: desc,
-			Details:  desc + " — try again in a moment",
-		}
-	}
-	defer ReleaseOp()
 	mosaicDir := shared.MosaicDir()
 	nodeID := helpers.GetNodeID()
 	realPath := filepath.Join(mosaicDir, filename)
@@ -109,7 +95,14 @@ func uploadFile(path string, keepLocal bool) protocol.UploadFileResponse {
 				} else if werr := filesystem.WriteNetworkManifestLocked(mosaicDir, aesKey, nm); werr != nil {
 					fmt.Println("Warning: could not write network manifest for", filename, "-", werr)
 				} else {
-					BroadcastNetworkManifest(nm)
+					// Broadcast 3 times with short gaps so a dropped UDP packet
+					// doesn't permanently hide the file from peers.
+					for i := 0; i < 3; i++ {
+						BroadcastNetworkManifest(nm)
+						if i < 2 {
+							time.Sleep(300 * time.Millisecond)
+						}
+					}
 				}
 			}
 		} else {
@@ -139,17 +132,11 @@ func uploadFile(path string, keepLocal bool) protocol.UploadFileResponse {
 		}
 	}
 
-	peersReached := 0
-	if c := GetP2PClient(); c != nil {
-		peersReached = len(c.GetConnectedPeers())
-	}
-
 	return protocol.UploadFileResponse{
 		Success:          true,
-		Details:          "Upload complete",
+		Details:          "Upload complete — shards distributed and file announced to network",
 		FileName:         filename,
 		AvailableStorage: helpers.AvailableStorage(),
-		PeersReached:     peersReached,
 	}
 }
 

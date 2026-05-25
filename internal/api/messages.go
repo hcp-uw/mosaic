@@ -1,8 +1,12 @@
 package api
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"time"
 )
@@ -481,16 +485,24 @@ type ManifestSyncData struct {
 
 // NewManifestSyncMessage creates a manifest sync message for P2P broadcast.
 // senderID is the P2P node ID so the receiver can send a reply back.
+// The manifest JSON is gzip-compressed before encoding to avoid UDP fragmentation:
+// []byte fields in Go JSON become base64 (~33% larger), and an uncompressed
+// manifest can exceed the ~1443-byte MTU limit. Gzip cuts it ~70-80%.
 func NewManifestSyncMessage(senderID string, manifestJSON []byte) *Message {
+	var buf bytes.Buffer
+	w := gzip.NewWriter(&buf)
+	w.Write(manifestJSON) //nolint:errcheck — in-memory write cannot fail
+	w.Close()
 	return &Message{
 		Sign:      NewSignature(senderID),
 		Type:      ManifestSync,
 		Timestamp: time.Now(),
-		Data:      ManifestSyncData{ManifestJSON: manifestJSON},
+		Data:      ManifestSyncData{ManifestJSON: buf.Bytes()},
 	}
 }
 
 // GetManifestSyncData extracts manifest sync data from a message.
+// Detects gzip magic bytes (0x1f 0x8b) and decompresses transparently.
 func (m *Message) GetManifestSyncData() (*ManifestSyncData, error) {
 	if m.Type != ManifestSync {
 		return nil, ErrInvalidMessageType
@@ -500,8 +512,22 @@ func (m *Message) GetManifestSyncData() (*ManifestSyncData, error) {
 		return nil, err
 	}
 	var data ManifestSyncData
-	err = json.Unmarshal(dataBytes, &data)
-	return &data, err
+	if err := json.Unmarshal(dataBytes, &data); err != nil {
+		return nil, err
+	}
+	if len(data.ManifestJSON) >= 2 && data.ManifestJSON[0] == 0x1f && data.ManifestJSON[1] == 0x8b {
+		r, err := gzip.NewReader(bytes.NewReader(data.ManifestJSON))
+		if err != nil {
+			return nil, fmt.Errorf("decompress manifest: %w", err)
+		}
+		defer r.Close()
+		decompressed, err := io.ReadAll(r)
+		if err != nil {
+			return nil, fmt.Errorf("decompress manifest: %w", err)
+		}
+		data.ManifestJSON = decompressed
+	}
+	return &data, nil
 }
 
 // ShardPushData carries a single Reed-Solomon shard from an uploading peer.
@@ -712,15 +738,16 @@ type IdentityResponseData struct {
 	Signature string `json:"signature"`
 }
 
-// HandshakeInitData carries one side's ephemeral X25519 public key and QUIC port.
+// HandshakeInitData carries one side's ephemeral X25519 public key.
 type HandshakeInitData struct {
 	EphemeralPubKey []byte `json:"ephemeralPubKey"`
-	QUICPort        int    `json:"quicPort,omitempty"` // sender's QUIC listening port; 0 = no QUIC
+	QUICPort        int    `json:"quicPort,omitempty"`
 }
 
 // NewHandshakeInitMessage creates a handshake message carrying the sender's
-// ephemeral X25519 public key and QUIC listening port. senderID is the P2P
-// peer ID (used by the receiver to look up the right PeerInfo).
+// ephemeral X25519 public key. senderID is the P2P peer ID (used by the
+// receiver to look up the right PeerInfo). quicPort is the sender's QUIC
+// listening port (0 if QUIC is not started).
 func NewHandshakeInitMessage(senderID string, ephemeralPubKey []byte, quicPort int) *Message {
 	return &Message{
 		Sign:      NewSignature(senderID),

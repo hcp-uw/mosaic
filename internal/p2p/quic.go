@@ -54,21 +54,19 @@ func clientTLSConfig(myID string) *tls.Config {
 }
 
 var defaultQUICConfig = &quic.Config{
-	// 5-minute idle timeout so large-file shard streams survive brief flow-control
-	// stalls without the connection being killed mid-transfer.
-	// KeepAlivePeriod keeps the connection alive between shard streams.
-	MaxIdleTimeout:        5 * time.Minute,
+	MaxIdleTimeout:        30 * time.Second,
 	KeepAlivePeriod:       10 * time.Second,
 	MaxIncomingUniStreams: 1000,
 
-	// Large receive windows so the sender is never flow-controlled while the
-	// reader goroutine processes frames. Defaults (512 KB stream / 15 MB conn)
-	// limit throughput to ~10 MB/s on a 50 ms RTT link; these values raise the
-	// ceiling to ~640 MB/s per stream — well above any real-world NIC limit.
+	// Large receive windows so the sender is never flow-controlled waiting for
+	// a WINDOW_UPDATE mid-shard. With 256 KB chunks, a 1 MB shard = 4 frames;
+	// the 512 KB default stream window would block after the 2nd chunk (one RTT
+	// stall per extra window fill). Setting 4 MB stream / 16 MB connection means
+	// a full shard fits inside the initial window with no stalls at all.
 	InitialStreamReceiveWindow:     4 * 1024 * 1024,  // 4 MB
-	MaxStreamReceiveWindow:         32 * 1024 * 1024, // 32 MB
-	InitialConnectionReceiveWindow: 16 * 1024 * 1024, // 16 MB
-	MaxConnectionReceiveWindow:     128 * 1024 * 1024, // 128 MB
+	MaxStreamReceiveWindow:         16 * 1024 * 1024, // 16 MB
+	InitialConnectionReceiveWindow: 8 * 1024 * 1024,  // 8 MB
+	MaxConnectionReceiveWindow:     32 * 1024 * 1024, // 32 MB
 }
 
 // ──────────────────────────────────────────────────────────
@@ -123,38 +121,56 @@ func (c *Client) quicAcceptStreams(peerID string, conn *quic.Conn) {
 		if err != nil {
 			return
 		}
-		go c.handleQUICStream(stream)
+		go c.handleQUICStream(peerID, stream)
 	}
 }
 
-// handleQUICStream reads length-prefixed binary shard frames from a QUIC
-// receive stream and delivers each frame to the message dispatcher.
+// handleQUICStream reads length-prefixed binary shard frames from a QUIC receive
+// stream and delivers each frame to the appropriate handler.
+//
+// Binary shard frames (magic 0x01) are dispatched SYNCHRONOUSLY via
+// callQUICBinaryFrameHandler so that the assembly map is fully updated before the
+// stream-done notification fires. All other frames use the async message path.
+//
+// When the stream reaches EOF (sender closed after sending all chunks), we fire
+// notifyQUICStreamDone with the last frame so the transfer layer can send
+// ShardStreamAck without waiting for a UDP ShardStreamDone signal — eliminating
+// the race where that UDP message arrives before QUIC delivers the last chunk.
+//
 // Frame format: [4-byte LE length][binary shard chunk frame (0x01 magic)].
-func (c *Client) handleQUICStream(stream *quic.ReceiveStream) {
+func (c *Client) handleQUICStream(peerID string, stream *quic.ReceiveStream) {
+	var lastFrame []byte
 	for {
 		var lenBuf [4]byte
 		if _, err := io.ReadFull(stream, lenBuf[:]); err != nil {
-			return
+			break
 		}
 		frameLen := binary.LittleEndian.Uint32(lenBuf[:])
 		if frameLen == 0 || frameLen > 16*1024*1024 {
-			return // sanity guard
+			break // sanity guard
 		}
 		frame := make([]byte, frameLen)
 		if _, err := io.ReadFull(stream, frame); err != nil {
-			return
+			break
 		}
-		c.notifyMessageReceivedSync(frame)
+		lastFrame = frame
+		if len(frame) > 0 && frame[0] == 0x01 {
+			c.callQUICBinaryFrameHandler(peerID, frame)
+		} else {
+			c.notifyMessageReceived(frame)
+		}
+	}
+	// Stream EOF: QUIC has reliably delivered all data in order. Fire the done
+	// notification so the receiver can send ShardStreamAck immediately, bypassing
+	// the UDP ShardStreamDone / race-condition path entirely.
+	if lastFrame != nil {
+		c.notifyQUICStreamDone(peerID, lastFrame)
 	}
 }
 
 // dialQUICToPeer establishes a QUIC connection to a peer and stores it in
-// PeerInfo. Dial direction is determined by network topology: the node with a
-// public IP accepts; the NAT'd node dials outward to the public node's
-// reachable QUIC port. This is stable regardless of which node is the current
-// leader, so QUIC works correctly even after leadership changes. When both
-// nodes have the same reachability (both public or both private/NAT'd), a
-// lexicographic tiebreak on peer ID guarantees exactly one dialer.
+// PeerInfo. Called only by the side with the lexicographically smaller P2P ID
+// to avoid duplicate connections.
 func (c *Client) dialQUICToPeer(peerID string) {
 	c.mutex.RLock()
 	peer := c.peers[peerID]
@@ -166,20 +182,12 @@ func (c *Client) dialQUICToPeer(peerID string) {
 		return
 	}
 
-	myHost, _, _ := net.SplitHostPort(myID)
-	mePublic := isPublicIP(net.ParseIP(myHost))
-	peerPublic := isPublicIP(peer.Address.IP)
-
-	switch {
-	case mePublic && !peerPublic:
-		return // we're publicly reachable; let the NAT'd peer dial us
-	case mePublic == peerPublic:
-		// Both public or both private: lexicographic tiebreak so exactly one side dials.
-		if myID > peerID {
-			return
-		}
+	// Only the lexicographically smaller ID dials so that exactly one QUIC
+	// connection is established per peer pair. The larger-ID side accepts the
+	// incoming connection via quicConnAccept instead.
+	if myID >= peerID {
+		return
 	}
-	// !mePublic && peerPublic: we're behind NAT, peer is public — we dial (fall through).
 
 	remoteAddr := &net.UDPAddr{
 		IP:   peer.Address.IP,
@@ -215,33 +223,10 @@ func (c *Client) dialQUICToPeer(peerID string) {
 	c.quicAcceptStreams(peerID, conn)
 }
 
-// isPublicIP reports whether ip is a globally routable address.
-// Returns false for loopback, link-local, RFC 1918 private, and CGNAT ranges.
-func isPublicIP(ip net.IP) bool {
-	if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
-		return false
-	}
-	private := []net.IPNet{
-		{IP: net.ParseIP("10.0.0.0"), Mask: net.CIDRMask(8, 32)},
-		{IP: net.ParseIP("172.16.0.0"), Mask: net.CIDRMask(12, 32)},
-		{IP: net.ParseIP("192.168.0.0"), Mask: net.CIDRMask(16, 32)},
-		{IP: net.ParseIP("100.64.0.0"), Mask: net.CIDRMask(10, 32)}, // CGNAT
-	}
-	for _, block := range private {
-		if block.Contains(ip) {
-			return false
-		}
-	}
-	return true
-}
-
 // OpenShardStream opens a QUIC unidirectional send stream to a peer.
 // Returns an error if the QUIC connection for this peer is not yet established,
-// or if force-UDP mode is active, in which case callers should fall back to UDP.
+// in which case callers should fall back to UDP.
 func (c *Client) OpenShardStream(peerID string) (io.WriteCloser, error) {
-	if c.forceTransport == "udp" {
-		return nil, fmt.Errorf("QUIC disabled (force-UDP mode)")
-	}
 	c.mutex.RLock()
 	peer := c.peers[peerID]
 	c.mutex.RUnlock()
@@ -250,5 +235,14 @@ func (c *Client) OpenShardStream(peerID string) (io.WriteCloser, error) {
 		return nil, fmt.Errorf("no QUIC connection for peer %s", peerID)
 	}
 	return peer.QUICConn.OpenUniStreamSync(c.ctx)
+}
+
+// HasQUICConnection reports whether a QUIC connection is established for peerID.
+// Used by the upload path to choose the right chunk size without opening a stream.
+func (c *Client) HasQUICConnection(peerID string) bool {
+	c.mutex.RLock()
+	peer := c.peers[peerID]
+	c.mutex.RUnlock()
+	return peer != nil && peer.QUICConn != nil
 }
 

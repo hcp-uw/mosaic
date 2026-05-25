@@ -363,8 +363,6 @@ class NetworkStatusViewController: NSViewController {
             row.addArrangedSubview(lbl(host, 10, .regular, .secondaryLabelColor))
             row.addArrangedSubview(badge(p.viaTURN ? "TURN" : "Direct",
                                          fg: p.viaTURN ? .systemOrange : .systemGreen))
-            row.addArrangedSubview(badge(p.quicActive ? "QUIC" : "UDP",
-                                         fg: p.quicActive ? .systemPurple : .secondaryLabelColor))
             peerStack.addArrangedSubview(row)
         }
     }

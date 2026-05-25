@@ -140,13 +140,16 @@ func decodeBinaryShardChunk(frame []byte) (*binaryShardChunk, error) {
 // ──────────────────────────────────────────────────────────
 
 // adaptivePacer paces UDP sends using AIMD (additive-increase /
-// multiplicative-decrease), with kernel WriteTo latency as the congestion
-// signal. A fast WriteTo means the OS send buffer has headroom → speed up.
-// A slow/blocking WriteTo means the buffer is backing up → slow down.
-// A hard send error triggers an immediate rate halving.
+// multiplicative-decrease). Loss feedback comes from ShardStreamAck
+// (ackLoss/ackSuccess); local write latency only signals OS-buffer pressure.
 //
-// Bounds: 100 µs–100 ms between sends (10,000/sec down to 10/sec).
-// Start:  2 ms (500/sec × 8 KB ≈ 32 Mbps) — conservative for TURN/WiFi.
+// With 3 concurrent shard goroutines sharing the global pacer:
+//    2 ms init → 500 slots/sec total → ~32 Mbps — fast start on 8 KB chunks
+//    1 ms min  → 1000 slots/sec total → ~64 Mbps ceiling for fast links
+//  100 ms max  → 10 slots/sec floor   → safe floor for very lossy paths
+//
+// ackSuccess speeds up by 18% per confirmed shard so the pacer quickly
+// converges to the minimum interval on clean paths.
 type adaptivePacer struct {
 	mu       sync.Mutex
 	interval time.Duration
@@ -154,8 +157,8 @@ type adaptivePacer struct {
 }
 
 const (
-	pacerInitInterval = 2 * time.Millisecond   // 500 sends/sec start
-	pacerMinInterval  = 100 * time.Microsecond // 10,000 sends/sec ceiling
+	pacerInitInterval = 2 * time.Millisecond   // ~32 Mbps fast start on 8 KB chunks
+	pacerMinInterval  = 1 * time.Millisecond   // ~64 Mbps ceiling
 	pacerMaxInterval  = 100 * time.Millisecond // 10 sends/sec floor
 )
 
@@ -180,10 +183,10 @@ func (p *adaptivePacer) wait() {
 	}
 }
 
-// adjust tunes the interval after each send.
-//   - Hard error            → double the interval (halve throughput)
-//   - WriteTo slow (> 5 ms) → +25 % interval (kernel buffer backing up)
-//   - WriteTo fast (< 500 µs) → −5 % interval (room to go faster)
+// adjust tunes the interval after each send based on kernel write latency.
+// Only slows down on error or OS-buffer pressure; rate increases are driven
+// by ackSuccess/ackLoss feedback instead of local write speed, because the
+// server's local socket buffer is always fast even when the internet path is not.
 func (p *adaptivePacer) adjust(writeLatency time.Duration, sendOK bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -193,9 +196,29 @@ func (p *adaptivePacer) adjust(writeLatency time.Duration, sendOK bool) {
 		p.interval = min(cur*2, pacerMaxInterval)
 	case writeLatency > 5*time.Millisecond:
 		p.interval = min(time.Duration(float64(cur)*1.25), pacerMaxInterval)
-	case writeLatency < 500*time.Microsecond:
-		p.interval = max(time.Duration(float64(cur)*0.95), pacerMinInterval)
 	}
+}
+
+// ackSuccess is called after a ShardStreamAck arrives with zero missing chunks.
+// Speeds up by 18% per confirmed shard — converges from 10 ms to ~2 ms after
+// ~9 clean acks, reaching near-ceiling throughput by mid-upload.
+func (p *adaptivePacer) ackSuccess() {
+	p.mu.Lock()
+	p.interval = max(time.Duration(float64(p.interval)*0.82), pacerMinInterval)
+	p.mu.Unlock()
+}
+
+// ackLoss is called after a ShardStreamAck with missing chunks.
+// lossRate is missing/total. Slows down proportionally; uncapped so that
+// severe congestion (e.g. 68% loss) produces a strong backoff.
+func (p *adaptivePacer) ackLoss(lossRate float64) {
+	if lossRate <= 0 {
+		return
+	}
+	p.mu.Lock()
+	factor := 1.0 + lossRate*10.0
+	p.interval = min(time.Duration(float64(p.interval)*factor), pacerMaxInterval)
+	p.mu.Unlock()
 }
 
 // Init resets the adaptive pacer to its initial rate. Safe to call multiple

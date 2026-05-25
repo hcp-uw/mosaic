@@ -264,9 +264,12 @@ func Run(Args []string) {
 		switch {
 		case len(args) == 4 && args[2] == "msg":
 			debugSendMsg(args[3])
+		case len(args) == 3 && args[2] == "transfer":
+			debugTransfer()
 		default:
 			fmt.Println("Usage:")
-			fmt.Println("  mos debug msg \"<text>\"   Send a text message to all peers (tests P2P link)")
+			fmt.Println("  mos debug msg \"<text>\"      Send a text message to all peers (tests P2P link)")
+			fmt.Println("  mos debug transfer           Log transfer diagnostics every 500ms for 15s")
 			os.Exit(1)
 		}
 	case "wipe":
@@ -687,8 +690,15 @@ func uploadFile() {
 
 	waitForActiveOp()
 
-	// Allow 60s base + 60s per GB so large files don't time out during SHA-256 and encoding.
-	uploadTimeout := 60*time.Second + time.Duration(fileSizeBytes/(1024*1024*1024)+1)*60*time.Second
+	// Allow 90s base + 30s per 10 MB, capped at 15 minutes. The old formula
+	// (60s + 60s/GB) gave only 2 minutes for a 100 MB file — too tight for slow
+	// or relay paths. With QUIC and 256 KB chunks, typical uploads are much
+	// faster; the cap exists to surface genuine hangs rather than wait forever.
+	fileSizeMB := fileSizeBytes / (1024 * 1024)
+	uploadTimeout := 90*time.Second + time.Duration(fileSizeMB/10+1)*30*time.Second
+	if uploadTimeout > 15*time.Minute {
+		uploadTimeout = 15 * time.Minute
+	}
 
 	// Progress bar polls /upload-progress on the daemon's HTTP server.
 	// While the daemon is still hashing/encoding (total==0), shows a spinner.
@@ -1358,4 +1368,21 @@ func debugSendMsg(message string) {
 	}
 	fmt.Printf("Sent to %d peer(s). Watch the other node's daemon log for:\n", cmdResp.PeerCount)
 	fmt.Printf("  [DEBUG] received from ...: %q\n", message)
+}
+
+func debugTransfer() {
+	fmt.Println("Logging transfer diagnostics for 15 s — watch the daemon log for [DBG-TFR] lines.")
+	fmt.Println("Run this while an upload is in progress on the same node.")
+	resp, err := client.SendRequest("debugTransfer", protocol.DebugTransferRequest{}, 20*time.Second)
+	exitOnErr(err, "Error running transfer diagnostics:")
+
+	var cmdResp protocol.DebugTransferResponse
+	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
+		exitOnErr(err, "Error parsing response.")
+	}
+	if !cmdResp.Success {
+		fmt.Println("Diagnostics failed:", cmdResp.Details)
+		os.Exit(1)
+	}
+	fmt.Println(cmdResp.Details)
 }

@@ -47,10 +47,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     startUploadWatcher()
   }
 
-  // Called when the user clicks the Dock icon. Opens the network status window
-  // if no windows are currently visible (standard macOS single-window app pattern).
+  // Called when the user clicks the Dock icon or the status-bar icon activates
+  // the app. Raise the download overlay if one is active; otherwise fall back
+  // to the network status window if nothing visible is already on screen.
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-    if !flag {
+    if let overlay = overlay {
+      overlay.window?.orderFrontRegardless()
+    } else if !flag {
       openNetworkStatus()
     }
     return true

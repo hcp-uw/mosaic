@@ -93,6 +93,12 @@ private class LogViewerViewController: NSViewController {
         clearBtn.translatesAutoresizingMaskIntoConstraints = false
         toolbar.addSubview(clearBtn)
 
+        let copyBtn = NSButton(title: "Copy All", target: self, action: #selector(copyLog))
+        copyBtn.bezelStyle = .rounded
+        copyBtn.controlSize = .small
+        copyBtn.translatesAutoresizingMaskIntoConstraints = false
+        toolbar.addSubview(copyBtn)
+
         let autoScrollCheck = NSButton(checkboxWithTitle: "Auto-scroll",
                                        target: self, action: #selector(toggleAutoScroll(_:)))
         autoScrollCheck.state = .on
@@ -139,7 +145,10 @@ private class LogViewerViewController: NSViewController {
             clearBtn.trailingAnchor.constraint(equalTo: toolbar.trailingAnchor, constant: -12),
             clearBtn.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
 
-            autoScrollCheck.trailingAnchor.constraint(equalTo: clearBtn.leadingAnchor, constant: -12),
+            copyBtn.trailingAnchor.constraint(equalTo: clearBtn.leadingAnchor, constant: -8),
+            copyBtn.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
+
+            autoScrollCheck.trailingAnchor.constraint(equalTo: copyBtn.leadingAnchor, constant: -12),
             autoScrollCheck.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
 
             scrollView.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
@@ -253,6 +262,12 @@ private class LogViewerViewController: NSViewController {
     private func scrollToBottom() {
         guard let len = textView.textStorage?.length, len > 0 else { return }
         textView.scrollRangeToVisible(NSRange(location: len, length: 0))
+    }
+
+    @objc private func copyLog() {
+        let text = textView.textStorage?.string ?? ""
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
     }
 
     @objc private func clearLog() {

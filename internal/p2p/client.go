@@ -23,7 +23,6 @@ type Client struct {
 	turnAddr         string // TURN server "host:port", empty = disabled
 	turnUsername     string
 	turnPassword     string
-	forceTransport   string // "quic", "udp", or "" (default: auto)
 	state            ClientState
 	peers            map[string]*PeerInfo
 	mutex            sync.RWMutex
@@ -40,6 +39,14 @@ type Client struct {
 	quicTr       *quic.Transport
 	quicListener *quic.Listener
 	quicPort     int // our QUIC listening port; 0 if QUIC not started
+
+	// QUIC shard-stream callbacks (registered by the transfer package).
+	// quicBinaryFrameHandler is called SYNCHRONOUSLY from the stream-reader goroutine
+	// for every 0x01 frame so the assembly map is fully updated before the
+	// stream-done notification fires. quicStreamDoneFn is called in a goroutine.
+	quicBinaryFrameHandler func(peerID string, data []byte)
+	quicStreamDoneFn       func(peerID string, lastFrame []byte)
+	quicCallbackMu         sync.Mutex
 
 	// STUN reconnect state (leader only)
 	stunFailCount    int
@@ -60,7 +67,6 @@ type ClientConfig struct {
 	TURNPassword   string
 	PingInterval   time.Duration
 	ConnectTimeout time.Duration
-	ForceTransport string // dev only: "quic" or "udp"; "" = auto (default)
 }
 
 // DefaultClientConfig returns default client configuration with TURN fallback enabled.
@@ -93,7 +99,6 @@ func NewClient(config *ClientConfig) (*Client, error) {
 		turnAddr:         config.TURNAddress,
 		turnUsername:     config.TURNUsername,
 		turnPassword:     config.TURNPassword,
-		forceTransport:   config.ForceTransport,
 		state:            StateDisconnected,
 		peers:            make(map[string]*PeerInfo),
 		ctx:              ctx,
@@ -105,16 +110,6 @@ func NewClient(config *ClientConfig) (*Client, error) {
 		errorCallbacks:     make([]func(error), 0),
 		messageCallbacks:   make([]func([]byte), 0),
 	}, nil
-}
-
-// IsForceUDP reports whether only UDP should be used for shard data transport.
-func (c *Client) IsForceUDP() bool {
-	return c.forceTransport == "udp"
-}
-
-// IsForceQUIC reports whether only QUIC should be used for shard data transport.
-func (c *Client) IsForceQUIC() bool {
-	return c.forceTransport == "quic"
 }
 
 // GetState returns current client state
@@ -286,7 +281,7 @@ func (c *Client) completeHandshake(msg *api.Message, peer *PeerInfo) {
 	// peer's incoming dial hits the NAT-side's LOCAL port and fails silently.
 	// When both peers have public IPs both dials succeed, but the first-wins
 	// guard in dialQUICToPeer and quicConnAccept prevents duplicate connections.
-	if d.QUICPort > 0 && c.forceTransport != "udp" {
+	if d.QUICPort > 0 {
 		go c.dialQUICToPeer(peerID)
 	}
 }
@@ -355,13 +350,6 @@ func (c *Client) processPeerMessage(data []byte, fromAddr *net.UDPAddr) {
 				c.notifyError(fmt.Errorf("Failed to parse new joiner data %w", err))
 				return
 			}
-			// Guard: ignore if STUN assigned us our own ID (self-connection).
-			c.mutex.RLock()
-			selfID := c.id
-			c.mutex.RUnlock()
-			if data.JoinerID == selfID {
-				return
-			}
 
 			peerAddr, err := net.ResolveUDPAddr("udp", data.JoinerAddress)
 			if err != nil {
@@ -384,14 +372,8 @@ func (c *Client) processPeerMessage(data []byte, fromAddr *net.UDPAddr) {
 				c.notifyError(fmt.Errorf("failed to parse peer assignment: %w", err))
 				return
 			}
-			c.mutex.RLock()
-			selfID := c.id
-			c.mutex.RUnlock()
 
 			for id, addr := range data.Members {
-				if id == selfID {
-					continue // skip self
-				}
 				peerAddr, err := net.ResolveUDPAddr("udp", addr)
 				if err != nil {
 					c.notifyError(fmt.Errorf("failed to resolve peer address: %w", err))
@@ -479,30 +461,8 @@ func (c *Client) processPeerMessage(data []byte, fromAddr *net.UDPAddr) {
 		case api.ManifestSync:
 			c.notifyMessageReceived(data)
 			return
-		case api.TURNRelayAddr:
-			// The sender has switched to TURN and is telling us their relay address.
-			// Update their peer.Address so our future sends go to the TURN relay
-			// (which the TURN server forwards back to them) instead of to their
-			// NAT-private IP that our firewall would drop.
-			d, err := msg.GetTURNRelayAddrData()
-			if err != nil {
-				return
-			}
-			relayAddr, err := net.ResolveUDPAddr("udp", d.RelayAddr)
-			if err != nil {
-				return
-			}
-			c.mutex.Lock()
-			if peer, ok := c.peers[msg.Sign.PubKey]; ok {
-				peer.Address = relayAddr
-				fmt.Printf("[TURN] peer %s relay addr updated to %s\n", msg.Sign.PubKey, d.RelayAddr)
-			}
-			c.mutex.Unlock()
-			return
-
 		case api.ShardPush, api.ShardRequest, api.ShardResponse, api.ShardChunk,
-			api.ShardStreamDone, api.ShardStreamAck,
-			api.ShardProbe, api.ShardProbeAck:
+			api.ShardStreamDone, api.ShardStreamAck:
 			c.notifyMessageReceived(data)
 			return
 		case api.IdentityAnnounce, api.IdentityChallenge, api.IdentityResponse:
@@ -536,15 +496,6 @@ func (c *Client) processMessage(msg *api.Message) {
 		data, err := msg.GetPeerAssignmentData()
 		if err != nil {
 			c.notifyError(fmt.Errorf("failed to parse peer assignment: %w", err))
-			return
-		}
-
-		// Guard: if STUN paired us with our own stale session (self-connection
-		// after a rapid leave+rejoin), discard the assignment.
-		c.mutex.RLock()
-		selfID := c.id
-		c.mutex.RUnlock()
-		if data.PeerID == selfID {
 			return
 		}
 
