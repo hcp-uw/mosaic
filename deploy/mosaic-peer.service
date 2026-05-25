@@ -1,0 +1,14 @@
+[Unit]
+Description=Mosaic peer (shard-holding watcher)
+After=network.target
+
+[Service]
+Type=simple
+User=linuxuser
+WorkingDirectory=/home/linuxuser/mosaic
+ExecStart=/home/linuxuser/mosaic/bin/client -relay 45.32.226.71:9000 -home /home/linuxuser/Mosaic -watch
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

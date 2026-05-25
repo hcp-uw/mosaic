@@ -129,11 +129,29 @@ the stub downloads the shards and reconstructs the original file.
 Shards live only on the *other* clients (the relay never echoes to the sender),
 so this needs at least one other client connected to hold them — e.g. node2.
 
-**Keep a peer connected to hold shards** (on node2):
+**Keep a peer connected to hold shards** (on node2). node2 runs a `mosaic-peer`
+systemd service for this — it connects to the relay and watches its own
+`~/Mosaic`, so it is always available to store shards. After pushing code,
+redeploy it the same way as the relay:
 
 ```sh
-ssh linuxuser@149.28.13.244 'cd ~/mosaic && go run ./client -relay 45.32.226.71:9000 -watch'
+ssh linuxuser@149.28.13.244 '~/mosaic/deploy/redeploy-peer.sh'
+
+sudo systemctl status mosaic-peer     # is it up?
+journalctl -u mosaic-peer -f          # follow peer logs
 ```
+
+> First-time install (already done on node2):
+>
+> ```sh
+> sudo cp ~/mosaic/deploy/mosaic-peer.service /etc/systemd/system/
+> sudo systemctl daemon-reload
+> sudo systemctl enable mosaic-peer
+> ~/mosaic/deploy/redeploy-peer.sh
+> ```
+>
+> For an ad-hoc peer instead of the service:
+> `ssh linuxuser@149.28.13.244 'cd ~/mosaic && go run ./client -relay 45.32.226.71:9000 -watch'`
 
 **Run the watcher on this computer** so files dropped into `~/Mosaic` get sharded:
 
@@ -167,4 +185,23 @@ in `~/Mosaic` between runs:
 
 ```sh
 rm -f ~/Mosaic/*.mosaic
+```
+
+## Running long-lived processes on the remote nodes
+
+Prefer the systemd services (`mosaic-relay` on node1, `mosaic-peer` on node2):
+they survive logout and restart on crash. Manage them with
+`sudo systemctl {status,restart,stop} <unit>` and `journalctl -u <unit> -f`.
+
+If you must launch something ad-hoc over SSH (not as a service), don't rely on
+`cmd &` / `nohup &` / `setsid &` in a one-shot SSH command — the process is
+killed when the channel closes (you'll see `exit 255`). Use a detached tmux
+session instead, and keep the launch command minimal (no `sleep`/`pgrep`
+chained after `tmux new-session`, which also trips the 255):
+
+```sh
+ssh linuxuser@149.28.13.244 \
+  'tmux new-session -d -s peer "/path/to/client -relay 45.32.226.71:9000 -home ~/Mosaic -watch >/tmp/peer.log 2>&1"'
+# verify separately:
+ssh linuxuser@149.28.13.244 'tmux ls; cat /tmp/peer.log'
 ```
