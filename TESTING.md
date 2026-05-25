@@ -122,30 +122,49 @@ go run ./client -relay 45.32.226.71:9000 -msg "hello via relay" -wait 3s
 
 ## 5. File sharding (drop-to-shard, double-click-to-open)
 
-A file dropped into `~/Mosaic` is split into 14 shards, stored across the other
-clients, and replaced by a small `<name>.mosaic` stub (a JSON manifest). Opening
-the stub downloads the shards and reconstructs the original file.
+A file dropped into `~/Mosaic` is split into 14 shards, **distributed across the
+connected nodes** (round-robin — each shard goes to one node, not replicated to
+all), and replaced by a small `<name>.mosaic` stub (a JSON manifest). Opening the
+stub downloads the shards and reconstructs the original file.
 
 Every connected client is a **node**: it serves `store_shard`/`retrieve_shard`
 for the network *and*, when run with `-node`, watches its own `~/Mosaic` and
 shards files dropped into it. There is no separate "peer" vs "watcher" — same
 program, same mode. Shards live only on the *other* nodes (the relay never
 echoes to the sender), so you need at least one other node connected to hold
-them — e.g. node2.
+them.
 
-**Keep a node connected to hold shards** (on node2). node2 runs a `mosaic-node`
-systemd service for this — it connects to the relay and serves shards (and
-watches its own `~/Mosaic`), so it is always available. After pushing code,
-redeploy it the same way as the relay:
+Both **node1** (alongside the relay) and **node2** run a `mosaic-node` service,
+so by default there are two storage nodes — a sharded file ends up ~7 shards on
+each. With N nodes, shard `i` is stored on node `i mod N`.
+
+> Distribution uses node discovery: a client broadcasts a `ping` and collects
+> the addresses that answer. The interactive `nodes` command prints the count:
+>
+> ```
+> nodes
+> [nodes] 3 connected (this one + 2 other):
+>   - 45.32.226.71:... (node1)
+>   - 149.28.13.244:... (node2)
+> ```
+>
+> Because shards are not replicated, losing a node loses its shards — there is
+> no redundancy yet.
+
+**Storage nodes run as `mosaic-node` services** on both node1 and node2 — each
+connects to the relay and serves shards (and watches its own `~/Mosaic`), so
+they are always available. node1 runs both `mosaic-relay` and `mosaic-node`.
+After pushing code, redeploy each:
 
 ```sh
-ssh linuxuser@149.28.13.244 '~/mosaic/deploy/redeploy-node.sh'
+ssh linuxuser@45.32.226.71  '~/mosaic/deploy/redeploy-node.sh'   # node1
+ssh linuxuser@149.28.13.244 '~/mosaic/deploy/redeploy-node.sh'   # node2
 
 sudo systemctl status mosaic-node     # is it up?
 journalctl -u mosaic-node -f          # follow node logs
 ```
 
-> First-time install (already done on node2):
+> First-time install (already done on node1 and node2):
 >
 > ```sh
 > sudo cp ~/mosaic/deploy/mosaic-node.service /etc/systemd/system/
