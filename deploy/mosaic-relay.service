@@ -1,0 +1,14 @@
+[Unit]
+Description=Mosaic relay server
+After=network.target
+
+[Service]
+Type=simple
+User=linuxuser
+WorkingDirectory=/home/linuxuser/mosaic
+ExecStart=/home/linuxuser/mosaic/bin/relay -addr :9000
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

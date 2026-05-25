@@ -33,15 +33,40 @@ ssh linuxuser@45.32.226.71 'cd ~/mosaic && git fetch origin && git checkout work
 ssh linuxuser@149.28.13.244 'cd ~/mosaic && git fetch origin && git checkout working_demo && git reset --hard origin/working_demo'
 ```
 
-## 3. Start the relay on node1
+## 3. Run the relay on node1
+
+The relay runs as a systemd service (`mosaic-relay`) so it survives logout and
+restarts on crash. After pushing code changes, redeploy it in one command:
 
 ```sh
-ssh linuxuser@45.32.226.71
-cd ~/mosaic
-go run ./relay -addr :9000
+ssh linuxuser@45.32.226.71 '~/mosaic/deploy/redeploy-relay.sh'
+```
+
+This pulls `working_demo`, rebuilds `bin/relay`, and restarts the service.
+Useful commands:
+
+```sh
+sudo systemctl status mosaic-relay      # is it running?
+journalctl -u mosaic-relay -f           # follow relay logs
+sudo systemctl restart mosaic-relay     # restart without rebuilding
 ```
 
 > Port `9000` must be open in the firewall on node1: `sudo ufw allow 9000/tcp`.
+
+### First-time install (already done on node1)
+
+```sh
+sudo cp ~/mosaic/deploy/mosaic-relay.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable mosaic-relay
+~/mosaic/deploy/redeploy-relay.sh
+```
+
+For an ad-hoc foreground run instead (no service):
+
+```sh
+cd ~/mosaic && go run ./relay -addr :9000
+```
 
 ## 4. Run the clients
 
