@@ -21,15 +21,12 @@ git commit -m "your message"
 git push origin working_demo
 ```
 
-## 2. Pull on both remote machines
+## 2. Pull on node2 (client)
 
-SSH in and update each machine to match the branch:
+node1 is updated by the redeploy script in step 3, so it doesn't need a manual
+pull here. Update node2 to match the branch:
 
 ```sh
-# node1 (relay)
-ssh linuxuser@45.32.226.71 'cd ~/mosaic && git fetch origin && git checkout working_demo && git reset --hard origin/working_demo'
-
-# node2 (client)
 ssh linuxuser@149.28.13.244 'cd ~/mosaic && git fetch origin && git checkout working_demo && git reset --hard origin/working_demo'
 ```
 
@@ -53,7 +50,11 @@ sudo systemctl restart mosaic-relay     # restart without rebuilding
 
 > Port `9000` must be open in the firewall on node1: `sudo ufw allow 9000/tcp`.
 
-### First-time install (already done on node1)
+### First-time install
+
+The service is already installed and enabled on node1, so you do not need to run
+these steps for normal testing — they are recorded here only for reprovisioning a
+fresh machine:
 
 ```sh
 sudo cp ~/mosaic/deploy/mosaic-relay.service /etc/systemd/system/
@@ -85,6 +86,27 @@ go run ./client -relay 45.32.226.71:9000
 ```
 
 Then type messages; they are forwarded through the relay to the other client.
+Clients also accept RPC commands:
+
+```sh
+store_shard <address> <data>     # persist a shard on the other clients
+retrieve_shard <address>         # fetch a shard's data from the other clients
+```
+
+### Reset shard storage (for reproducible tests)
+
+Stored shards persist under `~/Mosaic/.shards` on each machine that runs a
+client. Clear them before a fresh run so old shards don't affect results.
+
+```sh
+# this computer
+rm -rf ~/Mosaic/.shards
+
+# node2 (client)
+ssh linuxuser@149.28.13.244 'rm -rf ~/Mosaic/.shards'
+```
+
+> The relay (node1) stores nothing, so it needs no reset.
 
 ### Scripted (non-interactive) test
 
