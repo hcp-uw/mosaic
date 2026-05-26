@@ -85,6 +85,29 @@ On this computer (from the repo root):
 go run ./client -relay 45.32.226.71:9000
 ```
 
+### Key requirement (new)
+
+Before running `-node` or `-rehydrate`, each machine must have a user key at:
+
+`~/Mosaic/.mosaic-key`
+
+Set it once per machine:
+
+```sh
+# this computer
+go run ./client -set-key "<your-secret>"
+
+# node1
+ssh linuxuser@45.32.226.71 '~/mosaic/bin/client -set-key "<your-secret>"'
+
+# node2
+ssh linuxuser@149.28.13.244 '~/mosaic/bin/client -set-key "<your-secret>"'
+```
+
+Use the same secret on machines that need to rehydrate each other's files.
+If the key file is missing, `mosaic-node` exits with:
+`missing ~/Mosaic/.mosaic-key; set a key with: client -set-key "<secret>"`.
+
 Then type messages; they are forwarded through the relay to the other client.
 Clients also accept RPC commands:
 
@@ -104,6 +127,20 @@ rm -rf ~/Mosaic/.shards
 
 # node2 (client)
 ssh linuxuser@149.28.13.244 'rm -rf ~/Mosaic/.shards'
+```
+
+After deleting `.shards`, recreate it (or restart the node process/service) before
+testing, otherwise `store_shard` can fail with `no such file or directory`:
+
+```sh
+# this computer
+mkdir -p ~/Mosaic/.shards
+
+# node1
+ssh linuxuser@45.32.226.71 'mkdir -p ~/Mosaic/.shards'
+
+# node2
+ssh linuxuser@149.28.13.244 'mkdir -p ~/Mosaic/.shards'
 ```
 
 > The relay (node1) stores nothing, so it needs no reset.

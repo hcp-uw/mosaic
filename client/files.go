@@ -99,6 +99,11 @@ func (c *client) shardFile(path string) error {
 	}
 	sum := sha256.Sum256(data)
 	digest := hex.EncodeToString(sum[:])
+	name := filepath.Base(path)
+	nameToken, err := encryptFilenameToken(c.key, name)
+	if err != nil {
+		return fmt.Errorf("encrypt filename token: %w", err)
+	}
 	encData, err := encryptData(c.key, data)
 	if err != nil {
 		return fmt.Errorf("encrypt: %w", err)
@@ -120,7 +125,7 @@ func (c *client) shardFile(path string) error {
 
 	addrs := make([]string, numShards)
 	for i, shard := range shards {
-		addr := fmt.Sprintf("%s.%s.%02d", c.id, digest, i)
+		addr := makeShardAddress(c.id, nameToken, int64(len(encData)), i)
 		target := nodes[i%len(nodes)] // round-robin: each shard to one node
 		ok, err := c.storeShardNet(target, addr, shard, rpcTimeout)
 		if err != nil {
@@ -133,7 +138,7 @@ func (c *client) shardFile(path string) error {
 	}
 
 	m := manifest{
-		Name:           filepath.Base(path),
+		Name:           name,
 		Size:           int64(len(data)),
 		CiphertextSize: int64(len(encData)),
 		SHA256:         digest,
@@ -175,6 +180,22 @@ func (c *client) rehydrate(stubPath string, openAfter bool) error {
 		return fmt.Errorf("stub identity %q does not match local identity %q", m.Identity, c.id)
 	}
 
+	if m.CiphertextSize <= 0 && len(m.Shards) > 0 {
+		parsed, err := parseShardAddress(m.Shards[0])
+		if err == nil {
+			m.CiphertextSize = parsed.CiphertextSize
+		}
+	}
+	if m.CiphertextSize < 0 {
+		return fmt.Errorf("invalid ciphertext size in stub")
+	}
+	if m.DataShards == 0 {
+		m.DataShards = dataShards
+	}
+	if m.ParityShards == 0 {
+		m.ParityShards = parityShards
+	}
+
 	// Fetch shards, leaving missing ones nil. We only need DataShards of them.
 	shards := make([][]byte, len(m.Shards))
 	present := 0
@@ -199,10 +220,11 @@ func (c *client) rehydrate(stubPath string, openAfter bool) error {
 		return fmt.Errorf("decrypt: %w", err)
 	}
 	sum := sha256.Sum256(plain)
-	if got := hex.EncodeToString(sum[:]); got != m.SHA256 {
+	if m.SHA256 != "" && hex.EncodeToString(sum[:]) != m.SHA256 {
+		got := hex.EncodeToString(sum[:])
 		return fmt.Errorf("checksum mismatch: got %s, want %s", got, m.SHA256)
 	}
-	if int64(len(plain)) != m.Size {
+	if m.Size > 0 && int64(len(plain)) != m.Size {
 		return fmt.Errorf("size mismatch after decrypt: got %d, want %d", len(plain), m.Size)
 	}
 
@@ -225,6 +247,7 @@ func (c *client) rehydrate(stubPath string, openAfter bool) error {
 // stubs themselves are left alone.
 func (c *client) watch(base string) {
 	log.Printf("client: node serving the network; watching %s — drop files in to shard them", base)
+	go c.runStubSync(base)
 	seen := make(map[string]os.FileInfo) // path -> last poll's stat, for stability
 	for {
 		entries, err := os.ReadDir(base)

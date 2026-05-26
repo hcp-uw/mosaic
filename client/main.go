@@ -179,6 +179,8 @@ func (c *client) handleRequest(req *proto.Message) {
 		}
 	case proto.MethodPing:
 		c.respond(req, proto.PingResult{OK: true})
+	case proto.MethodListShards:
+		c.respond(req, c.listShards())
 	default:
 		log.Printf("client: ignoring unknown method %q", req.Method)
 	}
@@ -229,6 +231,14 @@ func (c *client) retrieveShard(p proto.RetrieveShardParams) proto.RetrieveShardR
 	}
 	log.Printf("client: served shard %q (%d bytes)", p.Address, len(data))
 	return proto.RetrieveShardResult{Found: true, Data: data}
+}
+
+func (c *client) listShards() proto.ListShardsResult {
+	addresses, err := c.store.ListAddresses()
+	if err != nil {
+		return proto.ListShardsResult{Error: err.Error()}
+	}
+	return proto.ListShardsResult{Addresses: addresses}
 }
 
 // storeShardNet stores one shard on a specific node (by address) and reports
@@ -290,6 +300,30 @@ func (c *client) discoverNodes(timeout time.Duration) ([]string, error) {
 	return nodes, nil
 }
 
+func (c *client) listShardsNet(timeout time.Duration) ([]string, error) {
+	resps, err := c.call("", proto.MethodListShards, struct{}{}, timeout, nil)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool)
+	var all []string
+	for _, m := range resps {
+		var r proto.ListShardsResult
+		if json.Unmarshal(m.Result, &r) != nil || r.Error != "" {
+			continue
+		}
+		for _, a := range r.Addresses {
+			if a == "" || seen[a] {
+				continue
+			}
+			seen[a] = true
+			all = append(all, a)
+		}
+	}
+	sort.Strings(all)
+	return all, nil
+}
+
 // handleInput interprets one line of interactive input.
 func (c *client) handleInput(line string) {
 	fields := strings.Fields(line)
@@ -340,6 +374,18 @@ func (c *client) handleInput(line string) {
 				return
 			}
 			fmt.Printf("[retrieve_shard] %q: %d bytes: %s\n", fields[1], len(data), string(data))
+		}()
+	case "list_shards":
+		go func() {
+			addrs, err := c.listShardsNet(discoveryTimeout)
+			if err != nil {
+				fmt.Printf("[list_shards] %v\n", err)
+				return
+			}
+			fmt.Printf("[list_shards] %d shard address(es)\n", len(addrs))
+			for _, a := range addrs {
+				fmt.Printf("  - %s\n", a)
+			}
 		}()
 	default:
 		if err := c.send(line); err != nil {

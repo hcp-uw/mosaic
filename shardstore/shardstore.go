@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"sort"
 )
 
 // Store persists shards under Dir.
@@ -55,4 +56,28 @@ func (s *Store) Get(address string) (data []byte, found bool, err error) {
 		return nil, false, err
 	}
 	return b, true, nil
+}
+
+// ListAddresses returns all stored shard addresses.
+func (s *Store) ListAddresses() ([]string, error) {
+	entries, err := os.ReadDir(s.Dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		address, err := base64.RawURLEncoding.DecodeString(e.Name())
+		if err != nil {
+			continue
+		}
+		out = append(out, string(address))
+	}
+	sort.Strings(out)
+	return out, nil
 }

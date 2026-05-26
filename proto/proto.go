@@ -24,6 +24,7 @@ const (
 const (
 	MethodStoreShard    = "store_shard"
 	MethodRetrieveShard = "retrieve_shard"
+	MethodListShards    = "list_shards"
 	MethodPing          = "ping" // node discovery: responders reveal their address
 )
 
@@ -99,6 +100,12 @@ type RetrieveShardResult struct {
 	Found bool   `json:"found"`
 	Data  []byte `json:"data,omitempty"` // JSON-encoded as base64
 	Error string `json:"error,omitempty"`
+}
+
+// ListShardsResult lists all shard addresses currently stored locally.
+type ListShardsResult struct {
+	Addresses []string `json:"addresses"`
+	Error     string   `json:"error,omitempty"`
 }
 
 // Encode marshals m into a single JSON line (no trailing newline).

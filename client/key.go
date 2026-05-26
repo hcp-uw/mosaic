@@ -5,6 +5,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -104,4 +105,52 @@ func decryptData(key, payload []byte) ([]byte, error) {
 	nonce := payload[:nonceSize]
 	ciphertext := payload[nonceSize:]
 	return aead.Open(nil, nonce, ciphertext, nil)
+}
+
+func encryptFilenameToken(key []byte, filename string) (string, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonce := deterministicFilenameNonce(key, filename, aead.NonceSize())
+	ciphertext := aead.Seal(nil, nonce, []byte(filename), nil)
+	out := make([]byte, 0, len(nonce)+len(ciphertext))
+	out = append(out, nonce...)
+	out = append(out, ciphertext...)
+	return base64.RawURLEncoding.EncodeToString(out), nil
+}
+
+func decryptFilenameToken(key []byte, token string) (string, error) {
+	payload, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil {
+		return "", err
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonceSize := aead.NonceSize()
+	if len(payload) < nonceSize {
+		return "", fmt.Errorf("filename token too short")
+	}
+	plain, err := aead.Open(nil, payload[:nonceSize], payload[nonceSize:], nil)
+	if err != nil {
+		return "", err
+	}
+	return string(plain), nil
+}
+
+func deterministicFilenameNonce(key []byte, filename string, n int) []byte {
+	sum := sha256.Sum256(append([]byte("mosaic-filename-nonce:"+filename+":"), key...))
+	out := make([]byte, n)
+	copy(out, sum[:])
+	return out
 }
