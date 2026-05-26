@@ -2,8 +2,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -32,14 +30,11 @@ const (
 // the network and reconstruct + verify the file.
 type manifest struct {
 	Name           string   `json:"name"`            // original base name, e.g. "report.pdf"
-	Size           int64    `json:"size"`            // original plaintext size in bytes
 	CiphertextSize int64    `json:"ciphertext_size"` // encrypted payload size in bytes
-	SHA256         string   `json:"sha256"`          // hex digest of original plaintext
 	Identity       string   `json:"identity"`        // public identity derived from the user key
 	DataShards     int      `json:"data_shards"`     // Reed-Solomon data shard count
 	ParityShards   int      `json:"parity_shards"`   // Reed-Solomon parity shard count
 	Shards         []string `json:"shards"`          // shard addresses, indexed 0..n-1
-	Created        string   `json:"created"`         // RFC3339 timestamp
 }
 
 // encodeShards Reed-Solomon encodes data into dataShards+parityShards equal-size
@@ -97,8 +92,6 @@ func (c *client) shardFile(path string) error {
 	if err != nil {
 		return err
 	}
-	sum := sha256.Sum256(data)
-	digest := hex.EncodeToString(sum[:])
 	name := filepath.Base(path)
 	nameToken, err := encryptFilenameToken(c.key, name)
 	if err != nil {
@@ -139,14 +132,11 @@ func (c *client) shardFile(path string) error {
 
 	m := manifest{
 		Name:           name,
-		Size:           int64(len(data)),
 		CiphertextSize: int64(len(encData)),
-		SHA256:         digest,
 		Identity:       c.id,
 		DataShards:     dataShards,
 		ParityShards:   parityShards,
 		Shards:         addrs,
-		Created:        time.Now().UTC().Format(time.RFC3339),
 	}
 	mb, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
@@ -219,20 +209,12 @@ func (c *client) rehydrate(stubPath string, openAfter bool) error {
 	if err != nil {
 		return fmt.Errorf("decrypt: %w", err)
 	}
-	sum := sha256.Sum256(plain)
-	if m.SHA256 != "" && hex.EncodeToString(sum[:]) != m.SHA256 {
-		got := hex.EncodeToString(sum[:])
-		return fmt.Errorf("checksum mismatch: got %s, want %s", got, m.SHA256)
-	}
-	if m.Size > 0 && int64(len(plain)) != m.Size {
-		return fmt.Errorf("size mismatch after decrypt: got %d, want %d", len(plain), m.Size)
-	}
 
 	outPath := strings.TrimSuffix(stubPath, stubExt)
 	if err := os.WriteFile(outPath, plain, 0o644); err != nil {
 		return err
 	}
-	log.Printf("client: rehydrated %q (%d bytes, %d/%d shards present, checksum ok)", filepath.Base(outPath), m.Size, present, len(m.Shards))
+	log.Printf("client: rehydrated %q (%d bytes, %d/%d shards present)", filepath.Base(outPath), len(plain), present, len(m.Shards))
 
 	if openAfter && runtime.GOOS == "darwin" {
 		if err := exec.Command("open", outPath).Run(); err != nil {

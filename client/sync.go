@@ -83,7 +83,6 @@ func (c *client) ensureStub(base string, s *shardSet) error {
 		DataShards:     dataShards,
 		ParityShards:   parityShards,
 		Shards:         addrs,
-		Created:        time.Now().UTC().Format(time.RFC3339),
 	}
 	mb, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
