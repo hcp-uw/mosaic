@@ -213,10 +213,14 @@ func sendPlaintextShardToPeer(srcPath string, shardIndex int, fileHash, fileName
 		return fmt.Errorf("stat shard %d: %w", shardIndex, err)
 	}
 
-	// QUIC is reliable and handles its own congestion control, so we use large
-	// chunks (256 KB) to cut per-shard frame count ~32× vs UDP (8 KB chunks).
+	// Open a QUIC stream now, before computing totalChunks, so the chunk size
+	// is based on the transport that actually works. HasQUICConnection() can
+	// return true even when OpenUniStreamSync races and fails; by opening first
+	// we avoid committing to 256 KB chunks that then fall back to UDP (which
+	// has a 65507-byte datagram limit → "sendto: message too long").
+	firstStream, firstStreamErr := client.OpenShardStream(peerID)
 	effChunk := int64(chunkSize)
-	if client.HasQUICConnection(peerID) {
+	if firstStreamErr == nil {
 		effChunk = int64(chunkSizeQUIC)
 	}
 
@@ -226,26 +230,31 @@ func sendPlaintextShardToPeer(srcPath string, shardIndex int, fileHash, fileName
 
 	var currentMissing map[int]struct{} // nil = send all chunks
 
-	for {
-		// Re-check QUIC availability each round so we switch cleanly to UDP
-		// ShardStreamDone if the QUIC connection drops between retransmits.
-		useQUIC := client.HasQUICConnection(peerID)
+	// Pass the pre-opened stream into the first iteration so it's used
+	// immediately. Retries pass nil and open their own stream inside.
+	var preStream io.WriteCloser
+	if firstStreamErr == nil {
+		preStream = firstStream
+	}
 
+	for {
 		// Register ack channel BEFORE sending any chunks. On the QUIC path the
 		// stream-EOF ACK fires asynchronously after stream.Close(); pre-registering
 		// ensures we never miss it even on very fast local connections.
 		ackCh := make(chan []int, 1)
 		shardAckChans.Store(ackKey, ackCh)
 
-		if err := sendPlaintextChunks(srcPath, currentMissing, shardIndex, fileHash, fileName, fileSize, totalChunks, int(effChunk), key, peerID, client); err != nil {
+		usedQUIC, serr := sendPlaintextChunks(srcPath, currentMissing, shardIndex, fileHash, fileName, fileSize, totalChunks, int(effChunk), key, peerID, client, preStream)
+		preStream = nil // consumed; retries open their own stream
+		if serr != nil {
 			shardAckChans.Delete(ackKey)
-			return err
+			return serr
 		}
 
 		// QUIC path: HandleQUICStreamDone on the receiver side sends ShardStreamAck
 		// on stream EOF — no UDP signal needed and no risk of arriving too early.
 		// UDP path: send explicit ShardStreamDone to trigger the receiver's ack.
-		if !useQUIC {
+		if !usedQUIC {
 			client.SendToPeer(peerID, api.NewShardStreamDoneMessage(client.GetID(), api.ShardStreamDoneData{ //nolint:errcheck
 				FileHash:    fileHash,
 				ShardIndex:  shardIndex,
@@ -263,7 +272,7 @@ func sendPlaintextShardToPeer(srcPath string, shardIndex int, fileHash, fileName
 		shardAckChans.Delete(ackKey)
 
 		if len(missing) == 0 {
-			if !useQUIC {
+			if !usedQUIC {
 				udpPacer.ackSuccess()
 			}
 			elapsed := time.Since(shardStart)
@@ -273,7 +282,7 @@ func sendPlaintextShardToPeer(srcPath string, shardIndex int, fileHash, fileName
 			return nil
 		}
 
-		if !useQUIC {
+		if !usedQUIC {
 			udpPacer.ackLoss(float64(len(missing)) / float64(totalChunks))
 		}
 		if currentMissing == nil {
@@ -296,17 +305,28 @@ func sendPlaintextShardToPeer(srcPath string, shardIndex int, fileHash, fileName
 // fragmentation), 256 KB for QUIC (reduces per-shard frame count ~32×).
 // If onlyChunks is non-nil, only those indices are sent (seeks directly to each
 // for O(missing) disk I/O); otherwise all chunks are sent in order.
-func sendPlaintextChunks(srcPath string, onlyChunks map[int]struct{}, shardIndex int, fileHash, fileName string, fileSize, totalChunks, effectiveChunkSize int, key [32]byte, peerID string, client *p2p.Client) error {
+// preOpenedStream, if non-nil, is used directly (and closed on return) instead
+// of opening a new QUIC stream; pass nil for retransmit iterations.
+// Returns (usedQUIC, error) so the caller can decide whether to send ShardStreamDone.
+func sendPlaintextChunks(srcPath string, onlyChunks map[int]struct{}, shardIndex int, fileHash, fileName string, fileSize, totalChunks, effectiveChunkSize int, key [32]byte, peerID string, client *p2p.Client, preOpenedStream io.WriteCloser) (bool, error) {
 	sf, err := os.Open(srcPath)
 	if err != nil {
-		return fmt.Errorf("open shard %d: %w", shardIndex, err)
+		return false, fmt.Errorf("open shard %d: %w", shardIndex, err)
 	}
 	defer sf.Close()
 
-	quicStream, quicErr := client.OpenShardStream(peerID)
-	if quicErr == nil {
+	var quicStream io.WriteCloser
+	if preOpenedStream != nil {
+		quicStream = preOpenedStream
 		defer quicStream.Close()
+	} else {
+		qs, qerr := client.OpenShardStream(peerID)
+		if qerr == nil {
+			quicStream = qs
+			defer quicStream.Close()
+		}
 	}
+	usedQUIC := quicStream != nil
 
 	sendOne := func(plaintext []byte, chunkIndex int) error {
 		encrypted, err := encryptChunk(key, plaintext)
@@ -327,7 +347,7 @@ func sendPlaintextChunks(srcPath string, onlyChunks map[int]struct{}, shardIndex
 		if err != nil {
 			return fmt.Errorf("encode frame shard %d chunk %d: %w", shardIndex, chunkIndex, err)
 		}
-		if quicErr == nil {
+		if usedQUIC {
 			if werr := sendFrameViaQUIC(quicStream, frame); werr != nil {
 				return fmt.Errorf("QUIC send shard %d chunk %d: %w", shardIndex, chunkIndex, werr)
 			}
@@ -354,19 +374,19 @@ func sendPlaintextChunks(srcPath string, onlyChunks map[int]struct{}, shardIndex
 		sort.Ints(sorted)
 		for _, chunkIndex := range sorted {
 			if _, err := sf.Seek(int64(chunkIndex)*int64(effectiveChunkSize), io.SeekStart); err != nil {
-				return fmt.Errorf("seek shard %d chunk %d: %w", shardIndex, chunkIndex, err)
+				return usedQUIC, fmt.Errorf("seek shard %d chunk %d: %w", shardIndex, chunkIndex, err)
 			}
 			n, err := io.ReadFull(sf, buf)
 			if n > 0 {
 				if serr := sendOne(buf[:n], chunkIndex); serr != nil {
-					return serr
+					return usedQUIC, serr
 				}
 			}
 			if err != nil && err != io.ErrUnexpectedEOF {
-				return fmt.Errorf("read shard %d chunk %d: %w", shardIndex, chunkIndex, err)
+				return usedQUIC, fmt.Errorf("read shard %d chunk %d: %w", shardIndex, chunkIndex, err)
 			}
 		}
-		return nil
+		return usedQUIC, nil
 	}
 
 	// Full send: sequential read.
@@ -374,14 +394,14 @@ func sendPlaintextChunks(srcPath string, onlyChunks map[int]struct{}, shardIndex
 		n, err := io.ReadFull(sf, buf)
 		if n > 0 {
 			if serr := sendOne(buf[:n], chunkIndex); serr != nil {
-				return serr
+				return usedQUIC, serr
 			}
 		}
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			return nil
+			return usedQUIC, nil
 		}
 		if err != nil {
-			return fmt.Errorf("read shard %d: %w", shardIndex, err)
+			return usedQUIC, fmt.Errorf("read shard %d: %w", shardIndex, err)
 		}
 	}
 }
