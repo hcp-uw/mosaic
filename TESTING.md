@@ -122,10 +122,16 @@ go run ./client -relay 45.32.226.71:9000 -msg "hello via relay" -wait 3s
 
 ## 5. File sharding (drop-to-shard, double-click-to-open)
 
-A file dropped into `~/Mosaic` is split into 14 shards, **distributed across the
-connected nodes** (round-robin — each shard goes to one node, not replicated to
-all), and replaced by a small `<name>.mosaic` stub (a JSON manifest). Opening the
-stub downloads the shards and reconstructs the original file.
+A file dropped into `~/Mosaic` is **Reed-Solomon encoded into 14 shards (10 data
++ 4 parity)**, **distributed across the connected nodes** (round-robin — each
+shard goes to one node, not replicated to all), and replaced by a small
+`<name>.mosaic` stub (a JSON manifest). Opening the stub downloads the shards and
+reconstructs the original file. Any **10 of the 14** shards are enough, so up to
+**4 lost shards** are tolerated.
+
+Shard addresses are `<sha256-of-file>.<NN>` (content digest + index `00`–`13`);
+indices `00`–`09` are data shards and `10`–`13` parity. The manifest records the
+data/parity split so rehydrate can reconstruct from whatever subset survives.
 
 Every connected client is a **node**: it serves `store_shard`/`retrieve_shard`
 for the network *and*, when run with `-node`, watches its own `~/Mosaic` and
@@ -148,8 +154,11 @@ each. With N nodes, shard `i` is stored on node `i mod N`.
 >   - 149.28.13.244:... (node2)
 > ```
 >
-> Because shards are not replicated, losing a node loses its shards — there is
-> no redundancy yet.
+> Redundancy comes from the parity shards, not replication: any 10 of 14 shards
+> reconstruct the file. Note this is *shard*-level tolerance — with only 2 nodes
+> (~7 shards each), losing a whole node loses 7 shards and the file can't be
+> rebuilt. To survive a full node loss you need enough nodes that no node holds
+> more than 4 shards (e.g. 4+ nodes).
 
 **Storage nodes run as `mosaic-node` services** on both node1 and node2 — each
 connects to the relay and serves shards (and watches its own `~/Mosaic`), so
