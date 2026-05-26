@@ -181,6 +181,7 @@ func autoReconstruct(asm *shardAssembly) {
 	outDir, err := os.MkdirTemp("", "mosaic-recon-*")
 	if err != nil {
 		fmt.Printf("[Transfer] Reconstruct: cannot create output dir: %v\n", err)
+		reconstructed.Delete(asm.fileHash)
 		return
 	}
 	defer os.RemoveAll(outDir)
@@ -210,6 +211,7 @@ func autoReconstruct(asm *shardAssembly) {
 	enc, err := encoding.NewEncoder(asm.totalDataShards, asm.totalShards-asm.totalDataShards, outDir, plainDir)
 	if err != nil {
 		fmt.Printf("[Transfer] Reconstruct: encoder init failed: %v\n", err)
+		reconstructed.Delete(asm.fileHash)
 		return
 	}
 	// Use stored block size if available; fall back to computing from file size.
@@ -221,18 +223,21 @@ func autoReconstruct(asm *shardAssembly) {
 	fmt.Printf("[Transfer] Reconstructing %s…\n", asm.fileHash[:12])
 	if err := enc.DecodeShards(asm.fileHash, asm.fileSize); err != nil {
 		fmt.Printf("[Transfer] Reconstruct: decode failed: %v\n", err)
+		reconstructed.Delete(asm.fileHash)
 		return
 	}
 
 	matches, _ := filepath.Glob(filepath.Join(outDir, asm.fileHash+"*"))
 	if len(matches) == 0 {
 		fmt.Printf("[Transfer] Reconstruct: output file not found\n")
+		reconstructed.Delete(asm.fileHash)
 		return
 	}
 
 	destPath := filepath.Join(mosaicDir, asm.fileName)
 	if err := copyFile(matches[0], destPath); err != nil {
 		fmt.Printf("[Transfer] Reconstruct: could not write %s: %v\n", destPath, err)
+		reconstructed.Delete(asm.fileHash)
 		return
 	}
 	fmt.Printf("[Transfer] File ready: %s\n", destPath)

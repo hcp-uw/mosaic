@@ -173,6 +173,8 @@ func (s *Server) processMessage(data []byte, clientAddr *net.UDPAddr, enableLogg
 		s.handleClientPing(msg, clientAddr, enableLogging)
 	case api.ClientDeregister:
 		s.handleClientDeregister(clientAddr, enableLogging)
+	case api.TURNRelayAddrFwd:
+		s.handleTURNRelayAddrFwd(msg, enableLogging)
 	default:
 		if enableLogging {
 			log.Printf("Unknown message type %s from %s", msg.Type, clientAddr)
@@ -429,6 +431,35 @@ func (s *Server) sendLeaderAssignment(clientAddr *net.UDPAddr) {
 func (s *Server) sendPeerAssignment(clientAddr, peerAddr *net.UDPAddr, peerID string) {
 	msg := api.NewPeerAssignmentMessage(peerAddr, peerID)
 	s.sendMessage(clientAddr, msg)
+}
+
+// handleTURNRelayAddrFwd forwards a TURN relay address to the named peer.
+// Both nodes are behind symmetric NAT so neither can reach the other through
+// the TURN relay directly; the STUN server bridges the address exchange
+// because both clients have an active UDP connection to it on port 3478.
+func (s *Server) handleTURNRelayAddrFwd(msg *api.Message, enableLogging bool) {
+	d, err := msg.GetTURNRelayAddrFwdData()
+	if err != nil {
+		return
+	}
+
+	s.mutex.Lock()
+	target, ok := s.clients[d.TargetPeerID]
+	s.mutex.Unlock()
+
+	if !ok {
+		if enableLogging {
+			log.Printf("TURNRelayAddrFwd: target peer %s not found", d.TargetPeerID)
+		}
+		return
+	}
+
+	fwd := api.NewTURNRelayAddrMessage(msg.Sign.PubKey, api.TURNRelayAddrData{RelayAddr: d.RelayAddr})
+	s.sendMessage(target.Address, fwd)
+
+	if enableLogging {
+		log.Printf("TURNRelayAddrFwd: forwarded relay %s from %s to %s", d.RelayAddr, msg.Sign.PubKey, d.TargetPeerID)
+	}
 }
 
 func (s *Server) sendErrorMessage(clientAddr *net.UDPAddr, errorMsg, errorCode string) {

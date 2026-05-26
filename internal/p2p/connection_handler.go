@@ -86,7 +86,7 @@ func (c *Client) tickStunPing(state ClientState) {
 			c.mutex.Unlock()
 		}
 
-	// StatePaired, StateConnectedToPeer: member does not ping STUN.
+		// StatePaired, StateConnectedToPeer: member does not ping STUN.
 	}
 }
 
@@ -102,8 +102,8 @@ func (c *Client) tickPeerPings(state ClientState) {
 	now := time.Now()
 	var toSend []pingTarget
 	deadLeaderFound := false
-	var turnFallbackIDs []string  // peers to try TURN for (direct timed out)
-	var stunRetryIDs   []string   // TURN peers to attempt STUN promotion for
+	var turnFallbackIDs []string // peers to try TURN for (direct timed out)
+	var stunRetryIDs []string    // TURN peers to attempt STUN promotion for
 
 	for id, peer := range c.peers {
 		if peer.Conn == nil {
@@ -125,7 +125,7 @@ func (c *Client) tickPeerPings(state ClientState) {
 		// If a direct peer hasn't ponged within the TURN fallback window and
 		// we haven't already switched it to TURN, queue a fallback attempt.
 		// This applies to any peer (leader or member) — either side may be behind NAT.
-		if !peer.ViaTURN && staleness > turnFallbackTimeout {
+		if !peer.ViaTURN && (forceTURN || staleness > turnFallbackTimeout) {
 			turnFallbackIDs = append(turnFallbackIDs, id)
 		}
 
@@ -157,8 +157,11 @@ func (c *Client) tickPeerPings(state ClientState) {
 	}
 
 	// STUN promotion attempts for existing TURN connections.
-	for _, id := range stunRetryIDs {
-		go c.tryPromoteToDirectUDP(id)
+	// Disabled when forceTURN is set — we want to stay on TURN for testing.
+	if !forceTURN {
+		for _, id := range stunRetryIDs {
+			go c.tryPromoteToDirectUDP(id)
+		}
 	}
 
 	// A member whose leader just died re-registers with STUN.

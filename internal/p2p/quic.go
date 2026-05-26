@@ -245,3 +245,12 @@ func (c *Client) HasQUICConnection(peerID string) bool {
 	return peer != nil && peer.QUICConn != nil
 }
 
+// IsPeerViaTURN reports whether the connection to peerID is relayed through TURN.
+// Used by the upload path to select a TURN-safe chunk size that avoids IP fragmentation.
+func (c *Client) IsPeerViaTURN(peerID string) bool {
+	c.mutex.RLock()
+	peer := c.peers[peerID]
+	c.mutex.RUnlock()
+	return peer != nil && peer.ViaTURN
+}
+

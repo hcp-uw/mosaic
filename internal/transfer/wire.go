@@ -144,8 +144,8 @@ func decodeBinaryShardChunk(frame []byte) (*binaryShardChunk, error) {
 // (ackLoss/ackSuccess); local write latency only signals OS-buffer pressure.
 //
 // With 3 concurrent shard goroutines sharing the global pacer:
-//    2 ms init → 500 slots/sec total → ~32 Mbps — fast start on 8 KB chunks
-//    1 ms min  → 1000 slots/sec total → ~64 Mbps ceiling for fast links
+//    2 ms init → 500 slots/sec total → ~600 KB/s fast start on 1200-byte chunks
+//    1 ms min  → 1000 slots/sec total → ~1.2 MB/s ceiling for fast links
 //  100 ms max  → 10 slots/sec floor   → safe floor for very lossy paths
 //
 // ackSuccess speeds up by 18% per confirmed shard so the pacer quickly

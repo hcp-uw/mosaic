@@ -570,6 +570,60 @@ func (c *Client) processMessage(msg *api.Message) {
 			ch <- nil
 		}
 
+	case api.TURNRelayAddr:
+		// The STUN server forwarded the peer's TURN relay address to us.
+		// Update the peer to send directly to their relay (using our regular
+		// serverConn), which creates a NAT mapping so the TURN server can
+		// forward their replies back to us. Keep ViaTURN=true so address
+		// updates from ping/pong don't overwrite the relay address.
+		d, err := msg.GetTURNRelayAddrData()
+		if err != nil {
+			return
+		}
+		peerID := msg.Sign.PubKey
+		relayUDPAddr, err := net.ResolveUDPAddr("udp", d.RelayAddr)
+		if err != nil {
+			fmt.Printf("[TURN] bad relay addr from %s: %v\n", peerID[:8], err)
+			return
+		}
+
+		c.mutex.Lock()
+		peer, ok := c.peers[peerID]
+		if ok {
+			peer.Address = relayUDPAddr
+			peer.Conn = c.serverConn  // send directly to their relay via our regular socket
+			peer.ViaTURN = true       // protect address from ping/pong overwrites
+			peer.LastPeerPong = time.Now()
+		}
+		c.mutex.Unlock()
+
+		if !ok {
+			return
+		}
+
+		fmt.Printf("[TURN] peer %s relay addr → %s; opening direct path\n", peerID[:8], d.RelayAddr)
+
+		// Re-send our HandshakeInit via the new relay path so both sides can
+		// complete the X25519 key exchange (the original init was dropped by NAT).
+		c.mutex.RLock()
+		ephPrivBytes := peer.EphemeralPrivKey
+		myID := c.id
+		quicPort := c.quicPort
+		conn := c.serverConn
+		c.mutex.RUnlock()
+
+		if len(ephPrivBytes) > 0 {
+			go func() {
+				ephPriv, err := ecdh.X25519().NewPrivateKey(ephPrivBytes)
+				if err != nil {
+					return
+				}
+				initMsg := api.NewHandshakeInitMessage(myID, ephPriv.PublicKey().Bytes(), quicPort)
+				data, _ := initMsg.Serialize()
+				conn.WriteToUDP(data, relayUDPAddr) //nolint:errcheck — best-effort
+			}()
+		}
+
 	default:
 		c.notifyError(fmt.Errorf("unknown message type: %s", msg.Type))
 	}

@@ -85,6 +85,13 @@ const (
 	// the peer can route return traffic through the relay instead of sending
 	// directly to the NAT-private IP (which the firewall would drop).
 	TURNRelayAddr MessageType = "turn_relay_addr"
+
+	// TURNRelayAddrFwd is sent by a client TO the STUN server, asking it to
+	// forward a TURNRelayAddr notification to the named peer. This is required
+	// when both nodes are behind symmetric NAT: neither can reach the other via
+	// the TURN relay directly, but both have live UDP connections to the STUN
+	// server (port 3478), so the server can bridge the address exchange.
+	TURNRelayAddrFwd MessageType = "turn_relay_addr_fwd"
 )
 
 // Message represents the base message structure
@@ -954,6 +961,35 @@ func (m *Message) GetTURNRelayAddrData() (*TURNRelayAddrData, error) {
 		return nil, err
 	}
 	var d TURNRelayAddrData
+	return &d, json.Unmarshal(b, &d)
+}
+
+// TURNRelayAddrFwdData is sent by a client to the STUN server to forward a
+// relay address to a peer that cannot be reached directly (symmetric NAT).
+// TargetPeerID is the peer's STUN-assigned ID (their registered IP:port string).
+type TURNRelayAddrFwdData struct {
+	TargetPeerID string `json:"targetPeerID"`
+	RelayAddr    string `json:"relayAddr"`
+}
+
+func NewTURNRelayAddrFwdMessage(senderID string, d TURNRelayAddrFwdData) *Message {
+	return &Message{
+		Sign:      NewSignature(senderID),
+		Type:      TURNRelayAddrFwd,
+		Timestamp: time.Now(),
+		Data:      d,
+	}
+}
+
+func (m *Message) GetTURNRelayAddrFwdData() (*TURNRelayAddrFwdData, error) {
+	if m.Type != TURNRelayAddrFwd {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d TURNRelayAddrFwdData
 	return &d, json.Unmarshal(b, &d)
 }
 

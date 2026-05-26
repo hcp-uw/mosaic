@@ -26,13 +26,19 @@ import (
 	"github.com/pion/turn/v4"
 )
 
+// forceTURN forces all peers onto the TURN relay immediately, skipping
+// direct UDP hole-punching. Set to true to simulate symmetric NAT in testing.
+const forceTURN = false
+
 // turnFallbackTimeout is how long we wait for a direct pong before falling
-// back to TURN. Must be longer than peerPingInterval (10s) so that a peer
-// gets at least one full ping→pong exchange before TURN is tried. Peers with
-// a public IP (like a droplet) will pong within the first ping cycle (~10s)
-// and never trigger TURN; peers behind NAT won't pong at all, so after
-// turnFallbackTimeout the relay is allocated.
-const turnFallbackTimeout = 25 * time.Second
+// back to TURN. 1s when forceTURN is set (instant fallback for testing);
+// 25s in production so peers get at least two full ping cycles before TURN.
+var turnFallbackTimeout = func() time.Duration {
+	if forceTURN {
+		return 1 * time.Second
+	}
+	return 25 * time.Second
+}()
 
 // turnState owns a single TURN allocation for one peer.
 type turnState struct {
@@ -142,15 +148,19 @@ func (c *Client) ConnectViaTURN(peerID string) error {
 
 	fmt.Printf("[TURN] relay active for peer %s via %s\n", peerID, c.turnAddr)
 
-	// Tell the peer our relay address so they can route return traffic through
-	// TURN instead of sending directly to our NAT-private IP (which the
-	// firewall drops). The peer updates our address entry to the relay address,
-	// so all future sends from their side arrive at the TURN server and are
-	// forwarded back to us.
+	// Notify the peer of our relay address via the STUN server.
+	// We cannot send directly to the peer because both sides may be behind
+	// symmetric NAT and neither TURN relay can bootstrap a path to the other's
+	// direct IP. The STUN server bridges this: both clients have an active UDP
+	// connection to it (port 3478), so it can forward the relay address to the
+	// peer's registered address.
 	relayAddr := ts.relayConn.LocalAddr().String()
-	relayMsg := api.NewTURNRelayAddrMessage(c.id, api.TURNRelayAddrData{RelayAddr: relayAddr})
-	if err := c.SendToPeer(peerID, relayMsg); err != nil {
-		fmt.Printf("[TURN] could not notify peer %s of relay addr: %v\n", peerID, err)
+	fwdMsg := api.NewTURNRelayAddrFwdMessage(c.id, api.TURNRelayAddrFwdData{
+		TargetPeerID: peerID,
+		RelayAddr:    relayAddr,
+	})
+	if err := c.sendToServer(fwdMsg); err != nil {
+		fmt.Printf("[TURN] could not forward relay addr for %s via STUN: %v\n", peerID, err)
 	}
 	return nil
 }

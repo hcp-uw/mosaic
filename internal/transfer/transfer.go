@@ -16,11 +16,11 @@ const (
 	ParityShards = 4
 	TotalShards  = DataShards + ParityShards
 
-	// chunkSize is the UDP send unit. Keeping it at 8 KB limits IP fragmentation
-	// on lossy paths (WiFi, TURN relay) where one dropped fragment kills the chunk.
-	// QUIC handles reliability internally, so chunkSizeQUIC can be much larger —
-	// 256 KB = 4 chunks per 1 MB shard vs 128, cutting per-shard overhead 32×.
-	chunkSize     = 8 * 1024
+	// chunkSize is the UDP unit for both on-disk storage and wire sends.
+	// 1200 bytes plaintext → ~1285 bytes on-wire (AES-GCM + frame header) →
+	// single IP packet at any standard MTU, safe for both direct UDP and TURN relay.
+	// QUIC ignores this value entirely and uses chunkSizeQUIC instead.
+	chunkSize     = 1200
 	chunkSizeQUIC = 256 * 1024
 
 	// binaryMagic is the first byte of every binary shard frame.
