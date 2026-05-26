@@ -511,6 +511,19 @@ func handlePeerLeft(peerID string, mosaicDir string, client *p2p.Client) {
 // giving a stable assignment that every node in the network can compute independently.
 // Called from OnHandshakeDone so both the encrypted session and UDP path are ready.
 func redistributeShardsToNewPeer(peerID string, client *p2p.Client) {
+	// Wait for the QUIC connection before streaming. The QUIC dial is launched
+	// concurrently from completeHandshake and typically completes in <500ms, but
+	// redistribution goroutines would otherwise call OpenShardStream in microseconds
+	// and always fall back to UDP. On strict NAT networks (university WiFi, etc.)
+	// Droplet's outbound UDP to Mac is blocked, so only the QUIC path works.
+	quicDeadline := time.Now().Add(3 * time.Second)
+	for !client.HasQUICConnection(peerID) {
+		if time.Now().After(quicDeadline) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
 	// Build stable ordering: our ID + all current peer IDs, sorted.
 	ourID := client.GetID()
 	connected := client.GetConnectedPeers()
