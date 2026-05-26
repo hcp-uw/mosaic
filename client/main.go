@@ -40,6 +40,8 @@ import (
 type client struct {
 	conn  net.Conn
 	store *shardstore.Store
+	id    string
+	key   []byte
 
 	writeMu sync.Mutex
 	seq     uint64
@@ -48,8 +50,8 @@ type client struct {
 	waiters map[string]chan *proto.Message
 }
 
-func newClient(conn net.Conn, store *shardstore.Store) *client {
-	return &client{conn: conn, store: store, waiters: make(map[string]chan *proto.Message)}
+func newClient(conn net.Conn, store *shardstore.Store, id string, key []byte) *client {
+	return &client{conn: conn, store: store, id: id, key: key, waiters: make(map[string]chan *proto.Message)}
 }
 
 // send writes a single line to the relay, guarding against interleaved writes
@@ -366,6 +368,7 @@ var discoveryTimeout = 1500 * time.Millisecond
 func main() {
 	relay := flag.String("relay", "127.0.0.1:9000", "relay address host:port")
 	home := flag.String("home", "", "Mosaic base directory (default ~/Mosaic)")
+	setKey := flag.String("set-key", "", "set/update the user key used for identity+encryption and exit")
 	node := flag.Bool("node", false, "run as a network node: serve shards to the network and shard files dropped into the Mosaic dir")
 	rehydrate := flag.String("rehydrate", "", "reconstruct the given .mosaic stub from the network, then exit")
 	openAfter := flag.Bool("open", false, "with -rehydrate, open the reconstructed file afterward")
@@ -383,6 +386,17 @@ func main() {
 		}
 		base = b
 	}
+	if *setKey != "" {
+		if err := writeUserKey(*setKey); err != nil {
+			log.Fatalf("client: set key: %v", err)
+		}
+		log.Printf("client: wrote key to %s", mosaicKeyPath())
+		return
+	}
+	id, key, err := loadIdentityAndKey()
+	if err != nil {
+		log.Fatalf("client: %v", err)
+	}
 	store, err := shardstore.New(base)
 	if err != nil {
 		log.Fatalf("client: shard store: %v", err)
@@ -395,7 +409,7 @@ func main() {
 	defer conn.Close()
 	log.Printf("client: connected to relay %s (home %s)", *relay, base)
 
-	c := newClient(conn, store)
+	c := newClient(conn, store, id, key)
 	go c.receive()
 
 	switch {
