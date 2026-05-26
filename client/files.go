@@ -13,46 +13,83 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/klauspost/reedsolomon"
 )
 
 const (
-	numShards    = 14
+	// Reed-Solomon erasure coding: 10 data + 4 parity = 14 shards. Any 10 of the
+	// 14 are enough to reconstruct the file, so up to 4 shards can be lost.
+	dataShards   = 10
+	parityShards = 4
+	numShards    = dataShards + parityShards // 14
+
 	stubExt      = ".mosaic"
 	pollInterval = time.Second
 )
 
 // manifest is the content of a .mosaic stub: enough to locate every shard on
-// the network and verify the reconstructed file.
+// the network and reconstruct + verify the file.
 type manifest struct {
-	Name    string   `json:"name"`    // original base name, e.g. "report.pdf"
-	Size    int64    `json:"size"`    // original size in bytes
-	SHA256  string   `json:"sha256"`  // hex digest of the original file
-	Shards  []string `json:"shards"`  // shard addresses, in reconstruction order
-	Created string   `json:"created"` // RFC3339 timestamp
+	Name         string   `json:"name"`          // original base name, e.g. "report.pdf"
+	Size         int64    `json:"size"`          // original size in bytes
+	SHA256       string   `json:"sha256"`        // hex digest of the original file
+	DataShards   int      `json:"data_shards"`   // Reed-Solomon data shard count
+	ParityShards int      `json:"parity_shards"` // Reed-Solomon parity shard count
+	Shards       []string `json:"shards"`        // shard addresses, indexed 0..n-1
+	Created      string   `json:"created"`       // RFC3339 timestamp
 }
 
-// splitN divides data into exactly n contiguous chunks. Trailing chunks may be
-// empty when len(data) < n.
-func splitN(data []byte, n int) [][]byte {
-	chunks := make([][]byte, n)
-	size := (len(data) + n - 1) / n // ceil; 0 when data is empty
-	for i := 0; i < n; i++ {
-		start := i * size
-		if start > len(data) {
-			start = len(data)
+// encodeShards Reed-Solomon encodes data into dataShards+parityShards equal-size
+// shards. All shards are the same length (the last data shard is zero-padded);
+// rehydrate trims back to the original size.
+func encodeShards(data []byte) ([][]byte, error) {
+	if len(data) == 0 {
+		// Split rejects empty input; represent an empty file as empty shards.
+		shards := make([][]byte, numShards)
+		for i := range shards {
+			shards[i] = []byte{}
 		}
-		end := start + size
-		if end > len(data) {
-			end = len(data)
-		}
-		chunks[i] = data[start:end]
+		return shards, nil
 	}
-	return chunks
+	enc, err := reedsolomon.New(dataShards, parityShards)
+	if err != nil {
+		return nil, err
+	}
+	shards, err := enc.Split(data)
+	if err != nil {
+		return nil, err
+	}
+	if err := enc.Encode(shards); err != nil {
+		return nil, err
+	}
+	return shards, nil
 }
 
-// shardFile splits path into shards, stores them across the network, writes a
-// .mosaic stub, and removes the original. It aborts (leaving the original in
-// place) if any shard cannot be confirmed stored on at least one peer.
+// decodeShards reconstructs the original bytes from shards (some may be nil),
+// given the data/parity split and original size. It needs at least dataShards
+// present.
+func decodeShards(shards [][]byte, dShards, pShards int, size int64) ([]byte, error) {
+	if size == 0 {
+		return []byte{}, nil
+	}
+	enc, err := reedsolomon.New(dShards, pShards)
+	if err != nil {
+		return nil, err
+	}
+	if err := enc.ReconstructData(shards); err != nil {
+		return nil, fmt.Errorf("reconstruct: %w", err)
+	}
+	var buf bytes.Buffer
+	if err := enc.Join(&buf, shards, int(size)); err != nil {
+		return nil, fmt.Errorf("join: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+// shardFile erasure-codes path into numShards shards, distributes them across
+// the network, writes a .mosaic stub, and removes the original. It aborts
+// (leaving the original in place) if any shard cannot be confirmed stored.
 func (c *client) shardFile(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -61,6 +98,11 @@ func (c *client) shardFile(path string) error {
 	sum := sha256.Sum256(data)
 	digest := hex.EncodeToString(sum[:])
 
+	shards, err := encodeShards(data)
+	if err != nil {
+		return fmt.Errorf("encode: %w", err)
+	}
+
 	nodes, err := c.discoverNodes(discoveryTimeout)
 	if err != nil {
 		return fmt.Errorf("discover nodes: %w", err)
@@ -68,14 +110,13 @@ func (c *client) shardFile(path string) error {
 	if len(nodes) == 0 {
 		return fmt.Errorf("no other nodes connected to store shards on; aborting")
 	}
-	log.Printf("client: distributing %d shards across %d node(s)", numShards, len(nodes))
+	log.Printf("client: distributing %d shards (%d data + %d parity) across %d node(s)", numShards, dataShards, parityShards, len(nodes))
 
-	chunks := splitN(data, numShards)
 	addrs := make([]string, numShards)
-	for i, chunk := range chunks {
+	for i, shard := range shards {
 		addr := fmt.Sprintf("%s.%02d", digest, i)
 		target := nodes[i%len(nodes)] // round-robin: each shard to one node
-		ok, err := c.storeShardNet(target, addr, chunk, rpcTimeout)
+		ok, err := c.storeShardNet(target, addr, shard, rpcTimeout)
 		if err != nil {
 			return fmt.Errorf("store shard %d on %s: %w", i, target, err)
 		}
@@ -86,11 +127,13 @@ func (c *client) shardFile(path string) error {
 	}
 
 	m := manifest{
-		Name:    filepath.Base(path),
-		Size:    int64(len(data)),
-		SHA256:  digest,
-		Shards:  addrs,
-		Created: time.Now().UTC().Format(time.RFC3339),
+		Name:         filepath.Base(path),
+		Size:         int64(len(data)),
+		SHA256:       digest,
+		DataShards:   dataShards,
+		ParityShards: parityShards,
+		Shards:       addrs,
+		Created:      time.Now().UTC().Format(time.RFC3339),
 	}
 	mb, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
@@ -107,9 +150,10 @@ func (c *client) shardFile(path string) error {
 	return nil
 }
 
-// rehydrate reconstructs the file described by a .mosaic stub, fetching every
-// shard from the network and verifying the result. It writes the file next to
-// the stub (stub kept) and optionally opens it.
+// rehydrate reconstructs the file described by a .mosaic stub. It fetches the
+// shards from the network — tolerating up to ParityShards missing ones —
+// Reed-Solomon decodes them, verifies the checksum, writes the file next to the
+// stub (stub kept), and optionally opens it.
 func (c *client) rehydrate(stubPath string, openAfter bool) error {
 	mb, err := os.ReadFile(stubPath)
 	if err != nil {
@@ -120,28 +164,35 @@ func (c *client) rehydrate(stubPath string, openAfter bool) error {
 		return fmt.Errorf("not a valid %s stub: %w", stubExt, err)
 	}
 
-	var buf bytes.Buffer
+	// Fetch shards, leaving missing ones nil. We only need DataShards of them.
+	shards := make([][]byte, len(m.Shards))
+	present := 0
 	for i, addr := range m.Shards {
 		data, err := c.retrieveShardNet(addr, rpcTimeout)
 		if err != nil {
-			return fmt.Errorf("shard %d/%d: %w", i+1, len(m.Shards), err)
+			continue // missing; reconstruct from parity if enough survive
 		}
-		buf.Write(data)
+		shards[i] = data
+		present++
+	}
+	if present < m.DataShards {
+		return fmt.Errorf("only %d of %d shards available; need %d to reconstruct", present, len(m.Shards), m.DataShards)
 	}
 
-	if int64(buf.Len()) != m.Size {
-		return fmt.Errorf("reconstructed size %d != expected %d", buf.Len(), m.Size)
+	buf, err := decodeShards(shards, m.DataShards, m.ParityShards, m.Size)
+	if err != nil {
+		return err
 	}
-	sum := sha256.Sum256(buf.Bytes())
+	sum := sha256.Sum256(buf)
 	if got := hex.EncodeToString(sum[:]); got != m.SHA256 {
 		return fmt.Errorf("checksum mismatch: got %s, want %s", got, m.SHA256)
 	}
 
 	outPath := strings.TrimSuffix(stubPath, stubExt)
-	if err := os.WriteFile(outPath, buf.Bytes(), 0o644); err != nil {
+	if err := os.WriteFile(outPath, buf, 0o644); err != nil {
 		return err
 	}
-	log.Printf("client: rehydrated %q (%d bytes, checksum ok)", filepath.Base(outPath), m.Size)
+	log.Printf("client: rehydrated %q (%d bytes, %d/%d shards present, checksum ok)", filepath.Base(outPath), m.Size, present, len(m.Shards))
 
 	if openAfter && runtime.GOOS == "darwin" {
 		if err := exec.Command("open", outPath).Run(); err != nil {
