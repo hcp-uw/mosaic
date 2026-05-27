@@ -570,7 +570,14 @@ func (c *Client) processMessage(msg *api.Message) {
 		c.queuePosition = data.QueuePosition
 		ch := c.registrationDone
 		c.registrationDone = nil // signal only once
+		hasRelayAddr := c.tcpRelayAddr != ""
 		c.mutex.Unlock()
+
+		// Connect to TCP relay eagerly so both peers are always registered.
+		// This ensures the relay can route to us even before direct UDP fails.
+		if hasRelayAddr {
+			go c.connectTCPRelay()
+		}
 
 		if ch != nil {
 			ch <- nil

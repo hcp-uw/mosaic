@@ -284,6 +284,15 @@ func (c *Client) ConnectToPeer(peer *PeerInfo) error {
 		}
 	}()
 
+	// Immediately activate TCP relay if configured — don't wait for the ping
+	// timeout. On restricted networks (e.g. university WiFi) direct UDP never
+	// works, so activating relay right away ensures transfers succeed without a
+	// multi-second delay. On open networks tryPromoteToDirectUDP will upgrade
+	// back to direct UDP once it confirms the path is live.
+	if c.tcpRelayAddr != "" {
+		go c.ConnectViaTCPRelay(peerID)
+	}
+
 	return nil
 }
 

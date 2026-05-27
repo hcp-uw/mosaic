@@ -220,8 +220,26 @@ func (c *Client) handleTCPRelayMessages(relay *sharedTCPRelay) {
 		// Copy payload and dispatch — dataBuf is reused next iteration.
 		msg := make([]byte, dataLen)
 		copy(msg, dataBuf[:dataLen])
+		senderID := string(senderBytes)
+		c.maybeActivateRelayForSender(senderID)
 		c.processPeerMessage(msg, nil)
 	}
+}
+
+// maybeActivateRelayForSender switches the named peer's Conn to the TCP relay
+// path if it isn't already relayed. Called whenever a message arrives from
+// that peer via the relay so the return path also uses relay (bidirectional).
+func (c *Client) maybeActivateRelayForSender(senderID string) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	peer, ok := c.peers[senderID]
+	if !ok || peer == nil || peer.ViaTURN || c.tcpRelay == nil {
+		return
+	}
+	peer.Conn = &tcpRelayPacketConn{relay: c.tcpRelay, peerID: senderID}
+	peer.ViaTURN = true
+	peer.LastPeerPong = time.Now()
+	fmt.Printf("[TCPRelay] Auto-switched to relay for sender %s\n", senderID[:min(8, len(senderID))])
 }
 
 // ConnectViaTCPRelay sets up the TCP relay path for peerID.
