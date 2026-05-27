@@ -102,8 +102,11 @@ func (c *Client) tickPeerPings(state ClientState) {
 	now := time.Now()
 	var toSend []pingTarget
 	deadLeaderFound := false
-	var turnFallbackIDs []string // peers to try TURN for (direct timed out)
-	var stunRetryIDs []string    // TURN peers to attempt STUN promotion for
+	var turnFallbackIDs []string    // peers to try TURN for (direct timed out)
+	var tcpRelayFallbackIDs []string // peers to try TCP relay for (TURN unavailable/failed)
+	var stunRetryIDs []string       // TURN peers to attempt STUN promotion for
+	hasTURN := c.turnAddr != ""
+	hasTCPRelay := c.tcpRelayAddr != ""
 
 	for id, peer := range c.peers {
 		if peer.Conn == nil {
@@ -122,11 +125,14 @@ func (c *Client) tickPeerPings(state ClientState) {
 			continue
 		}
 
-		// If a direct peer hasn't ponged within the TURN fallback window and
-		// we haven't already switched it to TURN, queue a fallback attempt.
-		// This applies to any peer (leader or member) — either side may be behind NAT.
+		// If a direct peer hasn't ponged within the fallback window, try TURN
+		// (if configured) or TCP relay (if TURN is not configured).
 		if !peer.ViaTURN && (forceTURN || staleness > turnFallbackTimeout) {
-			turnFallbackIDs = append(turnFallbackIDs, id)
+			if hasTURN {
+				turnFallbackIDs = append(turnFallbackIDs, id)
+			} else if hasTCPRelay {
+				tcpRelayFallbackIDs = append(tcpRelayFallbackIDs, id)
+			}
 		}
 
 		// Periodically retry STUN hole-punch for TURN-relayed peers so they
@@ -147,11 +153,21 @@ func (c *Client) tickPeerPings(state ClientState) {
 		}
 	}
 
-	// TURN fallback: leader peer hasn't responded to direct hole-punch.
+	// TURN fallback: direct hole-punch timed out, TURN is configured.
 	for _, id := range turnFallbackIDs {
 		go func(peerID string) {
 			if err := c.ConnectViaTURN(peerID); err != nil {
 				c.notifyError(fmt.Errorf("TURN fallback failed for %s: %w", peerID, err))
+			}
+		}(id)
+	}
+
+	// TCP relay fallback: direct UDP timed out and TURN is not configured.
+	// Used on networks that block all UDP (e.g. university WiFi).
+	for _, id := range tcpRelayFallbackIDs {
+		go func(peerID string) {
+			if err := c.ConnectViaTCPRelay(peerID); err != nil {
+				c.notifyError(fmt.Errorf("TCP relay fallback failed for %s: %w", peerID, err))
 			}
 		}(id)
 	}

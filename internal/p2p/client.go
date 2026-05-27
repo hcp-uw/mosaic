@@ -52,6 +52,10 @@ type Client struct {
 	stunFailCount    int
 	stunReconnecting bool
 
+	// TCP relay fallback — used when both direct UDP and TURN are blocked (e.g. university WiFi).
+	tcpRelayAddr string
+	tcpRelay     *sharedTCPRelay // non-nil once connectTCPRelay succeeds
+
 	// registrationDone is written once by processMessage when RegisterSuccess
 	// arrives. ConnectToStun blocks on it so the CLI gets a real confirmation
 	// that the STUN server received and acknowledged the registration.
@@ -61,12 +65,13 @@ type Client struct {
 
 // ClientConfig holds client configuration
 type ClientConfig struct {
-	ServerAddress  string
-	TURNAddress    string // optional — empty disables TURN fallback
-	TURNUsername   string
-	TURNPassword   string
-	PingInterval   time.Duration
-	ConnectTimeout time.Duration
+	ServerAddress    string
+	TURNAddress      string // optional — empty disables TURN fallback
+	TURNUsername     string
+	TURNPassword     string
+	TCPRelayAddress  string // optional — TCP relay fallback for UDP-blocked networks
+	PingInterval     time.Duration
+	ConnectTimeout   time.Duration
 }
 
 // DefaultClientConfig returns default client configuration with TURN fallback enabled.
@@ -99,6 +104,7 @@ func NewClient(config *ClientConfig) (*Client, error) {
 		turnAddr:         config.TURNAddress,
 		turnUsername:     config.TURNUsername,
 		turnPassword:     config.TURNPassword,
+		tcpRelayAddr:     config.TCPRelayAddress,
 		state:            StateDisconnected,
 		peers:            make(map[string]*PeerInfo),
 		ctx:              ctx,

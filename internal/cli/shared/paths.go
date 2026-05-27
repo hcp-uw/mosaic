@@ -21,11 +21,16 @@ const (
 
 	// DefaultTURNServer is the TURN relay address — same droplet, port 3479.
 	// Used as fallback when STUN hole-punching fails (e.g. restrictive NAT/firewall).
-	DefaultTURNServer = DefaultServerIP + ":3479"
+	//DefaultTURNServer = DefaultServerIP + ":3479"
+	DefaultTURNServer = ""
 
 	// TURNUsername and TURNPassword are the shared credentials for the relay.
 	TURNUsername = "mosaic"
 	TURNPassword = "mosaic-turn"
+
+	// DefaultTCPRelayServer is the TCP relay address — same droplet, port 9000.
+	// Used as final fallback when UDP is blocked entirely (e.g. university WiFi).
+	DefaultTCPRelayServer = DefaultServerIP + ":9000"
 )
 
 // MosaicDir returns ~/Mosaic — the user's file storage directory.

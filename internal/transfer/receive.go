@@ -75,6 +75,10 @@ func HandleBinaryShardChunk(data []byte) {
 		finalAsm := assemblies[key]
 		delete(assemblies, key)
 		assemblyMu.Unlock()
+		if finalAsm == nil {
+			// Another goroutine (duplicate chunk delivery) already claimed this assembly.
+			return
+		}
 		finalizingShards.Store(key, struct{}{})
 		go func() {
 			defer finalizingShards.Delete(key)

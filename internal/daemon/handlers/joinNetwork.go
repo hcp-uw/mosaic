@@ -107,6 +107,7 @@ func runClient(serverAddr string, errCh chan<- error) {
 	resetJoinSyncState()
 
 	config := p2p.DefaultClientConfig(serverAddr, shared.DefaultTURNServer, shared.TURNUsername, shared.TURNPassword)
+	config.TCPRelayAddress = shared.DefaultTCPRelayServer
 	client, err := p2p.NewClient(config)
 	if err != nil {
 		log.Printf("Failed to create P2P client: %v", err)
