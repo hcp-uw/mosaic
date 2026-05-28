@@ -30,13 +30,11 @@ func StreamShardToPeer(fileHash string, meta *ShardMeta, shardIndex int, peerID 
 	totalChunks := 0
 
 	for {
-		useQUIC := client.HasQUICConnection(peerID)
-
 		// Register ack channel BEFORE sending so the QUIC-EOF ACK is never dropped.
 		ackCh := make(chan []int, 1)
 		shardAckChans.Store(ackKey, ackCh)
 
-		tc, ok := streamEncryptedChunks(shardPath, meta, shardIndex, onlyChunks, peerID, client)
+		tc, usedQUIC, ok := streamEncryptedChunks(shardPath, meta, shardIndex, onlyChunks, peerID, client)
 		if !ok {
 			shardAckChans.Delete(ackKey)
 			return
@@ -47,7 +45,7 @@ func StreamShardToPeer(fileHash string, meta *ShardMeta, shardIndex int, peerID 
 
 		// QUIC path: stream EOF triggers ShardStreamAck via HandleQUICStreamDone.
 		// UDP path: send explicit ShardStreamDone to trigger the receiver's ack.
-		if !useQUIC {
+		if !usedQUIC {
 			client.SendToPeer(peerID, api.NewShardStreamDoneMessage(client.GetID(), api.ShardStreamDoneData{ //nolint:errcheck
 				FileHash:    fileHash,
 				ShardIndex:  shardIndex,
@@ -83,36 +81,63 @@ func StreamShardToPeer(fileHash string, meta *ShardMeta, shardIndex int, peerID 
 // streamEncryptedChunks reads the on-disk encrypted shard file and sends
 // chunks to peerID via QUIC (preferred) or UDP. If onlyChunks is non-nil only
 // those chunk indices are sent (skipping others via sequential scan); otherwise
-// all chunks are sent. Returns (totalChunks, success).
-func streamEncryptedChunks(shardPath string, meta *ShardMeta, shardIndex int, onlyChunks map[int]struct{}, peerID string, client *p2p.Client) (int, bool) {
+// all chunks are sent. Returns (totalChunks, usedQUIC, success).
+func streamEncryptedChunks(shardPath string, meta *ShardMeta, shardIndex int, onlyChunks map[int]struct{}, peerID string, client *p2p.Client) (int, bool, bool) {
 	f, err := os.Open(shardPath)
 	if err != nil {
-		return 0, false
+		return 0, false, false
 	}
 	defer f.Close()
 
 	var hdr [4]byte
 	if _, err := io.ReadFull(f, hdr[:]); err != nil {
-		return 0, false
+		return 0, false, false
 	}
 	totalChunks := int(binary.LittleEndian.Uint32(hdr[:]))
 
-	quicStream, quicErr := client.OpenShardStream(peerID)
+	// The QUIC dial to this peer is asynchronous — it may not be complete when
+	// the first shard request arrives. Wait up to 3 s for the connection before
+	// falling back to UDP; typical TLS + QUIC handshake takes < 200 ms.
+	// Skip the wait entirely if the peer never advertised a QUIC port (e.g.
+	// TURN-relayed path where direct QUIC will never succeed).
+	var quicStream io.WriteCloser
+	var quicErr error
+	if client.HasQUICPort(peerID) {
+		quicDeadline := time.Now().Add(3 * time.Second)
+		for {
+			quicStream, quicErr = client.OpenShardStream(peerID)
+			if quicErr == nil || time.Now().After(quicDeadline) {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	} else {
+		quicStream, quicErr = client.OpenShardStream(peerID)
+	}
 	if quicErr == nil {
 		defer quicStream.Close()
+		fmt.Printf("[Transfer] Shard %d → %s: using QUIC stream\n", shardIndex, peerID[:8])
+	} else {
+		fmt.Printf("[Transfer] Shard %d → %s: QUIC unavailable (%v), using UDP\n", shardIndex, peerID[:8], quicErr)
 	}
+
+	// Per-shard pacer for the UDP fallback path. Using a per-goroutine pacer
+	// instead of the shared global lets N concurrent shard goroutines each run
+	// at full rate rather than sharing a single send-slot queue.
+	var localPacer adaptivePacer
+	localPacer.interval = pacerInitInterval
 
 	for chunkIdx := 0; chunkIdx < totalChunks; chunkIdx++ {
 		var lenBuf [4]byte
 		if _, err := io.ReadFull(f, lenBuf[:]); err != nil {
 			fmt.Printf("[Transfer] streamEncryptedChunks: read chunk %d len failed: %v\n", chunkIdx, err)
-			return totalChunks, false
+			return totalChunks, quicErr == nil, false
 		}
 		n := int(binary.LittleEndian.Uint32(lenBuf[:]))
 		encryptedChunk := make([]byte, n)
 		if _, err := io.ReadFull(f, encryptedChunk); err != nil {
 			fmt.Printf("[Transfer] streamEncryptedChunks: read chunk %d data failed: %v\n", chunkIdx, err)
-			return totalChunks, false
+			return totalChunks, quicErr == nil, false
 		}
 
 		if onlyChunks != nil {
@@ -133,26 +158,26 @@ func streamEncryptedChunks(shardPath string, meta *ShardMeta, shardIndex int, on
 			data:            encryptedChunk,
 		})
 		if err != nil {
-			return totalChunks, false
+			return totalChunks, quicErr == nil, false
 		}
 
 		if quicErr == nil {
 			if err := sendFrameViaQUIC(quicStream, frame); err != nil {
 				fmt.Printf("[Transfer] streamEncryptedChunks: shard %d chunk %d → %s (QUIC) failed: %v\n", shardIndex, chunkIdx, peerID[:8], err)
-				return totalChunks, false
+				return totalChunks, true, false
 			}
 		} else {
-			udpPacer.wait()
+			localPacer.wait()
 			t0 := time.Now()
 			err := client.SendRawToPeer(peerID, frame)
-			udpPacer.adjust(time.Since(t0), err == nil)
+			localPacer.adjust(time.Since(t0), err == nil)
 			if err != nil {
 				fmt.Printf("[Transfer] streamEncryptedChunks: shard %d chunk %d → %s failed: %v\n", shardIndex, chunkIdx, peerID, err)
-				return totalChunks, false
+				return totalChunks, false, false
 			}
 		}
 	}
-	return totalChunks, true
+	return totalChunks, quicErr == nil, true
 }
 
 // HandleShardRequest responds to a peer requesting a shard.

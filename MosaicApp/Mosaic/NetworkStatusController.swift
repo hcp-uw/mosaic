@@ -439,8 +439,15 @@ class NetworkStatusViewController: NSViewController {
     @objc private func cacheFileTapped(_ sender: NSButton) {
         let name = sender.identifier?.rawValue ?? ""
         sender.isEnabled = false
-        DaemonClient.shared.fetch(name) { [weak self] _ in
-            DispatchQueue.main.async { self?.loadManifest() }
+        sender.title = "Caching…"
+        if let appDelegate = NSApp.delegate as? AppDelegate {
+            appDelegate.fetchWithOverlay(filename: name) { [weak self] in
+                self?.loadManifest()
+            }
+        } else {
+            DaemonClient.shared.fetch(name) { [weak self] _ in
+                DispatchQueue.main.async { self?.loadManifest() }
+            }
         }
     }
 

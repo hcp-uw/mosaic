@@ -296,7 +296,8 @@ private func fetchAndOpen(filename: String, realURL: URL) {
 
 // Shows the download overlay while fetching filename.
 // If openWhenDone is non-nil, opens that URL once the file lands on disk.
-private func fetchWithOverlay(filename: String, openWhenDone realURL: URL? = nil) {
+// completion is called on the main queue when the fetch request returns.
+func fetchWithOverlay(filename: String, openWhenDone realURL: URL? = nil, completion: (() -> Void)? = nil) {
     overlay = DownloadOverlayController()
     overlay?.window?.orderFrontRegardless()
     overlay?.beginTracking(filename: filename)
@@ -317,6 +318,7 @@ private func fetchWithOverlay(filename: String, openWhenDone realURL: URL? = nil
             pollTimer?.invalidate()
             pollTimer = nil
             finishOverlay()
+            completion?()
             if let url = realURL {
                 if FileManager.default.fileExists(atPath: url.path) {
                     self.openFile(url)
