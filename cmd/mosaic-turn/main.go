@@ -1,7 +1,9 @@
-// cmd/mosaic-turn — standalone Mosaic TURN relay server.
+// cmd/mosaic-turn — Mosaic application-layer relay server.
 //
-// This binary is completely independent of the daemon and STUN server.
-// It is not integrated into the P2P stack yet — run it separately for now.
+// This binary runs on the droplet alongside the STUN server and handles
+// NAT traversal for peers that cannot establish direct UDP connections.
+// It replaces the pion/turn TURN server with a custom relay that identifies
+// peers by peer ID rather than IP:port, which correctly handles symmetric NAT.
 //
 // Usage:
 //
@@ -10,43 +12,41 @@
 //
 // Flags:
 //
-//	-public-ip   Public IP of this server (required for relay to work correctly)
-//	-port        UDP port to listen on (default 3478, same as STUN)
-//	             Use 3479 if you're running both STUN and TURN on the same machine.
-//	-users       Comma-separated user:password pairs  (default "mosaic:mosaic-turn")
-//	-realm       TURN realm identifier (default "mosaic")
-//	-min-port    Start of ephemeral relay port range (default 49152)
-//	-max-port    End of ephemeral relay port range (default 65535)
+//	-public-ip   Public IP of this server (required for logging; relay binds 0.0.0.0)
+//	-port        UDP port to listen on (default 3479)
+//	-users       Accepted for compatibility; unused by the relay protocol
+//	-realm       Accepted for compatibility; unused by the relay protocol
+//	-min-port    Accepted for compatibility; unused by the relay protocol
+//	-max-port    Accepted for compatibility; unused by the relay protocol
 //
 // Environment variables (override flags):
 //
 //	TURN_PUBLIC_IP   Public IP
 //	TURN_PORT        UDP port
-//	TURN_USERS       user:pass,user2:pass2,...
-//	TURN_REALM       Realm
+//	TURN_USERS       Accepted for compatibility; unused
+//	TURN_REALM       Accepted for compatibility; unused
 package main
 
 import (
 	"flag"
 	"fmt"
 	"log"
-	"net"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
 	"syscall"
 
-	"github.com/pion/turn/v4"
+	"github.com/hcp-uw/mosaic/internal/turn"
 )
 
 func main() {
 	publicIP := flag.String("public-ip", "", "Public IP address of this server (required)")
 	port := flag.Int("port", 3479, "UDP port to listen on")
-	usersStr := flag.String("users", "mosaic:mosaic-turn", "Comma-separated user:password pairs")
-	realm := flag.String("realm", "mosaic", "TURN realm")
-	minPort := flag.Int("min-port", 49152, "Minimum relay port")
-	maxPort := flag.Int("max-port", 65535, "Maximum relay port")
+	usersStr := flag.String("users", "mosaic:mosaic-turn", "Accepted for compatibility; unused by relay protocol")
+	realm := flag.String("realm", "mosaic", "Accepted for compatibility; unused by relay protocol")
+	minPort := flag.Int("min-port", 49152, "Accepted for compatibility; unused by relay protocol")
+	maxPort := flag.Int("max-port", 65535, "Accepted for compatibility; unused by relay protocol")
 	flag.Parse()
 
 	// Environment variables override flags.
@@ -71,81 +71,36 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Parse user:password pairs into a lookup map.
-	userMap := parseUsers(*usersStr)
-	if len(userMap) == 0 {
-		log.Fatal("error: no valid user:password pairs found in -users flag")
-	}
-
 	addr := fmt.Sprintf("0.0.0.0:%d", *port)
-	udpConn, err := net.ListenPacket("udp", addr)
+	server, err := turn.NewServer(addr, *publicIP)
 	if err != nil {
-		log.Fatalf("failed to listen on %s: %v", addr, err)
+		log.Fatalf("failed to create relay server: %v", err)
 	}
+	server.Start()
 
-	server, err := turn.NewServer(turn.ServerConfig{
-		Realm: *realm,
-
-		// AuthHandler is called for every TURN allocation request.
-		// Returns the key (HMAC-MD5 of user:realm:password) for the given user.
-		AuthHandler: func(username, realm string, srcAddr net.Addr) (key []byte, ok bool) {
-			password, exists := userMap[username]
-			if !exists {
-				log.Printf("AUTH DENIED  user=%q src=%s", username, srcAddr)
-				return nil, false
-			}
-			log.Printf("AUTH OK      user=%q src=%s", username, srcAddr)
-			return turn.GenerateAuthKey(username, realm, password), true
-		},
-
-		PacketConnConfigs: []turn.PacketConnConfig{
-			{
-				PacketConn: udpConn,
-				RelayAddressGenerator: &turn.RelayAddressGeneratorPortRange{
-					RelayAddress: net.ParseIP(*publicIP),
-					Address:      "0.0.0.0",
-					MinPort:      uint16(*minPort),
-					MaxPort:      uint16(*maxPort),
-				},
-			},
-		},
-	})
-	if err != nil {
-		log.Fatalf("failed to start TURN server: %v", err)
-	}
-
-	fmt.Printf("Mosaic TURN server listening on %s\n", addr)
+	fmt.Printf("Mosaic relay server listening on %s\n", addr)
 	fmt.Printf("Public IP:   %s\n", *publicIP)
-	fmt.Printf("Realm:       %s\n", *realm)
-	fmt.Printf("Users:       %s\n", usernames(userMap))
-	fmt.Printf("Relay ports: %d-%d\n", *minPort, *maxPort)
+	fmt.Printf("Realm:       %s (compatibility flag — relay protocol has no realm)\n", *realm)
+	fmt.Printf("Users:       %s (compatibility flag — relay protocol has no auth)\n", usernames(*usersStr))
+	fmt.Printf("Port range:  %d-%d (compatibility flags — relay protocol uses peer IDs)\n", *minPort, *maxPort)
 
-	// Block until Ctrl+C / SIGTERM.
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan
 
-	fmt.Println("\nShutting down TURN server...")
+	fmt.Println("\nShutting down relay server...")
 	server.Close()
 }
 
-// parseUsers parses "user1:pass1,user2:pass2" into a map.
-func parseUsers(s string) map[string]string {
-	m := make(map[string]string)
+// usernames extracts the user names from a "user:pass,user2:pass2" string for logging.
+func usernames(s string) string {
+	var names []string
 	for _, pair := range strings.Split(s, ",") {
 		pair = strings.TrimSpace(pair)
 		parts := strings.SplitN(pair, ":", 2)
-		if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
-			m[parts[0]] = parts[1]
+		if len(parts) == 2 && parts[0] != "" {
+			names = append(names, parts[0])
 		}
-	}
-	return m
-}
-
-func usernames(m map[string]string) string {
-	names := make([]string, 0, len(m))
-	for u := range m {
-		names = append(names, u)
 	}
 	return strings.Join(names, ", ")
 }
