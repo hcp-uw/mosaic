@@ -46,6 +46,7 @@ func HandleBinaryShardChunk(data []byte) {
 			firstChunkAt:    time.Now(),
 		}
 		assemblies[key] = asm
+		fileFirstChunkNano.LoadOrStore(c.fileHash, time.Now().UnixNano())
 	}
 	assemblyMu.Unlock()
 
@@ -244,7 +245,14 @@ func autoReconstruct(asm *shardAssembly) {
 		reconstructed.Delete(asm.fileHash)
 		return
 	}
-	fmt.Printf("[Transfer] File ready: %s\n", destPath)
+
+	totalElapsed := ""
+	if v, ok := fileFirstChunkNano.LoadAndDelete(asm.fileHash); ok {
+		d := time.Since(time.Unix(0, v.(int64)))
+		sizeMB := float64(asm.fileSize) / (1024 * 1024)
+		totalElapsed = fmt.Sprintf(" (%.1fs total, %.2f MB/s)", d.Seconds(), sizeMB/d.Seconds())
+	}
+	fmt.Printf("[Transfer] File ready: %s%s\n", destPath, totalElapsed)
 
 	// Unblock any FetchFileBytes call that is waiting for this file.
 	if v, ok := fileReadyChans.Load(asm.fileHash); ok {

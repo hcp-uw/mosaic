@@ -16,11 +16,20 @@ const (
 	ParityShards = 4
 	TotalShards  = DataShards + ParityShards
 
-	// chunkSize is the UDP unit for both on-disk storage and wire sends.
+	// chunkSize is the UDP wire chunk size.
 	// 1200 bytes plaintext → ~1285 bytes on-wire (AES-GCM + frame header) →
 	// single IP packet at any standard MTU, safe for both direct UDP and TURN relay.
-	// QUIC ignores this value entirely and uses chunkSizeQUIC instead.
-	chunkSize     = 1200
+	chunkSize = 1200
+
+	// chunkSizeOnDisk is used when encrypting and storing shard files locally.
+	// 8 KB plaintext → ~8236 bytes on-wire — well within the 65507-byte UDP
+	// datagram limit, and reduces per-shard frame count ~7× vs the 1200 B wire
+	// size (1280 frames vs 8739 for a 10 MB shard), meaning fewer QUIC writes.
+	chunkSizeOnDisk = 8 * 1024
+
+	// chunkSizeQUIC is used when streaming shards directly inline over QUIC.
+	// QUIC's reliable delivery makes large frames safe; 256 KB reduces frame
+	// count to ~40 per 10 MB shard.
 	chunkSizeQUIC = 256 * 1024
 
 	// binaryMagic is the first byte of every binary shard frame.
@@ -121,6 +130,11 @@ var (
 	// on each chunk arrival instead of polling every 5 seconds.
 	// key: "fileHash:shardIndex" → chan struct{}
 	shardActivityChans sync.Map
+
+	// fileFirstChunkNano records the Unix nanosecond when the first chunk of any
+	// shard for a given file arrives. Used to compute end-to-end download time.
+	// key: fileHash → int64
+	fileFirstChunkNano sync.Map
 
 	// shardAckChans allows the sender to block after ShardStreamDone until the
 	// receiver's ShardStreamAck arrives with the list of missing chunk indices.

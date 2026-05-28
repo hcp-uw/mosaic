@@ -25,6 +25,7 @@ import (
 func StreamShardToPeer(fileHash string, meta *ShardMeta, shardIndex int, peerID string, client *p2p.Client) {
 	shardPath := filepath.Join(ShardsDir(), fileHash, fmt.Sprintf("shard%d_%s.dat", shardIndex, fileHash))
 	ackKey := fmt.Sprintf("%s:%d:%s", fileHash, shardIndex, peerID)
+	serveStart := time.Now()
 
 	var onlyChunks map[int]struct{} // nil = send all; set on retransmit
 	totalChunks := 0
@@ -64,7 +65,8 @@ func StreamShardToPeer(fileHash string, meta *ShardMeta, shardIndex int, peerID 
 		shardAckChans.Delete(ackKey)
 
 		if len(missing) == 0 {
-			fmt.Printf("[Transfer] Redistributed shard %d of %s → peer %s\n", shardIndex, fileHash[:12], ShortPeer(peerID))
+			fmt.Printf("[Transfer] Redistributed shard %d of %s → peer %s in %.1fs (%d chunks)\n",
+				shardIndex, fileHash[:12], ShortPeer(peerID), time.Since(serveStart).Seconds(), totalChunks)
 			return
 		}
 

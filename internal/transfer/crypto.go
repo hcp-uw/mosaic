@@ -135,17 +135,17 @@ func decryptShardToPlaintext(path string, key [32]byte) ([]byte, error) {
 	return plain, nil
 }
 
-// encryptAndStoreShardFile reads srcPath in chunkSize windows, encrypts each
+// encryptAndStoreShardFile reads srcPath in chunkSizeOnDisk windows, encrypts each
 // chunk with AES-GCM, and writes the length-prefixed encrypted chunks to dstPath
-// in the same on-disk format as writeEncryptedShardFile. 8 KB chunks are used
-// so the file can always be served over UDP fallback without exceeding the 65507-byte
-// datagram limit, even when QUIC stream opening races and fails.
+// in the same on-disk format as writeEncryptedShardFile. 8 KB chunks reduce the
+// per-shard frame count ~7× vs the 1200-byte UDP wire size while remaining safely
+// below the 65507-byte UDP datagram limit for the serve fallback path.
 func encryptAndStoreShardFile(srcPath, dstPath string, key [32]byte) error {
 	info, err := os.Stat(srcPath)
 	if err != nil {
 		return err
 	}
-	totalChunks := int((info.Size() + chunkSize - 1) / chunkSize)
+	totalChunks := int((info.Size() + chunkSizeOnDisk - 1) / chunkSizeOnDisk)
 
 	src, err := os.Open(srcPath)
 	if err != nil {
@@ -165,7 +165,7 @@ func encryptAndStoreShardFile(srcPath, dstPath string, key [32]byte) error {
 		return err
 	}
 
-	buf := make([]byte, chunkSize)
+	buf := make([]byte, chunkSizeOnDisk)
 	for {
 		n, err := io.ReadFull(src, buf)
 		if n > 0 {
