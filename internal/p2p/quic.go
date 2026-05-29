@@ -147,26 +147,33 @@ func (c *Client) quicAcceptStreams(peerID string, conn *quic.Conn) {
 // callQUICBinaryFrameHandler so that the assembly map is fully updated before the
 // stream-done notification fires. All other frames use the async message path.
 //
-// When the stream reaches EOF (sender closed after sending all chunks), we fire
-// notifyQUICStreamDone with the last frame so the transfer layer can send
-// ShardStreamAck without waiting for a UDP ShardStreamDone signal — eliminating
-// the race where that UDP message arrives before QUIC delivers the last chunk.
+// notifyQUICStreamDone is only called on a CLEAN io.EOF (sender closed the stream
+// after the last frame). On connection drop or stream reset the read returns a
+// non-EOF error, and we exit without firing the done notification — doing so would
+// falsely report all chunks as missing and trigger a 30-second ack-timeout cascade.
 //
 // Frame format: [4-byte LE length][binary shard chunk frame (0x01 magic)].
 func (c *Client) handleQUICStream(peerID string, stream *quic.ReceiveStream) {
 	var lastFrame []byte
 	for {
 		var lenBuf [4]byte
-		if _, err := io.ReadFull(stream, lenBuf[:]); err != nil {
-			break
+		_, err := io.ReadFull(stream, lenBuf[:])
+		if err != nil {
+			// io.EOF means the sender cleanly closed the stream after the last frame.
+			// Any other error (connection drop, reset, partial read) means data may
+			// be missing — do NOT fire the done notification in those cases.
+			if err == io.EOF && lastFrame != nil {
+				c.notifyQUICStreamDone(peerID, lastFrame)
+			}
+			return
 		}
 		frameLen := binary.LittleEndian.Uint32(lenBuf[:])
 		if frameLen == 0 || frameLen > 16*1024*1024 {
-			break // sanity guard
+			return // sanity guard
 		}
 		frame := make([]byte, frameLen)
 		if _, err := io.ReadFull(stream, frame); err != nil {
-			break
+			return
 		}
 		lastFrame = frame
 		if len(frame) > 0 && frame[0] == 0x01 {
@@ -174,12 +181,6 @@ func (c *Client) handleQUICStream(peerID string, stream *quic.ReceiveStream) {
 		} else {
 			c.notifyMessageReceived(frame)
 		}
-	}
-	// Stream EOF: QUIC has reliably delivered all data in order. Fire the done
-	// notification so the receiver can send ShardStreamAck immediately, bypassing
-	// the UDP ShardStreamDone / race-condition path entirely.
-	if lastFrame != nil {
-		c.notifyQUICStreamDone(peerID, lastFrame)
 	}
 }
 

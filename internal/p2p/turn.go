@@ -143,13 +143,20 @@ func (c *Client) ConnectViaTURN(peerID string) error {
 		return fmt.Errorf("TURN: no relay server configured")
 	}
 
-	c.mutex.RLock()
+	c.mutex.Lock()
 	peer := c.peers[peerID]
-	c.mutex.RUnlock()
-
 	if peer == nil {
+		c.mutex.Unlock()
 		return fmt.Errorf("TURN: peer %s not found", peerID)
 	}
+	if peer.ViaTURN {
+		c.mutex.Unlock()
+		return nil // already relayed — skip duplicate dial
+	}
+	// Extend the eviction deadline so the peer is not removed while turn.Dial()
+	// blocks waiting for RelayReady (up to relayDialTimeout = 15s).
+	peer.LastPeerPong = time.Now()
+	c.mutex.Unlock()
 
 	fmt.Printf("[TURN] hole-punch timed out for %s — dialing relay\n", peerID[:minPeerIDLen(peerID)])
 
@@ -224,6 +231,9 @@ func (c *Client) connectAsRelayFollower(initiatorID, relayServerAddr string) {
 		c.mutex.Unlock()
 		return
 	}
+	// Extend the eviction deadline so the peer is not removed while turn.Dial()
+	// blocks waiting for RelayReady (up to relayDialTimeout = 15s).
+	peer.LastPeerPong = time.Now()
 	c.mutex.Unlock()
 
 	fmt.Printf("[TURN] dialing relay as follower for %s via %s\n",

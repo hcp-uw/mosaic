@@ -108,25 +108,26 @@ private class LogViewerViewController: NSViewController {
         scrollView = NSScrollView()
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.hasVerticalScroller   = true
-        scrollView.hasHorizontalScroller = true
+        scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers    = true
         scrollView.backgroundColor       = bgColor
         view.addSubview(scrollView)
 
         textView = NSTextView()
-        textView.isEditable             = false
-        textView.isSelectable           = true
-        textView.backgroundColor        = bgColor
-        textView.drawsBackground        = true
-        textView.font                   = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        textView.textColor              = textColor
-        textView.textContainerInset     = NSSize(width: 10, height: 10)
-        textView.isVerticallyResizable  = true
-        textView.isHorizontallyResizable = true
-        textView.textContainer?.widthTracksTextView  = false
+        textView.isEditable              = false
+        textView.isSelectable            = true
+        textView.backgroundColor         = bgColor
+        textView.drawsBackground         = true
+        textView.font                    = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        textView.textColor               = textColor
+        textView.textContainerInset      = NSSize(width: 10, height: 10)
+        textView.isVerticallyResizable   = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask        = [.width]
+        textView.textContainer?.widthTracksTextView  = true
         textView.textContainer?.heightTracksTextView = false
         textView.textContainer?.containerSize = NSSize(
-            width: CGFloat.greatestFiniteMagnitude,
+            width: 0,
             height: CGFloat.greatestFiniteMagnitude)
         scrollView.documentView = textView
 

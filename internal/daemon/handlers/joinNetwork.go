@@ -340,13 +340,16 @@ func handleManifestSync(mosaicDir string, msg *api.Message) {
 	// Remove local entries for files that no longer exist in the network manifest.
 	localEntries, lerr := filesystem.ReadManifest(mosaicDir)
 	if lerr == nil {
-		for name := range localEntries {
+		for name, entry := range localEntries {
 			if !networkNames[name] {
 				if err := filesystem.RemoveFromManifest(mosaicDir, name); err != nil {
 					fmt.Printf("handleManifestSync: could not remove %s from local manifest: %v\n", name, err)
 				}
 				if err := filesystem.RemoveStub(mosaicDir, name); err != nil && !os.IsNotExist(err) {
 					fmt.Printf("handleManifestSync: could not remove stub for %s: %v\n", name, err)
+				}
+				if entry.ContentHash != "" {
+					transfer.DeleteLocalShards(entry.ContentHash)
 				}
 				fmt.Printf("handleManifestSync: removed deleted file %s from local state\n", name)
 			}

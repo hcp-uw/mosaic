@@ -1,12 +1,11 @@
 package transfer
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -29,25 +28,18 @@ func UploadFile(path string, client *p2p.Client) (fileHash string, fileSize int,
 	filename := filepath.Base(path)
 	nameNoExt := strings.TrimSuffix(filename, filepath.Ext(filename))
 
-	f, err := os.Open(path)
+	info, err := os.Stat(path)
 	if err != nil {
-		return "", 0, fmt.Errorf("cannot open %s: %w", path, err)
+		return "", 0, fmt.Errorf("cannot stat %s: %w", path, err)
 	}
-	hasher := sha256.New()
-	fileSize64, err := io.Copy(hasher, f)
-	f.Close()
-	if err != nil {
-		return "", 0, fmt.Errorf("cannot hash %s: %w", path, err)
-	}
-	fileHash = hex.EncodeToString(hasher.Sum(nil))
-	fileSize = int(fileSize64)
+	fileSize = int(info.Size())
 
 	netKey, err := shardEncryptionKey()
 	if err != nil {
 		return "", 0, fmt.Errorf("cannot derive shard key: %w", err)
 	}
 
-	fmt.Printf("[Transfer] Uploading %s  hash=%s…  size=%d bytes\n", filename, fileHash[:12], fileSize)
+	fmt.Printf("[Transfer] Uploading %s  size=%d bytes\n", filename, fileSize)
 
 	// outDir is where the encoder looks for the source file and writes shards.
 	// We symlink the source file in rather than copying it to save I/O on large files.
@@ -70,9 +62,11 @@ func UploadFile(path string, client *p2p.Client) (fileHash string, fileSize int,
 	if err != nil {
 		return "", 0, fmt.Errorf("encoder init failed: %w", err)
 	}
-	if err := enc.EncodeFile(filename); err != nil {
+	fileHash, err = enc.EncodeFileAndHash(filename)
+	if err != nil {
 		return "", 0, fmt.Errorf("encode failed: %w", err)
 	}
+	fmt.Printf("[Transfer] hash=%s\n", fileHash[:12])
 
 	// Build stable peer order: sort our ID + all connected peer IDs lexicographically.
 	// This gives a deterministic shard → node mapping every node can compute independently.
@@ -123,60 +117,114 @@ func UploadFile(path string, client *p2p.Client) (fileHash string, fileSize int,
 	uploadStart := time.Now()
 	resetUploadProgress(TotalShards)
 
-	// Send all shards concurrently — QUIC flow control prevents overwhelming the peer,
-	// and concurrent streams match the receive path (HandleShardRequest also sends in parallel).
+	// Adaptive concurrency: each in-flight shard keeps ~shardSize bytes live in the
+	// receiver's assembly map. Cap concurrent streams so total in-flight assembly data
+	// stays under 256 MB — full concurrency for small files, sequential-ish for large
+	// ones where GC pressure from 860 MB+ of live chunks would kill throughput.
+	const assemblyBudget = 256 << 20 // 256 MB
+	shardSize := int64(fileSize) / DataShards
+	maxConcurrent := TotalShards
+	if shardSize > 0 && int64(TotalShards)*shardSize > assemblyBudget {
+		maxConcurrent = int(assemblyBudget / shardSize)
+		if maxConcurrent < 1 {
+			maxConcurrent = 1
+		}
+	}
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, TotalShards)
+	sem := make(chan struct{}, maxConcurrent)
 
-	for i := 0; i < TotalShards; i++ {
-		srcPath := filepath.Join(outDir, ".bin", filename, fmt.Sprintf("shard%d_%s.dat", i, nameNoExt))
-		targetIndex := i % numNodes
+	// On machines with enough cores, encrypt all shards in parallel — each shard
+	// reads/writes a different file so there's no contention. On constrained
+	// machines (droplets with 1-2 vCPUs) encrypt sequentially to avoid CPU
+	// thrashing; sends still go out as rate-limited goroutines either way.
+	const parallelEncryptThreshold = 4
 
-		if targetIndex == ourIndex {
-			// Our shard: encrypt and persist locally, register in ShardMap.
+	if runtime.NumCPU() >= parallelEncryptThreshold {
+		var encWg sync.WaitGroup
+		for i := 0; i < TotalShards; i++ {
+			srcPath := filepath.Join(outDir, ".bin", filename, fmt.Sprintf("shard%d_%s.dat", i, nameNoExt))
 			dst := filepath.Join(shardDir, fmt.Sprintf("shard%d_%s.dat", i, fileHash))
-			if writeErr := encryptAndStoreShardFile(srcPath, dst, netKey); writeErr == nil {
-				uploadShardsDispatched.Add(1)
+			targetIndex := i % numNodes
+			isOurs := targetIndex == ourIndex
+
+			encWg.Add(1)
+			go func(idx int, src, dst string, ours bool) {
+				defer encWg.Done()
+				if writeErr := encryptAndStoreShardFile(src, dst, netKey); writeErr != nil {
+					return
+				}
 				shardStoredCbMu.Lock()
 				cb := shardStoredCb
 				shardStoredCbMu.Unlock()
 				if cb != nil {
-					cb(fileHash, i)
+					cb(fileHash, idx)
 				}
-			}
-		} else {
-			// Peer's shard: also store an encrypted copy locally so that
-			// HandleShardRequest can re-serve it if the push fails or QUIC
-			// drops chunks mid-stream.
-			dst := filepath.Join(shardDir, fmt.Sprintf("shard%d_%s.dat", i, fileHash))
-			if writeErr := encryptAndStoreShardFile(srcPath, dst, netKey); writeErr == nil {
-				shardStoredCbMu.Lock()
-				cb := shardStoredCb
-				shardStoredCbMu.Unlock()
-				if cb != nil {
-					cb(fileHash, i)
+				if ours {
+					uploadShardsDispatched.Add(1)
 				}
-			}
+			}(i, srcPath, dst, isOurs)
 
-			// Push directly to the peer in a rate-limited goroutine.
-			targetPeerID := ids[targetIndex]
-			wg.Add(1)
-			sem <- struct{}{}
-			go func(shardIdx int, peerID string, src string) {
-				defer func() { <-sem }()
-				defer wg.Done()
-				if err := sendPlaintextShardToPeer(src, shardIdx, fileHash, filename, fileSize, netKey, peerID, client); err != nil {
-					fmt.Printf("[Transfer] Shard %d → peer %s failed: %v\n", shardIdx, peerID[:8], err)
-				} else {
-					shardSentCbMu.Lock()
-					cb := shardSentCb
-					shardSentCbMu.Unlock()
-					if cb != nil {
-						cb(fileHash, shardIdx, peerID)
+			if !isOurs {
+				targetPeerID := ids[targetIndex]
+				wg.Add(1)
+				sem <- struct{}{}
+				go func(shardIdx int, peerID string, src string) {
+					defer func() { <-sem }()
+					defer wg.Done()
+					if err := sendPlaintextShardToPeer(src, shardIdx, fileHash, filename, fileSize, netKey, peerID, client); err != nil {
+						fmt.Printf("[Transfer] Shard %d → peer %s failed: %v\n", shardIdx, peerID[:8], err)
+					} else {
+						shardSentCbMu.Lock()
+						cb := shardSentCb
+						shardSentCbMu.Unlock()
+						if cb != nil {
+							cb(fileHash, shardIdx, peerID)
+						}
 					}
+					uploadShardsDispatched.Add(1)
+				}(i, targetPeerID, srcPath)
+			}
+		}
+		encWg.Wait()
+	} else {
+		for i := 0; i < TotalShards; i++ {
+			srcPath := filepath.Join(outDir, ".bin", filename, fmt.Sprintf("shard%d_%s.dat", i, nameNoExt))
+			dst := filepath.Join(shardDir, fmt.Sprintf("shard%d_%s.dat", i, fileHash))
+			targetIndex := i % numNodes
+			isOurs := targetIndex == ourIndex
+
+			if writeErr := encryptAndStoreShardFile(srcPath, dst, netKey); writeErr == nil {
+				shardStoredCbMu.Lock()
+				cb := shardStoredCb
+				shardStoredCbMu.Unlock()
+				if cb != nil {
+					cb(fileHash, i)
 				}
-				uploadShardsDispatched.Add(1)
-			}(i, targetPeerID, srcPath)
+				if isOurs {
+					uploadShardsDispatched.Add(1)
+				}
+			}
+
+			if !isOurs {
+				targetPeerID := ids[targetIndex]
+				wg.Add(1)
+				sem <- struct{}{}
+				go func(shardIdx int, peerID string, src string) {
+					defer func() { <-sem }()
+					defer wg.Done()
+					if err := sendPlaintextShardToPeer(src, shardIdx, fileHash, filename, fileSize, netKey, peerID, client); err != nil {
+						fmt.Printf("[Transfer] Shard %d → peer %s failed: %v\n", shardIdx, peerID[:8], err)
+					} else {
+						shardSentCbMu.Lock()
+						cb := shardSentCb
+						shardSentCbMu.Unlock()
+						if cb != nil {
+							cb(fileHash, shardIdx, peerID)
+						}
+					}
+					uploadShardsDispatched.Add(1)
+				}(i, targetPeerID, srcPath)
+			}
 		}
 	}
 	wg.Wait()

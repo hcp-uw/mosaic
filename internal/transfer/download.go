@@ -31,6 +31,11 @@ func FetchFileBytes(filename string, client *p2p.Client, getHolders func(content
 
 		sign := api.NewSignature(client.GetID())
 
+		// Reset first-chunk timestamp to now so the "File ready" total time
+		// measures the actual fetch duration rather than from whenever the
+		// initial push shards arrived (which can be seconds earlier).
+		fileFirstChunkNano.Store(meta.FileHash, time.Now().UnixNano())
+
 		// Arm download-progress counters so the CLI can show a progress bar.
 		SetDownloadTarget(meta.FileHash, len(missing))
 		defer ClearDownloadTarget()
