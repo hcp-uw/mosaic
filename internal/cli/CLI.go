@@ -22,6 +22,7 @@ import (
 	"github.com/hcp-uw/mosaic/internal/cli/protocol"
 	"github.com/hcp-uw/mosaic/internal/cli/shared"
 	"github.com/hcp-uw/mosaic/internal/daemon/handlers/helpers"
+	buildversion "github.com/hcp-uw/mosaic/internal/version"
 )
 
 //go:embed HelpMessage.txt
@@ -1021,17 +1022,66 @@ func folderInfo() {
 	fmt.Println(message)
 }
 
-// Prints the current version of mos
 func version() {
-	resp, err := client.SendRequest("getVersion", protocol.VersionRequest{})
-	exitOnErr(err, "Error getting version info: ")
+	fmt.Printf("mos version %s  (released %s)\n", buildversion.Version, buildversion.Date)
 
-	var cmdResp protocol.VersionResponse
-	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
-		exitOnErr(err, "Error parsing response.")
+	latest, err := fetchLatestVersion()
+	if err != nil {
+		return // no internet or no releases yet — silently skip
 	}
-	message := fmt.Sprintf("\nmos version %v\n", cmdResp.Version)
-	fmt.Println(message)
+	if newerVersionAvailable(latest, buildversion.Version) {
+		fmt.Printf("A newer version is available: %s — run ./install.sh to update\n", latest)
+	} else {
+		fmt.Println("Up to date")
+	}
+}
+
+// fetchLatestVersion fetches the plain-text version string served by the
+// droplet's version server (deployed by deploy.sh). Returns an error if the
+// request fails, times out, or the server is unreachable.
+func fetchLatestVersion() (string, error) {
+	httpClient := &http.Client{Timeout: 3 * time.Second}
+	resp, err := httpClient.Get(buildversion.LatestReleaseURL)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(body)), nil
+}
+
+// newerVersionAvailable reports whether latest is strictly greater than current.
+// Both are expected to be "major.minor.patch" strings (leading "v" already stripped).
+func newerVersionAvailable(latest, current string) bool {
+	la := splitVersion(latest)
+	cu := splitVersion(current)
+	for i := range la {
+		if la[i] > cu[i] {
+			return true
+		}
+		if la[i] < cu[i] {
+			return false
+		}
+	}
+	return false
+}
+
+func splitVersion(v string) [3]int {
+	var r [3]int
+	parts := strings.SplitN(strings.TrimPrefix(v, "v"), ".", 3)
+	for i, p := range parts {
+		if i >= 3 {
+			break
+		}
+		r[i], _ = strconv.Atoi(p)
+	}
+	return r
 }
 
 // wipeState deletes all local Mosaic state: ~/Mosaic/, all ~/.mosaic-* key files,

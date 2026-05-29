@@ -193,6 +193,21 @@ Once the STUN server is running, clients connect with:
 mos join network
 ```
 
+## Deploying new versions
+
+After pushing to github, if you want to bump then run
+```bash
+./scripts/bump.sh          # edits version.go, commits
+./scripts/deploy.sh        # pushes to server, publishes new version
+```
+
+or also
+
+```bash
+./scripts/bump.sh minor
+./scripts/bump.sh major
+```
+
 ---
 
 ## Troubleshooting

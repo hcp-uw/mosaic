@@ -58,15 +58,20 @@ var defaultQUICConfig = &quic.Config{
 	KeepAlivePeriod:       10 * time.Second,
 	MaxIncomingUniStreams: 1000,
 
-	// Large receive windows so the sender is never flow-controlled waiting for
-	// a WINDOW_UPDATE mid-shard. With 256 KB chunks, a 1 MB shard = 4 frames;
-	// the 512 KB default stream window would block after the 2nd chunk (one RTT
-	// stall per extra window fill). Setting 4 MB stream / 16 MB connection means
-	// a full shard fits inside the initial window with no stalls at all.
-	InitialStreamReceiveWindow:     4 * 1024 * 1024,  // 4 MB
-	MaxStreamReceiveWindow:         16 * 1024 * 1024, // 16 MB
-	InitialConnectionReceiveWindow: 8 * 1024 * 1024,  // 8 MB
-	MaxConnectionReceiveWindow:     32 * 1024 * 1024, // 32 MB
+	// Receive windows sized for concurrent shard transfers.
+	//
+	// Redistribution sends up to 14 shards in parallel (one goroutine per shard),
+	// each ~10 MB. With the old 8 MB connection window only 2 streams could be
+	// in-flight at once — the other 12 blocked on WINDOW_UPDATE, producing the
+	// observed sequential asm=1 behaviour.
+	//
+	// Rule of thumb: InitialConnectionReceiveWindow ≥ N_concurrent × InitialStreamReceiveWindow.
+	// 14 shards × 4 MB = 56 MB → round up to 64 MB so all streams flow from the
+	// first packet without waiting for auto-tuning to catch up.
+	InitialStreamReceiveWindow:     4 * 1024 * 1024,   // 4 MB  per stream
+	MaxStreamReceiveWindow:         16 * 1024 * 1024,  // 16 MB per stream
+	InitialConnectionReceiveWindow: 64 * 1024 * 1024,  // 64 MB — fits 14+ concurrent streams
+	MaxConnectionReceiveWindow:     256 * 1024 * 1024, // 256 MB
 }
 
 // ──────────────────────────────────────────────────────────
@@ -101,14 +106,24 @@ func (c *Client) quicConnAccept(conn *quic.Conn) {
 		return
 	}
 	if peer.QUICConn != nil {
-		// Our own outgoing dial already established a connection — reject
-		// this incoming duplicate to avoid leaking the connection.
+		// Both sides dialed simultaneously. Use lexicographic ID to pick the
+		// canonical connection: the one where the smaller-ID peer is the dialer.
+		if dialerID < c.id {
+			// Remote (smaller ID) is the canonical dialer — replace our stored conn.
+			old := peer.QUICConn
+			peer.QUICConn = conn
+			c.mutex.Unlock()
+			old.CloseWithError(0, "replaced by canonical dialer") //nolint:errcheck
+		} else {
+			// We have the smaller ID — our outgoing connection is canonical.
+			c.mutex.Unlock()
+			conn.CloseWithError(0, "duplicate QUIC connection") //nolint:errcheck
+			return
+		}
+	} else {
+		peer.QUICConn = conn
 		c.mutex.Unlock()
-		conn.CloseWithError(0, "duplicate QUIC connection") //nolint:errcheck
-		return
 	}
-	peer.QUICConn = conn
-	c.mutex.Unlock()
 	fmt.Printf("[QUIC] Accepted connection from peer %s\n", dialerID)
 	c.quicAcceptStreams(dialerID, conn)
 }
@@ -210,13 +225,22 @@ func (c *Client) dialQUICToPeer(peerID string) {
 		return
 	}
 	if p.QUICConn != nil {
-		// The peer's incoming dial already set a connection — drop this duplicate.
+		if myID < peerID {
+			// We're the canonical dialer (smaller ID) — replace the existing conn.
+			old := p.QUICConn
+			p.QUICConn = conn
+			c.mutex.Unlock()
+			old.CloseWithError(0, "replaced by canonical outgoing") //nolint:errcheck
+		} else {
+			// Remote is canonical dialer — drop our outgoing connection.
+			c.mutex.Unlock()
+			conn.CloseWithError(0, "duplicate QUIC connection") //nolint:errcheck
+			return
+		}
+	} else {
+		p.QUICConn = conn
 		c.mutex.Unlock()
-		conn.CloseWithError(0, "duplicate QUIC connection") //nolint:errcheck
-		return
 	}
-	p.QUICConn = conn
-	c.mutex.Unlock()
 
 	fmt.Printf("[QUIC] Connected to peer %s\n", peerID)
 	c.quicAcceptStreams(peerID, conn)

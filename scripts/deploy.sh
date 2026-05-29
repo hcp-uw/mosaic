@@ -21,15 +21,24 @@ else
     DROPLET_IP=$(grep 'DefaultServerIP = ' "$PATHS_FILE" | grep -oE '"[^"]+"' | tr -d '"')
 fi
 
-SSH_KEY="${HOME}/.ssh/mosaic-droplet"
-REMOTE_USER="root"
-REMOTE_DIR="/root/mosaic"
-
 if [ -z "$DROPLET_IP" ]; then
     echo "Could not determine droplet IP from ${PATHS_FILE}."
     echo "Usage: ./deploy.sh [droplet-ip]"
     exit 1
 fi
+
+SSH_KEY="${HOME}/.ssh/mosaic-droplet"
+REMOTE_USER="root"
+REMOTE_DIR="/root/mosaic"
+SSH_CTL="${HOME}/.ssh/mosaic-deploy-ctl"
+
+# Shared SSH options: key + ControlMaster so all three connections
+# (rsync, build, version publish) share one authenticated session.
+SSH_OPTS="-i ${SSH_KEY} -o ControlMaster=auto -o ControlPath=${SSH_CTL} -o ControlPersist=60s"
+
+# Open the master connection now (prompts once for passphrase/password).
+ssh ${SSH_OPTS} -o BatchMode=no -fN "${REMOTE_USER}@${DROPLET_IP}"
+trap "ssh -o ControlPath=${SSH_CTL} -O exit '${REMOTE_USER}@${DROPLET_IP}' 2>/dev/null; rm -f '${SSH_CTL}'" EXIT
 
 echo "Deploying to ${REMOTE_USER}@${DROPLET_IP}:${REMOTE_DIR}"
 echo ""
@@ -43,7 +52,7 @@ rsync -az --delete \
     --exclude='*.pid' \
     --exclude='files/' \
     --exclude='output/' \
-    -e "ssh -i ${SSH_KEY}" \
+    -e "ssh ${SSH_OPTS}" \
     . "${REMOTE_USER}@${DROPLET_IP}:${REMOTE_DIR}/"
 
 echo "✓ Code synced"
@@ -51,13 +60,21 @@ echo ""
 
 # Build all server binaries on the droplet
 echo "Building on server..."
-ssh -i "${SSH_KEY}" "${REMOTE_USER}@${DROPLET_IP}" bash << 'EOF'
+ssh ${SSH_OPTS} "${REMOTE_USER}@${DROPLET_IP}" bash << 'EOF'
 cd /root/mosaic
 export PATH=$PATH:/usr/local/go/bin
 go build -o bin/mosaic-stun ./cmd/mosaic-stun/
 go build -o bin/mosaic-turn ./cmd/mosaic-turn/
+go build -o bin/mosaic-version-server ./cmd/mosaic-version-server/
 echo "✓ Build complete"
 EOF
+
+# Publish current version so `mos version` update checks reflect this deploy.
+CURRENT_VERSION=$(grep 'Version = ' internal/version/version.go | sed 's/.*Version = "\(.*\)".*/\1/')
+echo "Publishing version ${CURRENT_VERSION}..."
+ssh ${SSH_OPTS} "${REMOTE_USER}@${DROPLET_IP}" \
+    "mkdir -p /var/run/mosaic && echo '${CURRENT_VERSION}' > /var/run/mosaic/latest-version"
+echo "✓ Version ${CURRENT_VERSION} published"
 
 echo ""
 echo "Done. To start the servers:"

@@ -24,3 +24,4 @@ stop_server() {
 
 stop_server "STUN server" stun
 stop_server "TURN server" turn
+stop_server "Version server" version

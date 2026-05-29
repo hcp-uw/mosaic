@@ -27,9 +27,11 @@ PID_DIR="/var/run/mosaic"
 mkdir -p "$LOG_DIR" "$PID_DIR" bin
 
 # Build server binaries if missing
-if [ ! -f "./bin/mosaic-stun" ] || [ ! -f "./bin/mosaic-turn" ]; then
+if [ ! -f "./bin/mosaic-stun" ] || [ ! -f "./bin/mosaic-turn" ] || [ ! -f "./bin/mosaic-version-server" ]; then
     printf "Building server binaries..."
-    if go build -o bin/mosaic-stun ./cmd/mosaic-stun && go build -o bin/mosaic-turn ./cmd/mosaic-turn; then
+    if go build -o bin/mosaic-stun ./cmd/mosaic-stun && \
+       go build -o bin/mosaic-turn ./cmd/mosaic-turn && \
+       go build -o bin/mosaic-version-server ./cmd/mosaic-version-server; then
         echo " ✓"
     else
         echo " ✗"
@@ -56,12 +58,22 @@ else
     echo "✓ TURN server started (PID $!)"
 fi
 
+# Version server (serves /var/run/mosaic/latest-version over HTTP on port 8080)
+if [ -f "${PID_DIR}/version.pid" ] && kill -0 "$(cat ${PID_DIR}/version.pid)" 2>/dev/null; then
+    echo "Version server already running (PID $(cat ${PID_DIR}/version.pid))"
+else
+    ./bin/mosaic-version-server > "${LOG_DIR}/version.log" 2>&1 &
+    echo $! > "${PID_DIR}/version.pid"
+    echo "✓ Version server started (PID $!)"
+fi
 
 echo ""
 echo "Servers running:"
-echo "  STUN: ${PUBLIC_IP}:3478"
-echo "  TURN: ${PUBLIC_IP}:3479"
+echo "  STUN:    ${PUBLIC_IP}:3478"
+echo "  TURN:    ${PUBLIC_IP}:3479"
+echo "  Version: ${PUBLIC_IP}:8080"
 echo ""
 echo "Logs: ${LOG_DIR}/"
 echo "  tail -f ${LOG_DIR}/stun.log"
 echo "  tail -f ${LOG_DIR}/turn.log"
+echo "  tail -f ${LOG_DIR}/version.log"

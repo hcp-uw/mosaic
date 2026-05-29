@@ -123,14 +123,10 @@ func UploadFile(path string, client *p2p.Client) (fileHash string, fileSize int,
 	uploadStart := time.Now()
 	resetUploadProgress(TotalShards)
 
-	// Allow one goroutine per distinct peer target so sends to different peers
-	// run concurrently. Sends to the same peer are still ordered within the goroutine.
-	numPeerTargets := numNodes - 1
-	if numPeerTargets < 1 {
-		numPeerTargets = 1
-	}
+	// Send all shards concurrently — QUIC flow control prevents overwhelming the peer,
+	// and concurrent streams match the receive path (HandleShardRequest also sends in parallel).
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, numPeerTargets)
+	sem := make(chan struct{}, TotalShards)
 
 	for i := 0; i < TotalShards; i++ {
 		srcPath := filepath.Join(outDir, ".bin", filename, fmt.Sprintf("shard%d_%s.dat", i, nameNoExt))

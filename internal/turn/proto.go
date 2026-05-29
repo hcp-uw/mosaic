@@ -30,11 +30,11 @@ func EncodeRegister(peerID string) []byte {
 func EncodeConnect(myID, targetID string) []byte {
 	b := make([]byte, 3+len(myID)+len(targetID))
 	i := 0
-	b[i] = OpRelayConnect
+	b[0] = OpRelayConnect
 	i++
-	b[i] = byte(len(myID))
+	b[1] = byte(len(myID))
 	i++
-	copy(b[i:], myID)
+	copy(b[2:], myID)
 	i += len(myID)
 	b[i] = byte(len(targetID))
 	i++
@@ -59,10 +59,14 @@ func EncodeData(peerID string, data []byte) []byte {
 }
 
 // EncodePing returns: [0x13]
-func EncodePing() []byte { return []byte{OpRelayPing} }
+func EncodePing() []byte {
+	return []byte{OpRelayPing}
+}
 
 // EncodePong returns: [0x14]
-func EncodePong() []byte { return []byte{OpRelayPong} }
+func EncodePong() []byte {
+	return []byte{OpRelayPong}
+}
 
 // EncodeReady returns: [0x15][peerIDLen uint8][peerID]
 func EncodeReady(peerID string) []byte {
