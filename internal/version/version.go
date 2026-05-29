@@ -4,7 +4,7 @@ package version
 // Run `./scripts/bump.sh` (patch), `./scripts/bump.sh minor`, or
 // `./scripts/bump.sh major` to increment and commit automatically.
 var (
-	Version = "1.0.1"
+	Version = "1.0.2"
 	Date    = "2026-05-29"
 )
 
