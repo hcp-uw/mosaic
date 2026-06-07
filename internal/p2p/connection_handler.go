@@ -154,10 +154,16 @@ func (c *Client) tickPeerPings(state ClientState) {
 	}
 
 	// TURN fallback: direct hole-punch timed out, TURN is configured.
+	// If TURN also fails (e.g. the network blocks UDP entirely), chain to TCP relay.
 	for _, id := range turnFallbackIDs {
 		go func(peerID string) {
 			if err := c.ConnectViaTURN(peerID); err != nil {
 				c.notifyError(fmt.Errorf("TURN fallback failed for %s: %w", peerID, err))
+				if hasTCPRelay {
+					if err2 := c.ConnectViaTCPRelay(peerID); err2 != nil {
+						c.notifyError(fmt.Errorf("TCP relay fallback also failed for %s: %w", peerID, err2))
+					}
+				}
 			}
 		}(id)
 	}

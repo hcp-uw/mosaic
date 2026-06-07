@@ -13,12 +13,21 @@
 package relay
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/binary"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net"
 	"sync"
+	"time"
 )
 
 const (
@@ -47,18 +56,57 @@ func NewServer(enableLogging bool) *Server {
 	}
 }
 
-// Start listens on addr (e.g. ":9000") and accepts connections in the background.
+// Start listens on addr with TLS (e.g. ":443") and accepts connections in the background.
+// A self-signed certificate is generated at startup; clients connect with InsecureSkipVerify
+// since payload encryption is handled by the application layer (AES-256-GCM).
 func (s *Server) Start(addr string) error {
-	ln, err := net.Listen("tcp", addr)
+	tlsConf, err := selfSignedTLS()
+	if err != nil {
+		return fmt.Errorf("relay: generate TLS cert: %w", err)
+	}
+	ln, err := tls.Listen("tcp", addr, tlsConf)
 	if err != nil {
 		return fmt.Errorf("relay: listen %s: %w", addr, err)
 	}
 	s.ln = ln
 	if s.logging {
-		log.Printf("TCP relay listening on %s", addr)
+		log.Printf("TCP relay (TLS) listening on %s", addr)
 	}
 	go s.acceptLoop()
 	return nil
+}
+
+// selfSignedTLS generates an ephemeral self-signed ECDSA certificate valid for 10 years.
+// Regenerated on every server restart; clients skip verification since the relay payload
+// is already AES-256-GCM encrypted end-to-end.
+func selfSignedTLS() (*tls.Config, error) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{Organization: []string{"mosaic"}},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(10 * 365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &priv.PublicKey, priv)
+	if err != nil {
+		return nil, err
+	}
+	privDER, err := x509.MarshalECPrivateKey(priv)
+	if err != nil {
+		return nil, err
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: privDER})
+	tlsCert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return nil, err
+	}
+	return &tls.Config{Certificates: []tls.Certificate{tlsCert}}, nil
 }
 
 // Stop closes the listener and all client connections.

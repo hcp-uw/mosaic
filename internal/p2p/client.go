@@ -204,7 +204,7 @@ func (c *Client) handleMessages() {
 		if fromAddr.String() == c.serverAddr.String() {
 			c.processServerMessage(msg)
 		} else {
-			c.processPeerMessage(msg, fromAddr)
+			c.processPeerMessage(msg, fromAddr, true)
 		}
 	}
 }
@@ -293,7 +293,7 @@ func (c *Client) completeHandshake(msg *api.Message, peer *PeerInfo) {
 }
 
 // processPeerMessage processes a message from a peer
-func (c *Client) processPeerMessage(data []byte, fromAddr *net.UDPAddr) {
+func (c *Client) processPeerMessage(data []byte, fromAddr *net.UDPAddr, direct bool) {
 	// Filter out STUN punch packets — just discard silently.
 	if string(data) == "STUN_PUNCH" {
 		return
@@ -335,15 +335,28 @@ func (c *Client) processPeerMessage(data []byte, fromAddr *net.UDPAddr) {
 			c.sendPeerPong(msg.Sign.PubKey)
 			return
 		case api.PeerPong:
+			var oldConn net.PacketConn
 			c.mutex.Lock()
 			if peer, ok := c.peers[msg.Sign.PubKey]; ok {
 				peer.LastPeerPong = time.Now()
-				// Keep address fresh; symmetric NAT may remap between sessions.
-				if fromAddr != nil && !peer.ViaTURN {
+				if direct && peer.ViaTURN {
+					// Pong arrived on the direct UDP socket while the peer was
+					// relay-relayed — hole-punch succeeded, promote back.
+					oldConn = peer.Conn
+					peer.Conn = c.serverConn
+					peer.ViaTURN = false
+					if fromAddr != nil {
+						peer.Address = fromAddr
+					}
+					fmt.Printf("[TURN] promoted peer %s back to direct UDP\n", peer.ID[:minPeerIDLen(peer.ID)])
+				} else if fromAddr != nil && !peer.ViaTURN {
 					peer.Address = fromAddr
 				}
 			}
 			c.mutex.Unlock()
+			if oldConn != nil {
+				oldConn.Close()
+			}
 			return
 		case api.PeerTextMessage:
 			// Forward the full serialized message so the daemon layer can

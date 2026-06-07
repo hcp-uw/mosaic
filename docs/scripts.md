@@ -62,9 +62,10 @@ Starts the STUN and TURN servers. Optionally starts a local `mosaicd` with a for
 **What it does:**
 1. Parses flags and positional args in any order
 2. Builds `mosaic-stun` and `mosaic-turn` if binaries are missing
-3. Starts STUN on port `3478`, skips if already running
-4. Starts TURN on port `3479` with `-public-ip`, skips if already running
-5. If `-quic` or `-udp` is passed: kills any existing `mosaicd`, removes stale PID/socket files, builds `mosaicd`, and starts it with `MOSAIC_TRANSPORT=quic|udp`
+3. On Linux (non-root): grants `cap_net_bind_service` to `mosaic-stun` so it can bind port 443; prints a `sudo setcap` fix if that fails
+4. Starts STUN on port `3478` (UDP) + TCP relay on port `443` (TLS), skips if already running
+5. Starts TURN on port `3479` (UDP) with `-public-ip`, skips if already running
+6. If `-quic` or `-udp` is passed: kills any existing `mosaicd`, removes stale PID/socket files, builds `mosaicd`, and starts it with `MOSAIC_TRANSPORT=quic|udp`
 
 PID files go to `/var/run/mosaic/`; logs go to `/var/log/mosaic/`.
 

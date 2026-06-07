@@ -330,7 +330,7 @@ func (c *Client) handleTURNMessages(peerID string, rs *relayState) {
 		}
 		msg := make([]byte, n)
 		copy(msg, buf[:n])
-		c.processPeerMessage(msg, rs.peerAddr)
+		c.processPeerMessage(msg, rs.peerAddr, false)
 	}
 }
 

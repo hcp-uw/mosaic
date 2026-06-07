@@ -15,7 +15,7 @@ import (
 
 func main() {
 	port := flag.String("port", "3478", "UDP port to listen on")
-	relayPort := flag.String("relay-port", "9000", "TCP relay port (0 to disable)")
+	relayPort := flag.String("relay-port", "443", "TCP relay port (0 to disable); runs TLS with a self-signed cert")
 	flag.Parse()
 
 	config := &stun.ServerConfig{

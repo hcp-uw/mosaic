@@ -16,6 +16,7 @@ Flow:
 */
 
 import (
+	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -106,7 +107,12 @@ func (c *Client) connectTCPRelay() error {
 		return fmt.Errorf("tcp relay: no relay address configured")
 	}
 
-	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+	conn, err := tls.DialWithDialer(
+		&net.Dialer{Timeout: 10 * time.Second},
+		"tcp",
+		addr,
+		&tls.Config{InsecureSkipVerify: true}, //nolint:gosec — self-signed cert; payload is AES-256-GCM encrypted end-to-end
+	)
 	if err != nil {
 		return fmt.Errorf("tcp relay: dial %s: %w", addr, err)
 	}
@@ -222,7 +228,7 @@ func (c *Client) handleTCPRelayMessages(relay *sharedTCPRelay) {
 		copy(msg, dataBuf[:dataLen])
 		senderID := string(senderBytes)
 		c.maybeActivateRelayForSender(senderID)
-		c.processPeerMessage(msg, nil)
+		c.processPeerMessage(msg, nil, false)
 	}
 }
 

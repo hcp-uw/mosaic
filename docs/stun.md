@@ -17,6 +17,42 @@ After pairing, all file transfer, manifest sync, and peer ping/pong go directly 
 
 ---
 
+## NAT Traversal Fallback Chain
+
+Direct hole-punching works for most NAT configurations, but fails in two specific cases: symmetric NAT (where the router assigns a different external port for each destination) and networks that block UDP entirely. Mosaic handles both with a three-tier fallback:
+
+| Tier | Mechanism | When it activates | What it survives |
+|------|-----------|-------------------|-----------------|
+| 1 | **Direct UDP** (hole-punch via STUN) | Immediately on peer assignment | Most NAT types |
+| 2 | **TURN relay** (UDP, port 3479) | After 25s with no pong | Symmetric NAT |
+| 3 | **TCP relay** (TLS, port 443) | If TURN dial fails | Networks that block all UDP |
+
+### Tier 1 — Direct UDP
+
+STUN exchanges each peer's public IP:port. Both sides send UDP punch packets simultaneously to open holes in their routers, then communicate directly. The STUN server is not involved in data transfer after this point.
+
+### Tier 2 — TURN UDP relay
+
+If no direct pong arrives within 25 seconds, the peer that initiated the connection dials the TURN relay server. The relay identifies peers by peer ID (not IP:port), which avoids the port-mismatch that breaks standard TURN on symmetric NAT. Both peers route all traffic through the relay server; neither side needs a direct path to the other.
+
+Once on TURN, the ping routine periodically sends hole-punch packets on the direct UDP path. If the NAT eventually opens (e.g. after a router reboot), the first direct pong promotes the peer back to direct UDP and tears down the relay connection.
+
+### Tier 3 — TCP relay (TLS)
+
+If the TURN dial itself fails (the network blocks all UDP, including the UDP packet to reach port 3479), the client immediately falls through to the TCP relay. The TCP relay listens on port 443 with TLS — firewalls almost universally allow outbound TCP 443, treating it as normal HTTPS traffic.
+
+The relay payload is not inspected by the server. All peer-to-peer data is AES-256-GCM encrypted at the application layer before it touches the relay, so the relay server can only see peer IDs and packet sizes, not content. `InsecureSkipVerify` is used on the TLS connection because the relay cert is self-signed — this is safe given the end-to-end encryption above it.
+
+### Why not just always use the TCP relay?
+
+The TCP relay is registered at STUN connection time (so the server can forward inbound messages immediately), but the peer's traffic path is only switched to TCP relay when the tiers above it fail. Direct UDP and TURN are preferred because:
+
+- Lower latency — no relay hop
+- Lower server cost — relay traffic is bandwidth the server has to pay for
+- QUIC bulk transfer (shard chunks) runs over UDP; routing through a TCP relay adds framing overhead
+
+---
+
 ## Message Flow
 
 ```
@@ -189,5 +225,6 @@ go run ./cmd/mosaic-stun -port 3479
 | Shard data encrypted in transit | ✅ AES-256-GCM (see transfer package) |
 | STUN-restart leadership race | ⚠️ First re-registrant wins; persistent queue positions not implemented |
 | Member queue position preserved across STUN restart | ⚠️ Records expire — members get new positions on re-registration |
-| Transport security | ⚠️ No TLS/DTLS — messages transmitted in plaintext over UDP |
+| STUN/TURN transport security | ⚠️ Plain UDP — no TLS/DTLS on the STUN or TURN channels |
+| TCP relay transport security | ✅ TLS (self-signed cert); relay payload encrypted AES-256-GCM end-to-end |
 | Metadata privacy (who talks to whom) | ⚠️ STUN server sees IP:port pairs during pairing |

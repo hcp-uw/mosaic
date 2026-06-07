@@ -40,13 +40,31 @@ if [ ! -f "./bin/mosaic-stun" ] || [ ! -f "./bin/mosaic-turn" ] || [ ! -f "./bin
     fi
 fi
 
-# STUN server
+# The TCP relay embedded in mosaic-stun listens on port 443.
+# On Linux, binding ports below 1024 requires either root or the net_bind_service capability.
+# Try to grant it automatically; print a clear fix if that fails.
+if [ "$(uname -s)" = "Linux" ] && [ "$(id -u)" -ne 0 ]; then
+    if command -v getcap > /dev/null 2>&1 && ! getcap ./bin/mosaic-stun 2>/dev/null | grep -q "net_bind_service"; then
+        printf "Granting net_bind_service capability to mosaic-stun (needed for port 443)..."
+        if setcap 'cap_net_bind_service=+ep' ./bin/mosaic-stun 2>/dev/null; then
+            echo " ✓"
+        else
+            echo ""
+            echo "⚠  Could not grant net_bind_service — TCP relay will fail to bind port 443."
+            echo "   Fix with one of:"
+            echo "     sudo setcap 'cap_net_bind_service=+ep' $(pwd)/bin/mosaic-stun"
+            echo "     sudo ./scripts/start.sh $PUBLIC_IP"
+        fi
+    fi
+fi
+
+# STUN server (also runs the TCP relay on port 443)
 if [ -f "${PID_DIR}/stun.pid" ] && kill -0 "$(cat ${PID_DIR}/stun.pid)" 2>/dev/null; then
     echo "STUN server already running (PID $(cat ${PID_DIR}/stun.pid))"
 else
     ./bin/mosaic-stun > "${LOG_DIR}/stun.log" 2>&1 &
     echo $! > "${PID_DIR}/stun.pid"
-    echo "✓ STUN server started (PID $!)"
+    echo "✓ STUN + TCP relay started (PID $!)"
 fi
 
 # TURN server
@@ -69,9 +87,10 @@ fi
 
 echo ""
 echo "Servers running:"
-echo "  STUN:    ${PUBLIC_IP}:3478"
-echo "  TURN:    ${PUBLIC_IP}:3479"
-echo "  Version: ${PUBLIC_IP}:8080"
+echo "  STUN:      ${PUBLIC_IP}:3478 (UDP)"
+echo "  TURN:      ${PUBLIC_IP}:3479 (UDP relay)"
+echo "  TCP relay: ${PUBLIC_IP}:443  (TLS — fallback for UDP-blocked networks)"
+echo "  Version:   ${PUBLIC_IP}:8080"
 echo ""
 echo "Logs: ${LOG_DIR}/"
 echo "  tail -f ${LOG_DIR}/stun.log"
