@@ -40,12 +40,25 @@ type Server struct {
 	cancel context.CancelFunc
 	done  chan bool
 
+	noRateLimit bool // disables per-IP cap; set via --no-rate-limit or MOSAIC_STUN_NO_RATE_LIMIT=1
+
 	// Legacy fields kept for compatibility.
 	waitingQueue             []*ClientInfo
 	currentTerm              uint
 	leaseExpirationTimeStamp *time.Time
 	leaseID                  uint
 }
+
+// maxPerIPConcurrent is the maximum number of simultaneously registered clients
+// allowed from a single IP address. Prevents one machine from owning the network.
+// Disabled when NoRateLimit is set.
+const maxPerIPConcurrent = 10
+
+// minPingInterval is the minimum time between accepted pings from any single client.
+// Pings arriving faster than this are dropped silently. Legitimate clients ping every
+// 10 seconds, so 5 seconds gives a comfortable margin while blocking flood attacks.
+// Disabled when NoRateLimit is set.
+const minPingInterval = 5 * time.Second
 
 // ServerConfig holds server configuration.
 type ServerConfig struct {
@@ -54,6 +67,10 @@ type ServerConfig struct {
 	PingInterval  time.Duration
 	MaxQueueSize  int
 	EnableLogging bool
+	// NoRateLimit disables the per-IP concurrent registration cap. Set during
+	// local development so multiple test nodes on the same machine aren't blocked.
+	// Enable via --no-rate-limit flag or MOSAIC_STUN_NO_RATE_LIMIT=1 env var.
+	NoRateLimit bool
 }
 
 // DefaultServerConfig returns a default configuration.
@@ -79,6 +96,7 @@ func NewServer(config *ServerConfig) *Server {
 		ctx:           ctx,
 		cancel:        cancel,
 		done:          make(chan bool),
+		noRateLimit:   config.NoRateLimit,
 	}
 }
 
@@ -219,6 +237,17 @@ func (s *Server) handleClientRegister(msg *api.Message, clientAddr *net.UDPAddr,
 		return
 	}
 
+	// Per-IP cap: reject if this IP already has too many concurrent registrations.
+	if !s.noRateLimit {
+		if s.concurrentFromIP(clientAddr.IP.String()) >= maxPerIPConcurrent {
+			if enableLogging {
+				log.Printf("Rate limited %s — too many concurrent registrations from this IP", clientAddr.IP)
+			}
+			s.sendErrorMessage(clientAddr, "Too many concurrent registrations from this IP", "RATE_LIMITED")
+			return
+		}
+	}
+
 	// Assign next queue position.
 	s.queueCounter++
 	queuePos := s.queueCounter
@@ -295,12 +324,20 @@ func (s *Server) handleClientPing(msg *api.Message, clientAddr *net.UDPAddr, ena
 	defer s.mutex.Unlock()
 
 	clientID := clientAddr.String()
-	if client, exists := s.clients[clientID]; exists {
-		client.LastPing = time.Now()
-		client.Address = clientAddr
-		if enableLogging {
-			log.Printf("Ping received from client %s", clientID)
-		}
+	client, exists := s.clients[clientID]
+	if !exists {
+		return
+	}
+
+	// Drop pings that arrive too quickly — legitimate clients ping every 10s.
+	if !s.noRateLimit && time.Since(client.LastPing) < minPingInterval {
+		return
+	}
+
+	client.LastPing = time.Now()
+	client.Address = clientAddr
+	if enableLogging {
+		log.Printf("Ping received from client %s", clientID)
 	}
 }
 
@@ -383,6 +420,18 @@ func (s *Server) cleanupRoutine(timeout time.Duration, enableLogging bool) {
 			s.cleanupInactiveClients(timeout, enableLogging)
 		}
 	}
+}
+
+// concurrentFromIP counts clients currently registered from a given IP.
+// Must be called with s.mutex held.
+func (s *Server) concurrentFromIP(ip string) int {
+	count := 0
+	for _, c := range s.clients {
+		if c.Address.IP.String() == ip {
+			count++
+		}
+	}
+	return count
 }
 
 func (s *Server) cleanupInactiveClients(timeout time.Duration, enableLogging bool) {

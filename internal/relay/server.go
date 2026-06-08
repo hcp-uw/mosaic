@@ -27,6 +27,7 @@ import (
 	"math/big"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -35,12 +36,18 @@ const (
 	tagDataSend byte = 0x01
 	tagDataRecv byte = 0x02
 	tagAck      byte = 0x03
+
+	// maxRelayConns is the maximum number of concurrent TCP connections the relay
+	// will accept. Prevents file-descriptor exhaustion from connection floods.
+	maxRelayConns = 200
 )
 
 // Server is a TCP relay hub.
 type Server struct {
 	mu      sync.RWMutex
 	clients map[string]net.Conn // peerID → TCP conn
+
+	activeConns atomic.Int32 // tracks live connections for the cap check
 
 	ln      net.Listener
 	done    chan struct{}
@@ -136,11 +143,20 @@ func (s *Server) acceptLoop() {
 				continue
 			}
 		}
+		if s.activeConns.Load() >= maxRelayConns {
+			conn.Close()
+			if s.logging {
+				log.Printf("relay: connection limit reached (%d), dropping new connection", maxRelayConns)
+			}
+			continue
+		}
+		s.activeConns.Add(1)
 		go s.handle(conn)
 	}
 }
 
 func (s *Server) handle(conn net.Conn) {
+	defer s.activeConns.Add(-1)
 	defer conn.Close()
 
 	// First frame must be REGISTER.

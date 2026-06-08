@@ -1,5 +1,7 @@
 package p2p
 
+import "github.com/hcp-uw/mosaic/internal/api"
+
 // OnStateChange registers a callback for state changes
 func (c *Client) OnStateChange(callback func(ClientState)) {
 	c.mutex.Lock()
@@ -96,6 +98,24 @@ func (c *Client) notifyMessageReceived(data []byte) {
 	for _, callback := range c.messageCallbacks {
 		go callback(data)
 	}
+}
+
+// SetShardProbeHandler registers a callback invoked (in a goroutine) when a
+// ShardProbe message arrives. Registered by the transfer package to avoid an
+// import cycle (transfer imports p2p, so p2p cannot import transfer).
+func (c *Client) SetShardProbeHandler(fn func(msg *api.Message)) {
+	c.probeMu.Lock()
+	c.onShardProbe = fn
+	c.probeMu.Unlock()
+}
+
+// SetShardProbeAckHandler registers a callback invoked synchronously when a
+// ShardProbeAck arrives, so it can deliver to the waiting ProbeShardAtPeer channel
+// before the goroutine that called it returns.
+func (c *Client) SetShardProbeAckHandler(fn func(msg *api.Message)) {
+	c.probeMu.Lock()
+	c.onShardProbeAck = fn
+	c.probeMu.Unlock()
 }
 
 // SetQUICBinaryFrameHandler registers a handler called SYNCHRONOUSLY from the

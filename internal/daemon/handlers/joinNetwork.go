@@ -149,6 +149,15 @@ func runClient(serverAddr string, errCh chan<- error) {
 		transfer.HandleQUICStreamDone(senderID, lastFrame, client)
 	})
 
+	// Wire shard-probe handlers (transfer imports p2p so we register callbacks
+	// here to break the import cycle).
+	client.SetShardProbeHandler(func(msg *api.Message) {
+		transfer.HandleShardProbe(msg, client)
+	})
+	client.SetShardProbeAckHandler(func(msg *api.Message) {
+		transfer.HandleShardProbeAck(msg)
+	})
+
 	// Register the shard-relay callback so that when a shard arrives via a
 	// one-hop relay (another peer streamed it to us on behalf of a requester who
 	// couldn't reach the holder directly), we forward it to the original requester.
@@ -316,12 +325,11 @@ func handleManifestSync(mosaicDir string, msg *api.Message) {
 	}
 
 	// Replay our chain and sync local state with the network manifest.
-	// Load the user's key so ChainToFiles can decrypt file names — without it
+	// Load the user's key so GetUserFiles can decrypt file names — without it
 	// the function returns entries with empty Name fields and every local file
 	// would appear "deleted" and be removed from local state.
 	accountID := helpers.GetAccountID()
-	idx := filesystem.FindChainIndex(merged, accountID)
-	if idx == -1 {
+	if !filesystem.UserExistsInNetwork(merged, accountID) {
 		return // no files for this user yet
 	}
 	var chainMetaKey *[32]byte
@@ -329,7 +337,7 @@ func handleManifestSync(mosaicDir string, msg *api.Message) {
 		k := filesystem.MetaKeyFromKP(kp)
 		chainMetaKey = &k
 	}
-	files := filesystem.ChainToFiles(merged.Chains[idx], chainMetaKey)
+	files := filesystem.GetUserFiles(merged, accountID, chainMetaKey)
 
 	// Build a set of currently-live names so we can detect deletions.
 	networkNames := make(map[string]bool, len(files))
@@ -604,13 +612,11 @@ func handleShardResponse(msg *api.Message) {
 		if merr != nil {
 			return
 		}
-		for _, chain := range nm.Chains {
-			for _, f := range filesystem.ChainToFiles(chain, nil) {
-				if f.ContentHash == d.FileHash {
-					transfer.StoreShardData(d.FileHash, f.Name, f.Size, d.ShardIndex,
-						transfer.DataShards, transfer.TotalShards, d.Data)
-					return
-				}
+		for _, f := range filesystem.AllNetworkFiles(nm) {
+			if f.ContentHash == d.FileHash {
+				transfer.StoreShardData(d.FileHash, f.Name, f.Size, d.ShardIndex,
+					transfer.DataShards, transfer.TotalShards, d.Data)
+				return
 			}
 		}
 		fmt.Printf("handleShardResponse: no metadata found for hash %s\n", d.FileHash[:12])

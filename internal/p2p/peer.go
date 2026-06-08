@@ -35,6 +35,9 @@ type PeerInfo struct {
 	// QUIC data channel — established after the X25519 handshake.
 	QUICPort int        // peer's QUIC listening port (from their HandshakeInit)
 	QUICConn *quic.Conn // nil until QUIC connection is established
+
+	// Shard probe tracking — consecutive failures evict the peer.
+	ProbeFailures int
 }
 
 // sealForPeer wraps data in AES-256-GCM using the peer's session key.
@@ -214,6 +217,35 @@ func (c *Client) SendRawToAllPeers(data []byte) error {
 		}
 	}
 	return nil
+}
+
+// maxProbeFailures is the number of consecutive failed shard probes before a
+// peer is evicted. A probe fails when the peer times out or returns a wrong hash.
+const maxProbeFailures = 3
+
+// RecordProbeResult updates the consecutive-failure counter for a peer.
+// A success resets the counter; maxProbeFailures consecutive failures evict the peer.
+// Only call this after a probe was actually sent (not when the local shard is missing).
+func (c *Client) RecordProbeResult(peerID string, success bool) {
+	var evicted bool
+	c.mutex.Lock()
+	if peer, ok := c.peers[peerID]; ok && peer != nil {
+		if success {
+			peer.ProbeFailures = 0
+		} else {
+			peer.ProbeFailures++
+			if peer.ProbeFailures >= maxProbeFailures {
+				delete(c.peers, peerID)
+				evicted = true
+				fmt.Printf("[P2P] evicted peer %s after %d consecutive probe failures\n",
+					peerID[:minPeerIDLen(peerID)], maxProbeFailures)
+			}
+		}
+	}
+	c.mutex.Unlock()
+	if evicted {
+		c.notifyPeerLeft(peerID)
+	}
 }
 
 // IsPeerCommunicationAvailable returns true if peer communication is possible

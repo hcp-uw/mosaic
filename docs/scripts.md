@@ -57,6 +57,10 @@ Starts the STUN and TURN servers. Optionally starts a local `mosaicd` with a for
 ./scripts/start.sh -quic              # also start mosaicd forcing QUIC-only transfers
 ./scripts/start.sh -udp               # also start mosaicd forcing UDP-only transfers
 ./scripts/start.sh 1.2.3.4 -quic      # flags and IP can be in any order
+
+# Local dev — disable per-IP registration cap and ping rate limit so multiple
+# test nodes on the same machine aren't blocked:
+MOSAIC_STUN_NO_RATE_LIMIT=1 ./scripts/start.sh
 ```
 
 **What it does:**

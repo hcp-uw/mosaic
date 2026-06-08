@@ -1,11 +1,13 @@
 package fileSystem
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -13,7 +15,6 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
-	"sort"
 	"sync"
 	"time"
 )
@@ -32,44 +33,15 @@ type NetworkFileEntry struct {
 	ContentHash   string `json:"contentHash"` // SHA-256 hex of original file
 }
 
-// Block operation types.
-const (
-	BlockOpAdd    = "add"
-	BlockOpRemove = "remove"
-	BlockOpRename = "rename"
-)
-
-// ChainBlock is one signed, hash-linked operation in a user's file history.
-// Blocks are append-only and never modified after creation.
-//
-// Security model:
-//   - Each block is ECDSA-signed by the owner.  Any peer can verify the signature
-//     using the PublicKey embedded in the parent UserChain.
-//   - PrevHash links each block to its predecessor, making the chain tamper-evident:
-//     altering any past block invalidates every subsequent hash link.
-//   - Merge conflict resolution: the longer valid chain wins.  Equal-length forks
-//     resolve deterministically by choosing the chain with the lower hex hash at
-//     the first differing block.
-type ChainBlock struct {
-	Index         int              `json:"index"`                   // 0-based position in chain
-	PrevHash      string           `json:"prevHash"`                // hex SHA-256 of previous block; "" for genesis
-	Op            string           `json:"op"`                      // BlockOpAdd | BlockOpRemove | BlockOpRename
-	File          NetworkFileEntry `json:"file"`                    // public: only ContentHash; Name/Size/Date zeroed in new blocks
-	EncryptedMeta []byte           `json:"encryptedMeta,omitempty"` // AES-256-GCM: {name, size, dateAdded, newName}
-	Timestamp     string           `json:"timestamp"`               // RFC3339 UTC
-	Signature     []byte           `json:"signature,omitempty"`
-}
-
-// blockMeta holds the private per-block metadata encrypted into EncryptedMeta.
+// blockMeta holds the private per-record metadata encrypted into EncryptedMeta.
 type blockMeta struct {
 	Name      string `json:"n"`
 	Size      int    `json:"s,omitempty"`
 	DateAdded string `json:"d,omitempty"`
-	NewName   string `json:"r,omitempty"`
 }
 
-// MetaKeyFromKP derives the AES-256 key used to encrypt block metadata from the
-// owner's ECDSA private key. Only the owner can decrypt their own chain's metadata.
+// MetaKeyFromKP derives the AES-256 key used to encrypt record metadata from the
+// owner's ECDSA private key. Only the owner can decrypt their own records.
 func MetaKeyFromKP(kp UserKeyPair) [32]byte {
 	h := sha256.New()
 	h.Write(kp.Private.D.Bytes())
@@ -120,17 +92,38 @@ func decryptBlockMeta(data []byte, key [32]byte) (blockMeta, error) {
 	return m, json.Unmarshal(plain, &m)
 }
 
-// UserChain is a user's append-only operation history.
-// The current file set is derived by replaying Blocks via ChainToFiles.
-type UserChain struct {
-	UserID    int          `json:"userID"`
-	Username  string       `json:"username"`
-	PublicKey []byte       `json:"publicKey"` // PKIX DER P-256; used for block verification
+// ──────────────────────────────────────────────────────────
+// LWW-Set CRDT types
+// ──────────────────────────────────────────────────────────
 
-	Blocks []ChainBlock `json:"blocks"`
+// FileRecord is a signed LWW entry for one file owned by one user.
+// The entry with the highest Seq for a given ContentHash is canonical.
+//
+// Security model:
+//   - Each record is ECDSA-signed. Any peer can verify the signature using
+//     the PublicKey embedded in the parent UserState.
+//   - Seq is monotonically increasing per (userID, contentHash), preventing
+//     replay of older state: a peer rejects any incoming record whose Seq is
+//     equal to or lower than the locally stored one.
+//   - Tampering with any field (ContentHash, Seq, Deleted, EncryptedMeta)
+//     invalidates the signature, so peers can detect and drop forged records.
+//   - File metadata (name, size, date) is AES-256-GCM encrypted; non-owners
+//     see only ContentHash.
+type FileRecord struct {
+	ContentHash   string `json:"contentHash"`
+	EncryptedMeta []byte `json:"encryptedMeta,omitempty"` // AES-GCM: {name, size, dateAdded}
+	Seq           uint64 `json:"seq"`                     // monotonically increasing per contentHash
+	Deleted       bool   `json:"deleted"`                 // tombstone for removes
+	Timestamp     string `json:"timestamp"`
+	Signature     []byte `json:"signature"` // ECDSA over canonical payload
+}
 
-	// In-memory cache: populated by ChainToFiles; never serialized.
-	Files []NetworkFileEntry `json:"-"`
+// UserState is the per-user LWW-set: one FileRecord per ContentHash.
+type UserState struct {
+	UserID    int                    `json:"userID"`
+	Username  string                 `json:"username"`
+	PublicKey []byte                 `json:"publicKey"` // PKIX DER P-256
+	Records   map[string]*FileRecord `json:"records"`   // contentHash → FileRecord
 }
 
 // ShardLocations records which peers hold each shard for a given file.
@@ -140,15 +133,14 @@ type ShardLocations struct {
 	Holders map[int][]string `json:"holders"` // shardIndex → []nodeID
 }
 
-// NetworkManifest is the root structure: a collection of per-user chains,
+// NetworkManifest is the root structure: a collection of per-user LWW-sets,
 // encrypted at rest with the shared network AES key.
-// Chains MUST remain sorted by UserID at all times.
 // ShardMap tracks shard-to-peer assignments and is merged as a G-set.
 type NetworkManifest struct {
 	Version   int                        `json:"version"`
 	UpdatedAt string                     `json:"updatedAt"`
-	Chains    []UserChain                `json:"chains"`
-	ShardMap  map[string]*ShardLocations `json:"shardMap,omitempty"` // contentHash → shard locations
+	Users     map[int]*UserState         `json:"users"`
+	ShardMap  map[string]*ShardLocations `json:"shardMap,omitempty"`
 }
 
 // networkManifestPath returns the path to the on-disk manifest file.
@@ -157,297 +149,253 @@ func networkManifestPath(mosaicDir string) string {
 }
 
 // ──────────────────────────────────────────────────────────
-// Block hashing and signing
+// Record signing and verification
 // ──────────────────────────────────────────────────────────
 
-// blockHashBytes returns the SHA-256 of the block with Signature zeroed.
-// This is the canonical pre-image for signing and for chain linking.
-func blockHashBytes(b ChainBlock) ([]byte, error) {
-	b.Signature = nil
-	data, err := json.Marshal(b)
-	if err != nil {
-		return nil, fmt.Errorf("blockHash: marshal: %w", err)
+// recordHashBytes computes SHA-256 over the canonical serialization of a FileRecord.
+// The payload commits to userID, contentHash, seq, deleted flag, and encryptedMeta
+// so that any tampering with these fields invalidates the signature.
+func recordHashBytes(userID int, r *FileRecord) []byte {
+	var buf bytes.Buffer
+	binary.Write(&buf, binary.BigEndian, uint32(userID)) //nolint:errcheck — bytes.Buffer never fails
+	buf.WriteString(r.ContentHash)
+	binary.Write(&buf, binary.BigEndian, r.Seq) //nolint:errcheck
+	if r.Deleted {
+		buf.WriteByte(0x01)
+	} else {
+		buf.WriteByte(0x00)
 	}
-	h := sha256.Sum256(data)
-	return h[:], nil
+	buf.Write(r.EncryptedMeta)
+	h := sha256.Sum256(buf.Bytes())
+	return h[:]
 }
 
-// BlockHash returns the hex SHA-256 of the block (Signature excluded).
-func BlockHash(b ChainBlock) (string, error) {
-	h, err := blockHashBytes(b)
+func signRecord(userID int, r *FileRecord, priv *ecdsa.PrivateKey) error {
+	hash := recordHashBytes(userID, r)
+	rr, s, err := ecdsa.Sign(rand.Reader, priv, hash)
 	if err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h), nil
-}
-
-func signBlock(b *ChainBlock, priv *ecdsa.PrivateKey) error {
-	hash, err := blockHashBytes(*b)
-	if err != nil {
-		return err
-	}
-	r, s, err := ecdsa.Sign(rand.Reader, priv, hash)
-	if err != nil {
-		return fmt.Errorf("signBlock: ECDSA sign: %w", err)
+		return fmt.Errorf("signRecord: ECDSA sign: %w", err)
 	}
 	sig := make([]byte, 64)
-	r.FillBytes(sig[:32])
+	rr.FillBytes(sig[:32])
 	s.FillBytes(sig[32:])
-	b.Signature = sig
+	r.Signature = sig
 	return nil
 }
 
-func verifyBlock(b ChainBlock, pub *ecdsa.PublicKey) bool {
-	if len(b.Signature) != 64 {
+func verifyRecord(userID int, r *FileRecord, pub *ecdsa.PublicKey) bool {
+	if len(r.Signature) != 64 {
 		return false
 	}
-	hash, err := blockHashBytes(b)
-	if err != nil {
-		return false
-	}
-	r := new(big.Int).SetBytes(b.Signature[:32])
-	s := new(big.Int).SetBytes(b.Signature[32:])
-	return ecdsa.Verify(pub, hash, r, s)
-}
-
-// ValidateChain checks every block's signature and every hash link.
-// An empty chain is valid.  Returns false on any integrity failure.
-func ValidateChain(chain UserChain) bool {
-	if len(chain.Blocks) == 0 {
-		return true
-	}
-	if len(chain.PublicKey) == 0 {
-		return false
-	}
-	pub, err := ParsePublicKeyBytes(chain.PublicKey)
-	if err != nil {
-		return false
-	}
-
-	prevHash := ""
-	for i, b := range chain.Blocks {
-		if b.Index != i {
-			return false
-		}
-		if b.PrevHash != prevHash {
-			return false
-		}
-		if !verifyBlock(b, pub) {
-			return false
-		}
-		h, err := BlockHash(b)
-		if err != nil {
-			return false
-		}
-		prevHash = h
-	}
-	return true
+	hash := recordHashBytes(userID, r)
+	rr := new(big.Int).SetBytes(r.Signature[:32])
+	s := new(big.Int).SetBytes(r.Signature[32:])
+	return ecdsa.Verify(pub, hash, rr, s)
 }
 
 // ──────────────────────────────────────────────────────────
-// Chain mutation and replay
+// LWW-Set mutations
 // ──────────────────────────────────────────────────────────
 
-// AppendBlock creates a new signed block and appends it to chain.
-// kp must be the owner's keypair.
-func AppendBlock(chain *UserChain, op string, file NetworkFileEntry, newName string, kp UserKeyPair) error {
-	prevHash := ""
-	if len(chain.Blocks) > 0 {
-		last := chain.Blocks[len(chain.Blocks)-1]
-		h, err := BlockHash(last)
-		if err != nil {
-			return fmt.Errorf("AppendBlock: hash last block: %w", err)
+// ensureUserState returns the UserState for userID, creating it if absent.
+func ensureUserState(m *NetworkManifest, userID int, username string, kp UserKeyPair) *UserState {
+	if m.Users == nil {
+		m.Users = make(map[int]*UserState)
+	}
+	us, ok := m.Users[userID]
+	if !ok || us == nil {
+		pubBytes, _ := PublicKeyBytes(kp.Public)
+		us = &UserState{
+			UserID:    userID,
+			Username:  username,
+			PublicKey: pubBytes,
+			Records:   make(map[string]*FileRecord),
 		}
-		prevHash = h
+		m.Users[userID] = us
+	}
+	return us
+}
+
+// RecordFileAdd records a file-add operation for userID in the manifest.
+// Creates a new FileRecord with encrypted metadata and an ECDSA signature.
+func RecordFileAdd(m *NetworkManifest, userID int, username string, file NetworkFileEntry, kp UserKeyPair) error {
+	us := ensureUserState(m, userID, username, kp)
+
+	var nextSeq uint64 = 1
+	if existing := us.Records[file.ContentHash]; existing != nil {
+		nextSeq = existing.Seq + 1
 	}
 
-	// Encrypt sensitive metadata; zero it out in the stored block so peers only see ContentHash.
 	metaKey := MetaKeyFromKP(kp)
 	encMeta, err := encryptBlockMeta(blockMeta{
 		Name:      file.Name,
 		Size:      file.Size,
 		DateAdded: file.DateAdded,
-		NewName:   newName,
 	}, metaKey)
 	if err != nil {
-		return fmt.Errorf("AppendBlock: encrypt metadata: %w", err)
+		return fmt.Errorf("RecordFileAdd: encrypt metadata: %w", err)
 	}
-	file.Name = ""
-	file.Size = 0
-	file.DateAdded = ""
 
-	b := ChainBlock{
-		Index:         len(chain.Blocks),
-		PrevHash:      prevHash,
-		Op:            op,
-		File:          file, // ContentHash present; Name/Size/Date zeroed
+	r := &FileRecord{
+		ContentHash:   file.ContentHash,
 		EncryptedMeta: encMeta,
+		Seq:           nextSeq,
+		Deleted:       false,
 		Timestamp:     time.Now().UTC().Format(time.RFC3339),
 	}
-	if err := signBlock(&b, kp.Private); err != nil {
+	if err := signRecord(userID, r, kp.Private); err != nil {
 		return err
 	}
-	chain.Blocks = append(chain.Blocks, b)
+	us.Records[file.ContentHash] = r
 	return nil
 }
 
-// ChainToFiles replays all blocks to compute the current set of files.
-// Pass a non-nil metaKey (from MetaKeyFromKP) to decrypt file names and full metadata;
-// pass nil for non-owner chains — only ContentHash is returned in that case.
-// Backward-compatible: old blocks without EncryptedMeta fall back to reading plaintext File fields.
-func ChainToFiles(chain UserChain, metaKey *[32]byte) []NetworkFileEntry {
-	if metaKey == nil {
-		// Non-owner path: collect content hashes from add blocks only.
-		seen := make(map[string]struct{})
-		var result []NetworkFileEntry
-		for _, b := range chain.Blocks {
-			if b.Op == BlockOpAdd && b.File.ContentHash != "" {
-				if _, ok := seen[b.File.ContentHash]; !ok {
-					seen[b.File.ContentHash] = struct{}{}
-					result = append(result, NetworkFileEntry{ContentHash: b.File.ContentHash})
-				}
-			}
-		}
-		return result
+// RecordFileRemove records a file-remove (tombstone) for contentHash in userID's state.
+func RecordFileRemove(m *NetworkManifest, userID int, contentHash string, kp UserKeyPair) error {
+	us := ensureUserState(m, userID, "", kp)
+
+	var nextSeq uint64 = 1
+	if existing := us.Records[contentHash]; existing != nil {
+		nextSeq = existing.Seq + 1
 	}
 
-	// Owner path: decrypt metadata and do full replay.
-	files := make(map[string]NetworkFileEntry)
-	for _, b := range chain.Blocks {
-		var name, dateAdded, newName string
-		var size int
-		if len(b.EncryptedMeta) > 0 {
-			// New encrypted format.
-			meta, err := decryptBlockMeta(b.EncryptedMeta, *metaKey)
-			if err != nil {
-				continue
-			}
-			name, size, dateAdded, newName = meta.Name, meta.Size, meta.DateAdded, meta.NewName
-		} else {
-			// Old plaintext format (backward-compat for existing chains).
-			name = b.File.Name
-			size = b.File.Size
-			dateAdded = b.File.DateAdded
-		}
-		switch b.Op {
-		case BlockOpAdd:
-			entry := b.File
-			entry.Name = name
-			entry.Size = size
-			entry.DateAdded = dateAdded
-			files[name] = entry
-		case BlockOpRemove:
-			delete(files, name)
-		case BlockOpRename:
-			if f, ok := files[name]; ok {
-				delete(files, name)
-				f.Name = newName
-				files[newName] = f
-			}
-		}
+	r := &FileRecord{
+		ContentHash: contentHash,
+		Seq:         nextSeq,
+		Deleted:     true,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
 	}
-	result := make([]NetworkFileEntry, 0, len(files))
-	for _, f := range files {
-		result = append(result, f)
+	if err := signRecord(userID, r, kp.Private); err != nil {
+		return err
+	}
+	us.Records[contentHash] = r
+	return nil
+}
+
+// RecordFileRename updates the display name for contentHash in userID's state.
+// The contentHash is stable (file bytes don't change), only the name differs.
+func RecordFileRename(m *NetworkManifest, userID int, contentHash, newName string, kp UserKeyPair) error {
+	us := ensureUserState(m, userID, "", kp)
+
+	existing := us.Records[contentHash]
+	if existing == nil || existing.Deleted {
+		return fmt.Errorf("RecordFileRename: file not found for user %d", userID)
+	}
+
+	metaKey := MetaKeyFromKP(kp)
+	existingMeta, err := decryptBlockMeta(existing.EncryptedMeta, metaKey)
+	if err != nil {
+		return fmt.Errorf("RecordFileRename: decrypt existing meta: %w", err)
+	}
+
+	encMeta, err := encryptBlockMeta(blockMeta{
+		Name:      newName,
+		Size:      existingMeta.Size,
+		DateAdded: existingMeta.DateAdded,
+	}, metaKey)
+	if err != nil {
+		return fmt.Errorf("RecordFileRename: encrypt new meta: %w", err)
+	}
+
+	r := &FileRecord{
+		ContentHash:   contentHash,
+		EncryptedMeta: encMeta,
+		Seq:           existing.Seq + 1,
+		Deleted:       false,
+		Timestamp:     time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := signRecord(userID, r, kp.Private); err != nil {
+		return err
+	}
+	us.Records[contentHash] = r
+	return nil
+}
+
+// ──────────────────────────────────────────────────────────
+// Manifest-level queries
+// ──────────────────────────────────────────────────────────
+
+// GetUserFiles returns all non-deleted files for userID.
+// Pass a non-nil metaKey (from MetaKeyFromKP) to decrypt names and full metadata;
+// pass nil for non-owner access — only ContentHash is returned in that case.
+func GetUserFiles(m NetworkManifest, userID int, metaKey *[32]byte) []NetworkFileEntry {
+	us := m.Users[userID]
+	if us == nil {
+		return nil
+	}
+	var result []NetworkFileEntry
+	for _, r := range us.Records {
+		if r == nil || r.Deleted {
+			continue
+		}
+		entry := NetworkFileEntry{ContentHash: r.ContentHash, PrimaryNodeID: userID}
+		if metaKey != nil && len(r.EncryptedMeta) > 0 {
+			if meta, err := decryptBlockMeta(r.EncryptedMeta, *metaKey); err == nil {
+				entry.Name = meta.Name
+				entry.Size = meta.Size
+				entry.DateAdded = meta.DateAdded
+			}
+		}
+		result = append(result, entry)
 	}
 	return result
 }
 
-// ──────────────────────────────────────────────────────────
-// Manifest-level helpers (sorted chain list)
-// ──────────────────────────────────────────────────────────
-
-// FindChainIndex returns the index in m.Chains where UserID == userID, or -1.
-func FindChainIndex(m NetworkManifest, userID int) int {
-	n := len(m.Chains)
-	i := sort.Search(n, func(i int) bool { return m.Chains[i].UserID >= userID })
-	if i < n && m.Chains[i].UserID == userID {
-		return i
-	}
-	return -1
-}
-
-func insertChainSorted(chains []UserChain, c UserChain) []UserChain {
-	i := sort.Search(len(chains), func(i int) bool { return chains[i].UserID >= c.UserID })
-	chains = append(chains, UserChain{})
-	copy(chains[i+1:], chains[i:])
-	chains[i] = c
-	return chains
-}
-
-// AppendBlockAdd appends an "add" block to userID's chain in the manifest.
-func AppendBlockAdd(m *NetworkManifest, userID int, username string, file NetworkFileEntry, kp UserKeyPair) error {
-	i := FindChainIndex(*m, userID)
-	if i == -1 {
-		pubBytes, err := PublicKeyBytes(kp.Public)
-		if err != nil {
-			return fmt.Errorf("AppendBlockAdd: serialize public key: %w", err)
+// AllNetworkFiles returns all non-deleted NetworkFileEntries across all users
+// without decrypting metadata (non-owner path: only ContentHash is set).
+func AllNetworkFiles(m NetworkManifest) []NetworkFileEntry {
+	var result []NetworkFileEntry
+	for _, us := range m.Users {
+		if us == nil {
+			continue
 		}
-		m.Chains = insertChainSorted(m.Chains, UserChain{
-			UserID:    userID,
-			Username:  username,
-			PublicKey: pubBytes,
-		})
-		i = FindChainIndex(*m, userID)
+		for _, r := range us.Records {
+			if r == nil || r.Deleted {
+				continue
+			}
+			result = append(result, NetworkFileEntry{ContentHash: r.ContentHash})
+		}
 	}
-	return AppendBlock(&m.Chains[i], BlockOpAdd, file, "", kp)
+	return result
 }
 
-// AppendBlockRemove appends a "remove" block to userID's chain.
-func AppendBlockRemove(m *NetworkManifest, userID int, filename string, kp UserKeyPair) error {
-	i := FindChainIndex(*m, userID)
-	if i == -1 {
-		return fmt.Errorf("AppendBlockRemove: user %d not in manifest", userID)
+// FindFileByName looks up a file's ContentHash by filename for the given user.
+// Returns empty string and false if not found.
+func FindFileByName(m NetworkManifest, userID int, filename string, metaKey *[32]byte) (string, bool) {
+	for _, f := range GetUserFiles(m, userID, metaKey) {
+		if f.Name == filename {
+			return f.ContentHash, true
+		}
 	}
-	file := NetworkFileEntry{Name: filename}
-	return AppendBlock(&m.Chains[i], BlockOpRemove, file, "", kp)
+	return "", false
 }
 
-// AppendBlockRename appends a "rename" block to userID's chain.
-func AppendBlockRename(m *NetworkManifest, userID int, oldName, newName string, kp UserKeyPair) error {
-	i := FindChainIndex(*m, userID)
-	if i == -1 {
-		return fmt.Errorf("AppendBlockRename: user %d not in manifest", userID)
-	}
-	file := NetworkFileEntry{Name: oldName}
-	return AppendBlock(&m.Chains[i], BlockOpRename, file, newName, kp)
-}
-
-// GetUserFiles returns the current file list for userID by replaying the chain.
-// Returns nil if the user has no chain in the manifest.
-func GetUserFiles(m NetworkManifest, userID int, metaKey *[32]byte) []NetworkFileEntry {
-	i := FindChainIndex(m, userID)
-	if i == -1 {
-		return nil
-	}
-	return ChainToFiles(m.Chains[i], metaKey)
-}
-
-// UserExistsInNetwork reports whether userID has a chain in the manifest.
+// UserExistsInNetwork reports whether userID has a state entry in the manifest.
 func UserExistsInNetwork(m NetworkManifest, userID int) bool {
-	return FindChainIndex(m, userID) != -1
+	return m.Users[userID] != nil
 }
 
 // ──────────────────────────────────────────────────────────
 // Disk I/O (outer AES-256-GCM at-rest encryption)
 // ──────────────────────────────────────────────────────────
 
-// EnsureNetworkManifest writes an empty encrypted network manifest to disk if
-// one does not already exist. Call at daemon startup so that concurrent
+// EnsureNetworkManifest writes an empty encrypted v3 manifest to disk if one
+// does not already exist. Call at daemon startup so that concurrent
 // ManifestSync merges always find a valid file rather than racing on first write.
 func EnsureNetworkManifest(mosaicDir string, key [32]byte) error {
 	p := networkManifestPath(mosaicDir)
 	if _, err := os.Stat(p); err == nil {
 		return nil // already exists
 	}
-	empty := NetworkManifest{Version: 2, Chains: []UserChain{}, ShardMap: make(map[string]*ShardLocations)}
+	empty := NetworkManifest{Version: 3, Users: make(map[int]*UserState), ShardMap: make(map[string]*ShardLocations)}
 	return WriteNetworkManifest(mosaicDir, key, empty)
 }
 
 // ReadNetworkManifest decrypts and deserializes the manifest from disk.
-// Returns an empty v2 manifest if the file does not exist.
+// Returns an empty v3 manifest if the file does not exist.
+// Manifests with version < 3 are treated as empty (no migration).
 func ReadNetworkManifest(mosaicDir string, key [32]byte) (NetworkManifest, error) {
-	empty := NetworkManifest{Version: 2, Chains: []UserChain{}, ShardMap: make(map[string]*ShardLocations)}
+	empty := NetworkManifest{Version: 3, Users: make(map[int]*UserState), ShardMap: make(map[string]*ShardLocations)}
 
 	data, err := os.ReadFile(networkManifestPath(mosaicDir))
 	if os.IsNotExist(err) {
@@ -467,11 +415,15 @@ func ReadNetworkManifest(mosaicDir string, key [32]byte) (NetworkManifest, error
 		return empty, fmt.Errorf("could not parse network manifest: %w", err)
 	}
 
-	// Treat old v1 manifests as empty — they used a different schema.
-	if m.Version < 2 {
+	if m.Version < 3 {
 		return empty, nil
 	}
-
+	if m.Users == nil {
+		m.Users = make(map[int]*UserState)
+	}
+	if m.ShardMap == nil {
+		m.ShardMap = make(map[string]*ShardLocations)
+	}
 	return m, nil
 }
 
@@ -515,7 +467,7 @@ func RecordShardHolderAndWrite(mosaicDir string, key [32]byte, contentHash strin
 
 	m, err := ReadNetworkManifest(mosaicDir, key)
 	if err != nil {
-		m = NetworkManifest{}
+		m = NetworkManifest{Version: 3, Users: make(map[int]*UserState), ShardMap: make(map[string]*ShardLocations)}
 	}
 	if !RecordShardHolder(&m, contentHash, shardIndex, nodeID) {
 		return m, false, nil
@@ -533,10 +485,8 @@ func MergeAndWriteNetworkManifest(mosaicDir string, key [32]byte, remote Network
 
 	local, err := ReadNetworkManifest(mosaicDir, key)
 	if err != nil {
-		// Manifest exists but is corrupt (decrypt failure from a past race condition).
-		// Treat as empty so the incoming remote can overwrite and recover the state.
 		fmt.Printf("MergeAndWriteNetworkManifest: local manifest unreadable (%v) — recovering from remote\n", err)
-		local = NetworkManifest{Version: 2, Chains: []UserChain{}, ShardMap: make(map[string]*ShardLocations)}
+		local = NetworkManifest{Version: 3, Users: make(map[int]*UserState), ShardMap: make(map[string]*ShardLocations)}
 	}
 
 	merged, changed := MergeNetworkManifest(local, remote)
@@ -551,79 +501,64 @@ func MergeAndWriteNetworkManifest(mosaicDir string, key [32]byte, remote Network
 // Merge (P2P sync)
 // ──────────────────────────────────────────────────────────
 
-// MergeNetworkManifest merges a remote manifest into the local one.
+// MergeNetworkManifest merges a remote manifest into the local one using LWW semantics.
 //
 // Per-user merge strategy:
-//   - Remote chain fails ValidateChain → silently dropped
-//   - Remote chain not in local manifest → accepted
-//   - Both exist → longer valid chain wins
-//   - Same length but divergent → deterministic fork resolution: the chain
-//     whose first differing block has the lexicographically lower hash wins
+//   - New user in remote → accept all records that pass signature verification
+//   - Existing user → for each (contentHash): higher Seq wins; equal Seq is idempotent
+//   - Records with invalid signatures are silently dropped
 //
 // Returns the merged manifest and whether anything actually changed.
 func MergeNetworkManifest(local, remote NetworkManifest) (NetworkManifest, bool) {
 	merged := local
+	if merged.Users == nil {
+		merged.Users = make(map[int]*UserState)
+	}
 	changed := false
 
-	for _, remoteChain := range remote.Chains {
-		if !ValidateChain(remoteChain) {
-			fmt.Printf("MergeNetworkManifest: dropping invalid chain for userID=%d\n", remoteChain.UserID)
+	for userID, remoteUser := range remote.Users {
+		if remoteUser == nil {
+			continue
+		}
+		pub, err := ParsePublicKeyBytes(remoteUser.PublicKey)
+		if err != nil {
+			fmt.Printf("MergeNetworkManifest: dropping user %d: bad public key\n", userID)
 			continue
 		}
 
-		i := FindChainIndex(merged, remoteChain.UserID)
-		if i == -1 {
-			merged.Chains = insertChainSorted(merged.Chains, remoteChain)
-			changed = true
-			continue
+		localUser := merged.Users[userID]
+		if localUser == nil {
+			localUser = &UserState{
+				UserID:    remoteUser.UserID,
+				Username:  remoteUser.Username,
+				PublicKey: remoteUser.PublicKey,
+				Records:   make(map[string]*FileRecord),
+			}
+			merged.Users[userID] = localUser
 		}
 
-		winner := pickBetterChain(merged.Chains[i], remoteChain)
-		if len(winner.Blocks) != len(merged.Chains[i].Blocks) || chainHeadHash(winner) != chainHeadHash(merged.Chains[i]) {
-			merged.Chains[i] = winner
-			changed = true
+		for contentHash, remoteRecord := range remoteUser.Records {
+			if remoteRecord == nil {
+				continue
+			}
+			if !verifyRecord(userID, remoteRecord, pub) {
+				fmt.Printf("MergeNetworkManifest: dropping invalid record %s for user %d\n", hex.EncodeToString([]byte(contentHash))[:min8(len(contentHash)*2)], userID)
+				continue
+			}
+			localRecord := localUser.Records[contentHash]
+			if localRecord == nil || remoteRecord.Seq > localRecord.Seq {
+				localUser.Records[contentHash] = remoteRecord
+				changed = true
+			}
 		}
 	}
 
-	// Merge shard location maps (G-set union).
 	if mergedMap, shardChanged := mergeShardMaps(merged.ShardMap, remote.ShardMap); shardChanged {
 		merged.ShardMap = mergedMap
 		changed = true
 	}
 
 	return merged, changed
-}
-
-// pickBetterChain returns whichever chain should be the canonical one.
-// Longer valid chain wins; equal-length forks resolve by first differing block hash.
-func pickBetterChain(a, b UserChain) UserChain {
-	if len(a.Blocks) > len(b.Blocks) {
-		return a
-	}
-	if len(b.Blocks) > len(a.Blocks) {
-		return b
-	}
-	// Same length: find first differing block and take the one with the lower hash.
-	for i := range a.Blocks {
-		ha, _ := BlockHash(a.Blocks[i])
-		hb, _ := BlockHash(b.Blocks[i])
-		if ha != hb {
-			if ha < hb {
-				return a
-			}
-			return b
-		}
-	}
-	return a // identical chains
-}
-
-// chainHeadHash returns the hash of the last block, or "" for an empty chain.
-func chainHeadHash(c UserChain) string {
-	if len(c.Blocks) == 0 {
-		return ""
-	}
-	h, _ := BlockHash(c.Blocks[len(c.Blocks)-1])
-	return h
 }
 
 // ──────────────────────────────────────────────────────────
@@ -731,6 +666,12 @@ func ManifestToJSON(m NetworkManifest) ([]byte, error) {
 func ManifestFromJSON(data []byte) (NetworkManifest, error) {
 	var m NetworkManifest
 	err := json.Unmarshal(data, &m)
+	if m.Users == nil {
+		m.Users = make(map[int]*UserState)
+	}
+	if m.ShardMap == nil {
+		m.ShardMap = make(map[string]*ShardLocations)
+	}
 	return m, err
 }
 
@@ -771,4 +712,11 @@ func decryptAESGCM(key [32]byte, data []byte) ([]byte, error) {
 	}
 	nonce, ct := data[:gcm.NonceSize()], data[gcm.NonceSize():]
 	return gcm.Open(nil, nonce, ct, nil)
+}
+
+func min8(n int) int {
+	if n < 8 {
+		return n
+	}
+	return 8
 }

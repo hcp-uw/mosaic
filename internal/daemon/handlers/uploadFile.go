@@ -90,7 +90,7 @@ func uploadFile(path string, keepLocal bool) protocol.UploadFileResponse {
 					DateAdded:     time.Now().Format("01-02-2006"),
 					ContentHash:   contentHash,
 				}
-				if aerr := filesystem.AppendBlockAdd(&nm, helpers.GetAccountID(), helpers.GetUsername(), entry, kp); aerr != nil {
+				if aerr := filesystem.RecordFileAdd(&nm, helpers.GetAccountID(), helpers.GetUsername(), entry, kp); aerr != nil {
 					fmt.Println("Warning: could not append block for", filename, "-", aerr)
 				} else if werr := filesystem.WriteNetworkManifestLocked(mosaicDir, aesKey, nm); werr != nil {
 					fmt.Println("Warning: could not write network manifest for", filename, "-", werr)

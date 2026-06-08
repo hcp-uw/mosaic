@@ -55,12 +55,16 @@ func RenameFile(req protocol.RenameFileRequest) protocol.RenameFileResponse {
 		}
 	}
 
-	// Update the network manifest: append "rename" block, write, broadcast.
+	// Update the network manifest: record rename, write, broadcast.
 	if aesKey, err := filesystem.LoadOrCreateNetworkKey(shared.NetworkKeyPath()); err == nil {
 		if kp, kerr := filesystem.LoadOrCreateUserKey(shared.UserKeyPath()); kerr == nil {
 			if nm, err := filesystem.ReadNetworkManifest(mosaicDir, aesKey); err == nil {
-				if aerr := filesystem.AppendBlockRename(&nm, helpers.GetAccountID(), oldName, newName, kp); aerr != nil {
-					fmt.Println("Warning: could not append rename block for", oldName, "-", aerr)
+				metaKey := filesystem.MetaKeyFromKP(kp)
+				contentHash, found := filesystem.FindFileByName(nm, helpers.GetAccountID(), oldName, &metaKey)
+				if !found {
+					fmt.Println("Warning: could not find", oldName, "in network manifest for rename")
+				} else if aerr := filesystem.RecordFileRename(&nm, helpers.GetAccountID(), contentHash, newName, kp); aerr != nil {
+					fmt.Println("Warning: could not record rename for", oldName, "-", aerr)
 				} else if werr := filesystem.WriteNetworkManifestLocked(mosaicDir, aesKey, nm); werr != nil {
 					fmt.Println("Warning: could not write network manifest for", oldName, "-", werr)
 				} else {

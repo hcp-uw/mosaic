@@ -65,9 +65,9 @@ func EmptyStorage(req protocol.EmptyStorageRequest) protocol.EmptyStorageRespons
 	for _, f := range files {
 		bytesFreed += f.Size
 
-		// Append remove block to network manifest chain.
-		if err := filesystem.AppendBlockRemove(&nm, accountID, f.Name, kp); err != nil {
-			deleteErrors = append(deleteErrors, fmt.Sprintf("manifest block for %s: %v", f.Name, err))
+		// Record file removal in the manifest.
+		if err := filesystem.RecordFileRemove(&nm, accountID, f.ContentHash, kp); err != nil {
+			deleteErrors = append(deleteErrors, fmt.Sprintf("manifest record for %s: %v", f.Name, err))
 		}
 
 		// Remove from local manifest.

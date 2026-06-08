@@ -2,7 +2,7 @@
 
 This document explains the full manifest system — what it is, why it exists, how it works technically, and how every piece connects together.
 
-> **Version note:** The network manifest was redesigned as a per-user blockchain in v2. The old v1 format (ECIES-encrypted `UserNetworkEntry` blobs) is no longer used. On first read, any v1 manifest is treated as empty and rebuilt from scratch.
+> **Version note:** The network manifest has been through three designs. v1 used a single ECIES-signed snapshot. v2 used a personal hash chain (blockchain). v3 (current) uses a signed LWW-Set CRDT. v1 and v2 manifests are treated as empty on first read.
 
 ---
 
@@ -17,10 +17,10 @@ There are two separate manifests with different scopes and different security pr
 | | Local Manifest | Network Manifest |
 |---|---|---|
 | **Scope** | Your files, on this node | All users, all nodes |
-| **Format** | Plaintext JSON | Blockchain chains, encrypted at rest |
+| **Format** | Plaintext JSON | Signed LWW-Set CRDT, encrypted at rest |
 | **Location** | `~/Mosaic/.mosaic-manifest.json` | `~/Mosaic/.mosaic-network-manifest` |
-| **Who can read it** | Anyone with disk access | Any peer (only content hashes; file names encrypted per-block) |
-| **Tamper protection** | None (local-only) | Per-block ECDSA signatures + hash chain |
+| **Who can read it** | Anyone with disk access | Any peer (only content hashes; file names AES-encrypted per-record) |
+| **Tamper protection** | None (local-only) | Per-record ECDSA signatures + monotonic sequence numbers |
 | **Purpose** | Fast local lookups, Finder integration | P2P sync, cross-node access, public permissionless network |
 
 ---
@@ -124,7 +124,7 @@ When you double-click the stub, the Finder extension triggers a fetch. The daemo
 Upload notes.md (not keeping local copy)
   → ~/Mosaic/notes.md.mosaic       created  (stub)
   → .mosaic-manifest.json          updated  (cached: false)
-  → .mosaic-network-manifest       "add" block appended + broadcast to peers
+  → .mosaic-network-manifest       RecordFileAdd + broadcast to peers
 
 Double-click stub / mos download file notes.md
   → ~/Mosaic/notes.md              created  (real file)
@@ -136,12 +136,12 @@ Delete notes.md.mosaic or notes.md from Finder
   → ~/Mosaic/notes.md.mosaic       deleted  (if stub existed)
   → ~/Mosaic/notes.md              deleted  (if cached copy existed)
   → .mosaic-manifest.json          entry removed
-  → .mosaic-network-manifest       "remove" block appended + broadcast to peers
+  → .mosaic-network-manifest       RecordFileRemove (tombstone) + broadcast to peers
 ```
 
 ---
 
-## Part 3: The Network Manifest (v2 — Blockchain)
+## Part 3: The Network Manifest (v3 — LWW-Set CRDT)
 
 ### Why It Exists
 
@@ -165,79 +165,85 @@ Inside the AES-GCM envelope, the JSON looks like:
 
 ```json
 {
-  "version": 2,
-  "updatedAt": "2026-04-27T09:15:00Z",
-  "chains": [
-    {
+  "version": 3,
+  "updatedAt": "2026-06-07T09:15:00Z",
+  "users": {
+    "12304938": {
       "userID": 12304938,
       "username": "a3f9b21c",
       "publicKey": "<PKIX DER P-256, base64>",
-      "blocks": [
-        {
-          "index": 0,
-          "prevHash": "",
-          "op": "add",
-          "file": {
-            "name": "notes.md",
-            "size": 4096,
-            "primaryNodeID": 10,
-            "dateAdded": "04-15-2026",
-            "contentHash": "a3f9c2d1e8b74f..."
-          },
-          "timestamp": "2026-04-15T10:00:00Z",
+      "records": {
+        "a3f9c2d1e8b74f...": {
+          "contentHash": "a3f9c2d1e8b74f...",
+          "encryptedMeta": "<AES-256-GCM blob: {name, size, dateAdded}, base64>",
+          "seq": 1,
+          "deleted": false,
+          "timestamp": "2026-06-07T10:00:00Z",
           "signature": "<64-byte ECDSA r||s, base64>"
         },
-        {
-          "index": 1,
-          "prevHash": "7e2b91f4c3a05d...",
-          "op": "add",
-          "file": { "name": "photo.jpg", ... },
-          "timestamp": "2026-04-15T10:05:00Z",
+        "7e2b91f4c3a05d...": {
+          "contentHash": "7e2b91f4c3a05d...",
+          "encryptedMeta": "<AES-256-GCM blob>",
+          "seq": 3,
+          "deleted": true,
+          "timestamp": "2026-06-07T11:00:00Z",
           "signature": "<64-byte ECDSA r||s, base64>"
         }
-      ]
-    },
-    {
-      "userID": 99182734,
-      "username": "c7f2d893",
-      "publicKey": "...",
-      "blocks": [ ... ]
+      }
     }
-  ]
+  },
+  "shardMap": { ... }
 }
 ```
 
-**The chains array is always sorted ascending by `userID`.** This allows binary search — `FindChainIndex` is O(log n).
+`users` is a map from userID to `UserState`. Each `UserState` contains a map from `contentHash` to `FileRecord`. A `FileRecord` with `deleted: true` is a tombstone — the file has been removed. Tombstones are kept so that a peer who has an old version of the manifest (where the file existed) can be told authoritatively that the file is gone.
 
-Each user has exactly one chain. The current set of files is derived by **replaying the chain** — every block is an operation (add/remove/rename), and replaying them in order gives you the current file state. This is described in detail in [manifest-blockchain.md](manifest-blockchain.md).
+The current file set for a user is all `FileRecord`s in their map where `deleted: false`. The manifest is O(N files), not O(N operations) — it does not grow with add/remove cycles.
 
 ---
 
 ## Part 4: The Security Model
 
-### Block Signatures (Integrity)
+### Record Signatures (Integrity)
 
-Every block in a chain is individually signed by the owner with their ECDSA P-256 private key. The signature covers the block's content hash (all fields except the signature itself):
-
-```
-hash = SHA-256(json(block with Signature=nil))
-signature = ECDSA_Sign(private_key, hash)
-```
-
-Any peer receiving a chain can verify every block using only the `PublicKey` embedded in the `UserChain` — no private key needed. A block with an invalid signature causes the entire chain to be rejected by `ValidateChain`.
-
-### Hash Chain (Tamper Evidence)
-
-Each block includes `prevHash`, the SHA-256 of the previous block's content. This links every block to its predecessor:
+Every `FileRecord` is ECDSA-signed by the owner with their P-256 private key. The signature covers a deterministic canonical encoding:
 
 ```
-block[0].prevHash = ""                    ← genesis
-block[1].prevHash = SHA-256(block[0])
-block[2].prevHash = SHA-256(block[1])
-...
+canonical_payload =
+    big_endian_uint32(userID) ||
+    contentHash (ASCII)        ||
+    big_endian_uint64(seq)     ||
+    deleted_byte (0x00/0x01)   ||
+    encryptedMeta (bytes)
+
+signature = ECDSA_Sign(private_key, SHA-256(canonical_payload))
 ```
 
-If any historical block is altered — even one bit — its hash changes, which invalidates the `prevHash` of every subsequent block. An attacker cannot rewrite history without invalidating the entire chain from the point of modification forward.
+Any peer receiving a manifest can verify every record using only the `PublicKey` embedded in the `UserState` — no private key needed. A record with an invalid signature is dropped before it can be merged into the local manifest.
+
+### Sequence Numbers (Replay Prevention)
+
+Each `FileRecord` carries a `Seq` (sequence number) that is monotonically increasing per `(userID, contentHash)`. When a file is added (`Seq=1`), renamed (`Seq=2`), and deleted (`Seq=3`), the tombstone record has `Seq=3`. A peer that later sends `Seq=1` (the original add) is rejected — the merge rule is **strictly greater Seq only**.
+
+This prevents an attacker from:
+- Replaying a stale "add" to make a deleted file reappear
+- Replaying a stale "low Seq" to roll back a rename or update
+
+Only the record owner can produce a record with a new, higher `Seq` (because they must sign it with their private key).
+
+### Merge Rule
+
+`MergeNetworkManifest(local, remote)` applies LWW (Last-Write-Wins) per `(userID, contentHash)`:
+
+```
+for each (userID, contentHash) pair in remote:
+    if signature verification fails → drop
+    if remote.Seq > local.Seq → accept (LWW: newer wins)
+    if remote.Seq == local.Seq → skip (idempotent)
+    if remote.Seq < local.Seq → skip (we have newer)
+```
+
+Because only one actor (the file owner) can increment `Seq`, "newer wins" always means "the owner's most recent intent wins."
 
 ### User Identity
 
@@ -250,45 +256,23 @@ HKDF(hash=SHA-256, ikm=loginKey, salt=nil, info="mosaic-user-key") → 32-byte s
 
 The same login key on any machine always produces the same keypair. This means:
 - A user logging in on a second machine gets the exact same private key
-- They can append new blocks to their chain from any machine
+- They can record mutations (add/remove/rename) from any machine
 - Their `userID` (a fingerprint of the public key) is consistent everywhere
 
-The derived private key is cached at `~/.mosaic-user.key` (PEM, 0600). The public key is embedded in the `UserChain` so any peer can verify blocks without knowing the private key.
-
-### Merge and Fork Resolution
-
-When two peers connect, each pushes their manifest to the other. `MergeNetworkManifest` merges the two:
-
-```
-for each chain in remote.chains:
-    if ValidateChain(chain) fails:
-        drop it (invalid signature or broken hash link)
-    
-    if userID not in local:
-        insert the chain (new user discovered)
-    else:
-        winner = pickBetterChain(local_chain, remote_chain)
-        replace local with winner if different
-```
-
-`pickBetterChain` uses two tiebreakers in order:
-1. **Longer chain wins** — more blocks means more operations, which reflects more history
-2. **Deterministic fork resolution** — if two chains have the same length but diverge, find the first differing block and pick the chain with the lexicographically lower block hash
-
-The second rule ensures that even a true fork (two users both offline, making different operations, then reconnecting) resolves the same way on every peer in the network. The outcome is deterministic and does not require coordination.
+The derived private key is cached at `~/.mosaic-user.key` (PEM, 0600). The public key is embedded in `UserState` so any peer can verify records.
 
 ### What Peers Can and Cannot Do
 
 | Action | Can a random peer do this? |
 |---|---|
-| Read your file list | Yes — file names and sizes are visible in the chain |
-| Modify your chain | No — they don't have your private key to re-sign blocks |
-| Delete your blocks | No — any truncation breaks the hash chain |
-| Insert a block into the middle of your chain | No — would invalidate all subsequent prevHash links |
-| Fork your chain | Yes — but the deterministic merge rules resolve it consistently |
-| Spam fake blocks for a new user | No — blocks must be signed with the claimed user's key; `PublicKey` in the chain is the ground truth |
+| See which content hashes you have | Yes — `contentHash` travels in plaintext |
+| See your file names, sizes, or dates | No — encrypted per-record with a key only you hold |
+| Add a record to your user state | No — requires your private key to produce a valid signature |
+| Remove a record from your user state | No — same requirement; a forged tombstone fails signature verification |
+| Replay an old state to roll back your files | No — `Seq` must be strictly greater than what is already held locally |
+| Flood the manifest with fake users | Theoretically yes — Sybil attack; mitigated by per-IP STUN registration cap |
 
-File *content* is never stored in the manifest. Only metadata (name, size, node, date, content hash) is visible. The actual bytes are distributed as encrypted shards across the network.
+File *content* is never stored in the manifest. Only `ContentHash` identifies files in the network manifest. The actual bytes are distributed as encrypted shards across the network.
 
 ---
 
@@ -300,7 +284,7 @@ File *content* is never stored in the manifest. Only metadata (name, size, node,
 
 1. `ManifestEntry.ContentHash` — in the local manifest
 2. `StubMeta.ContentHash` — in the `.mosaic` stub file
-3. `NetworkFileEntry.ContentHash` — in the chain block's `file` field
+3. `FileRecord.ContentHash` — in the network manifest record
 
 ### How Verification Works
 
@@ -328,17 +312,17 @@ If the hash check fails, the corrupted file is deleted immediately.
 
 When a node joins the network and connects to a peer:
 
-1. **On peer connect** — `joinNetwork.go` calls `pushManifestToPeer`, which reads the local network manifest and sends it wrapped in a `ManifestSync` message over UDP
+1. **On handshake complete** — `joinNetwork.go` calls `pushManifestToPeer`, which reads the local network manifest and sends it wrapped in a `ManifestSync` message
 2. **On manifest received** — `handleManifestSync` is called in a goroutine
 3. **On any local write** (upload, delete, rename) — the handler calls `BroadcastNetworkManifest` after successfully writing
 
 ### Convergence
 
-Because the merge is deterministic (both peers run the same `pickBetterChain` logic on the same inputs), the network converges to a single canonical state even in the presence of concurrent writes and network partitions. When the merge brings in new data (`changed == true`), the node re-broadcasts the merged result so the update propagates to all connected peers.
+The LWW-Set merge is deterministic and commutative — both peers run the same `Seq`-wins logic on the same records and reach the same result regardless of order. When the merge brings in new data (`changed == true`), the node re-broadcasts the merged result so the update propagates to all connected peers.
 
 ### The Outer AES Key
 
-The outer AES-256-GCM layer is per-node — each node generates its own `~/.mosaic-network.key` independently. This means two nodes cannot decrypt each other's on-disk manifest file. This is fine: when a manifest is transmitted via P2P, it is sent as plain JSON (`ManifestToJSON` removes the outer envelope). The individual chain data is already protected by per-block ECDSA signatures. Each node re-wraps the received JSON with its own AES key before writing to disk.
+The outer AES-256-GCM layer is per-node — each node generates its own `~/.mosaic-network.key` independently. This means two nodes cannot decrypt each other's on-disk manifest file. When a manifest is transmitted via P2P, it is sent as plain JSON (`ManifestToJSON` removes the outer envelope). The individual records are already protected by per-record ECDSA signatures and per-record encrypted metadata. Each node re-wraps the received JSON with its own AES key before writing to disk.
 
 ---
 
@@ -350,7 +334,7 @@ The outer AES-256-GCM layer is per-node — each node generates its own `~/.mosa
 ~/.mosaic-user.key       ECDSA P-256 private key (PEM), derived from login key via HKDF
 ~/Mosaic/
   .mosaic-manifest.json          Local manifest (plaintext JSON, human-readable)
-  .mosaic-network-manifest       Network manifest (binary: nonce || AES-GCM ciphertext of chain JSON)
+  .mosaic-network-manifest       Network manifest (binary: nonce || AES-GCM ciphertext of user LWW-Set JSON)
   <filename>                     Real cached file
   <filename>.mosaic              Stub file (JSON, exists only when file is not cached locally)
 ```
@@ -369,18 +353,19 @@ Both key files are created with `0600` permissions — readable only by your use
 3. AddToManifest(mosaicDir, "notes.md", size, nodeID, contentHash)
      → writes to .mosaic-manifest.json atomically
 4. ReadNetworkManifest(mosaicDir, aesKey)
-     → AES-GCM decrypt .mosaic-network-manifest → NetworkManifest{chains: [...]}
-5. AppendBlockAdd(&manifest, userID, username, NetworkFileEntry{...}, kp)
-     → compute prevHash = SHA-256(last block in user's chain)
-     → create ChainBlock{index, prevHash, op:"add", file, timestamp}
+     → AES-GCM decrypt .mosaic-network-manifest → NetworkManifest{users: {...}}
+5. RecordFileAdd(&manifest, userID, username, NetworkFileEntry{...}, kp)
+     → nextSeq = existing.Seq + 1 (or 1 if first)
+     → encrypt {name, size, dateAdded} with metaKey → encryptedMeta
+     → create FileRecord{contentHash, encryptedMeta, seq: nextSeq, deleted: false}
      → sign with private key → Signature
-     → append to chain
+     → store in manifest.Users[userID].Records[contentHash]
 6. WriteNetworkManifestLocked(mosaicDir, aesKey, manifest)
      → AES-GCM encrypt updated manifest JSON
      → write atomically to .mosaic-network-manifest
 7. BroadcastNetworkManifest
-     → ManifestToJSON (outer AES removed; sensitive block fields remain AES-256-GCM encrypted)
-     → SendToAllPeers via UDP
+     → ManifestToJSON (outer AES removed; per-record metadata remains AES-256-GCM encrypted)
+     → SendToAllPeers
 8. WriteStub(mosaicDir, "notes.md", size, nodeID, contentHash)
      → creates notes.md.mosaic
    (or MarkCachedInManifest if keeping local copy)
@@ -411,12 +396,14 @@ Both key files are created with `0600` permissions — readable only by your use
 1. RemoveStub (if exists)
 2. Delete ~/Mosaic/notes.md (if cached)
 3. RemoveFromManifest → entry gone from .mosaic-manifest.json
-4. ReadNetworkManifest
-5. AppendBlockRemove(&manifest, userID, "notes.md", kp)
-     → create ChainBlock{op:"remove", file:{name:"notes.md"}, ...}
-     → sign and append
-6. WriteNetworkManifestLocked → write to disk
-7. BroadcastNetworkManifest → peers update their copy
+4. ReadNetworkManifest → get current manifest
+5. FindFileByName(nm, userID, "notes.md", metaKey) → contentHash
+6. RecordFileRemove(&manifest, userID, contentHash, kp)
+     → nextSeq = existing.Seq + 1
+     → create FileRecord{contentHash, seq: nextSeq, deleted: true}
+     → sign and store (tombstone)
+7. WriteNetworkManifestLocked → write to disk
+8. BroadcastNetworkManifest → peers update their copy
 ```
 
 ### Rename (`mos rename file notes.md notes2.md`)
@@ -425,12 +412,16 @@ Both key files are created with `0600` permissions — readable only by your use
 1. Rename ~/Mosaic/notes.md → ~/Mosaic/notes2.md (if cached)
 2. Rename ~/Mosaic/notes.md.mosaic → ~/Mosaic/notes2.md.mosaic (if stub)
 3. RenameInManifest → key moves from "notes.md" to "notes2.md", Name field updated
-4. ReadNetworkManifest
-5. AppendBlockRename(&manifest, userID, "notes.md", "notes2.md", kp)
-     → create ChainBlock{op:"rename", file:{name:"notes.md"}, newName:"notes2.md", ...}
-     → sign and append
-6. WriteNetworkManifestLocked → write to disk
-7. BroadcastNetworkManifest → peers update their copy
+4. ReadNetworkManifest → get current manifest
+5. FindFileByName(nm, userID, "notes.md", metaKey) → contentHash
+6. RecordFileRename(&manifest, userID, contentHash, "notes2.md", kp)
+     → decrypt existing encryptedMeta to get size and dateAdded
+     → re-encrypt with new name
+     → nextSeq = existing.Seq + 1
+     → create FileRecord{contentHash, encryptedMeta: new, seq: nextSeq, deleted: false}
+     → sign and store
+7. WriteNetworkManifestLocked → write to disk
+8. BroadcastNetworkManifest → peers update their copy
 ```
 
 ---
@@ -447,14 +438,14 @@ The P2P broadcast in `BroadcastNetworkManifest` is best-effort: if no peer is co
 
 ## Part 10: ShardMap — Shard Location Tracking
 
-The network manifest contains a second top-level field alongside `chains`: the `ShardMap`. It is a G-set CRDT that records which nodes hold which shards of each file.
+The network manifest contains a second top-level field alongside `users`: the `ShardMap`. It is a G-set CRDT that records which nodes hold which shards of each file.
 
 ### Structure
 
 ```json
 {
-  "version": 2,
-  "chains": [ ... ],
+  "version": 3,
+  "users": { ... },
   "shardMap": {
     "<contentHash>": {
       "holders": {
@@ -481,7 +472,9 @@ Every time a node stores a shard to disk — whether because it uploaded the fil
 
 ### CRDT Merge
 
-When two manifests are merged, `mergeShardMaps` unions the holder lists for every shard of every file. Because holders are only ever added (never removed), the result is correct regardless of the order manifests arrive. This is the G-set (grow-only set) property.
+When two manifests are merged, `mergeShardMaps` unions the holder lists for every shard of every file. Because holders are only ever added (never removed during normal operation), the result is correct regardless of the order manifests arrive. This is the G-set (grow-only set) property.
+
+When a peer is evicted (pong timeout), `RemoveShardHolder` is called to clean up its entries so future fetches don't route to the dead node.
 
 ### How It Gets Used
 
@@ -499,6 +492,5 @@ If no holders are recorded for a shard, the node cannot request it — the reque
 ## Part 11: What Is Not Yet Implemented
 
 - **Targeted shard routing on upload** — `UploadFile` currently uses `SendRawToAllPeers`, which sends all 14 shards to every peer. The correct behaviour is `shard[i] → peers[i % numPeers]`. Redistribution on peer join already uses the correct routing rule; upload-time routing is the remaining gap.
-- **Proof of Storage** — the `Tapestry` protobuf definition exists in `internal/tapestry/` and is designed for this. It will allow the network to verify that storage nodes actually hold the shards they claim to hold.
-- **Chain compaction (metadata)** — because sensitive metadata (`Name`, `Size`, `DateAdded`) is now encrypted per-block, old plaintext blocks that pre-date the encryption change are still readable in backward-compat mode. A migration step to re-encrypt old blocks under the owner's key would close this gap for long-lived chains.
-- **Chain compaction** — long-lived chains with many add/remove cycles accumulate dead blocks. A compaction step (folding the chain to a single "add" block per active file) would be useful once chain length becomes a concern.
+- **Tombstone compaction** — `deleted: true` records accumulate over time as files are removed. A compaction step could prune tombstones that all peers have seen. Not yet needed in practice.
+- **Key revocation** — no mechanism exists to signal that a private key has been compromised. Recovery requires abandoning the identity.

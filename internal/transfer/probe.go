@@ -53,12 +53,15 @@ func ProbeShardAtPeer(fileHash string, shardIndex int, peerID string, client *p2
 		return false
 	}
 
+	var result bool
 	select {
 	case reportedHash := <-ch:
-		return reportedHash == expectedHash
+		result = reportedHash == expectedHash
 	case <-time.After(probeTimeout):
-		return false
+		result = false
 	}
+	client.RecordProbeResult(peerID, result)
+	return result
 }
 
 // HandleShardProbe responds to a ShardProbe from a peer. If we hold the

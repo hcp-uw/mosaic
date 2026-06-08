@@ -40,8 +40,7 @@ func ListManifest(_ protocol.ListManifestRequest) protocol.ListManifestResponse 
 		}
 	}
 
-	idx := filesystem.FindChainIndex(m, accountID)
-	if idx == -1 {
+	if !filesystem.UserExistsInNetwork(m, accountID) {
 		return protocol.ListManifestResponse{
 			Success: true,
 			Details: "no files in network manifest",
@@ -54,7 +53,7 @@ func ListManifest(_ protocol.ListManifestRequest) protocol.ListManifestResponse 
 		return protocol.ListManifestResponse{Success: false, Details: fmt.Sprintf("could not load user key: %v", err)}
 	}
 	metaKey := filesystem.MetaKeyFromKP(kp)
-	networkFiles := filesystem.ChainToFiles(m.Chains[idx], &metaKey)
+	networkFiles := filesystem.GetUserFiles(m, accountID, &metaKey)
 	localEntries, _ := filesystem.ReadManifest(mosaicDir)
 
 	files := make([]protocol.ManifestFileEntry, 0, len(networkFiles))

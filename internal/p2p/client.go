@@ -40,6 +40,11 @@ type Client struct {
 	quicListener *quic.Listener
 	quicPort     int // our QUIC listening port; 0 if QUIC not started
 
+	// Shard-probe callbacks (registered by the transfer package to avoid import cycle).
+	onShardProbe    func(msg *api.Message)
+	onShardProbeAck func(msg *api.Message)
+	probeMu         sync.Mutex
+
 	// QUIC shard-stream callbacks (registered by the transfer package).
 	// quicBinaryFrameHandler is called SYNCHRONOUSLY from the stream-reader goroutine
 	// for every 0x01 frame so the assembly map is fully updated before the
@@ -489,6 +494,22 @@ func (c *Client) processPeerMessage(data []byte, fromAddr *net.UDPAddr, direct b
 			return
 		case api.ShardDelete:
 			c.notifyMessageReceived(data)
+			return
+		case api.ShardProbe:
+			c.probeMu.Lock()
+			fn := c.onShardProbe
+			c.probeMu.Unlock()
+			if fn != nil {
+				go fn(msg)
+			}
+			return
+		case api.ShardProbeAck:
+			c.probeMu.Lock()
+			fn := c.onShardProbeAck
+			c.probeMu.Unlock()
+			if fn != nil {
+				fn(msg) // synchronous: delivers to waiting ProbeShardAtPeer channel
+			}
 			return
 		}
 

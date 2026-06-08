@@ -41,7 +41,7 @@ Once on TURN, the ping routine periodically sends hole-punch packets on the dire
 
 If the TURN dial itself fails (the network blocks all UDP, including the UDP packet to reach port 3479), the client immediately falls through to the TCP relay. The TCP relay listens on port 443 with TLS — firewalls almost universally allow outbound TCP 443, treating it as normal HTTPS traffic.
 
-The relay payload is not inspected by the server. All peer-to-peer data is AES-256-GCM encrypted at the application layer before it touches the relay, so the relay server can only see peer IDs and packet sizes, not content. `InsecureSkipVerify` is used on the TLS connection because the relay cert is self-signed — this is safe given the end-to-end encryption above it.
+The relay payload is not inspected by the server. All peer-to-peer data is AES-256-GCM encrypted via the X25519 session key before it touches the relay, so the relay server can only see peer IDs and packet sizes, not content. `InsecureSkipVerify` is used on the TLS connection because the relay cert is self-signed — this is safe given the end-to-end encryption above it.
 
 ### Why not just always use the TCP relay?
 
@@ -146,9 +146,17 @@ If the leader's STUN pings fail 3 times in a row:
 
 | Threat | Mitigation |
 |---|---|
-| Node claims a lower queue position to become leader | Queue positions are assigned and stored server-side; clients cannot influence them |
-| Node sends fake disconnect to trigger leader change | No client-initiated leader change exists — only STUN's cleanup routine triggers election |
-| Node repeatedly re-registers to reset queue position | Re-registration (same IP:port) refreshes the existing record — queue position is not re-assigned |
+| Node claims a lower queue position to become leader | Queue positions are assigned server-side; clients cannot influence them |
+| Node sends fake disconnect to trigger leader change | No client-initiated leader change — only STUN's cleanup routine triggers election |
+| Node repeatedly re-registers to reset queue position | Re-registration (same IP:port) refreshes the existing record without changing queue position |
+| One machine flooding the network with fake identities (Sybil) | Per-IP concurrent registration cap (default 10); excess registrations are rejected with `RATE_LIMITED` |
+| Client spamming STUN with pings to waste CPU | Pings arriving faster than every 5 seconds from the same client are silently dropped |
+| Peer lying about holding shards it doesn't have | Shard probe challenge (nonce + SHA-256 proof); 3 consecutive failures evict the peer |
+| Peer refusing to respond to shard probes | Treated the same as a wrong-hash response — counts toward the 3-strike eviction |
+
+### Dev bypass for rate limits
+
+Both the per-IP cap and ping rate limit are disabled when the STUN server is started with `--no-rate-limit` or `MOSAIC_STUN_NO_RATE_LIMIT=1`. Use this when running multiple test nodes on the same machine locally.
 
 ---
 
@@ -193,18 +201,28 @@ STUN is not replicated. If STUN is down for more than 30 seconds, leader re-elec
 ## Running
 
 ```bash
-# Default port
+# Default ports (STUN on 3478, TCP relay on 443)
 go run ./cmd/mosaic-stun
 
-# Custom port
-go run ./cmd/mosaic-stun -port 3479
+# Local dev with multiple test nodes on the same machine
+MOSAIC_STUN_NO_RATE_LIMIT=1 go run ./cmd/mosaic-stun
+# or equivalently:
+go run ./cmd/mosaic-stun --no-rate-limit
 ```
 
 **Flags:**
 
-| Flag    | Default | Description              |
-|---------|---------|--------------------------|
-| `-port` | `3478`  | UDP port to listen on    |
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-port` | `3478` | UDP port to listen on |
+| `-relay-port` | `443` | TCP relay port (TLS); `0` to disable |
+| `--no-rate-limit` | off | Disable per-IP registration cap and ping rate limit (local dev) |
+
+**Environment variables:**
+
+| Variable | Effect |
+|---|---|
+| `MOSAIC_STUN_NO_RATE_LIMIT=1` | Same as `--no-rate-limit` |
 
 ---
 
@@ -222,9 +240,19 @@ go run ./cmd/mosaic-stun -port 3479
 | Property | Status |
 |---|---|
 | Leader election manipulation | ✅ Server-assigned queue positions, STUN-driven election |
-| Shard data encrypted in transit | ✅ AES-256-GCM (see transfer package) |
+| Shard data encrypted in transit | ✅ AES-256-GCM session encryption |
+| Shard integrity verification | ✅ SHA-256 content hash checked after every download |
+| Shard possession proof | ✅ Nonce-based probe challenge before redistribution |
+| Fake shard peer eviction | ✅ 3 consecutive probe failures → peer evicted |
+| Sybil attack (one machine, many identities) | ✅ Per-IP concurrent registration cap (default 10) |
+| STUN ping flood | ✅ Pings accepted at most once per 5 seconds per client |
+| TCP relay connection flood | ✅ Hard cap of 200 concurrent relay connections |
+| File history forgery | ✅ ECDSA-signed manifest blocks; signatures verified by peers |
 | STUN-restart leadership race | ⚠️ First re-registrant wins; persistent queue positions not implemented |
 | Member queue position preserved across STUN restart | ⚠️ Records expire — members get new positions on re-registration |
-| STUN/TURN transport security | ⚠️ Plain UDP — no TLS/DTLS on the STUN or TURN channels |
-| TCP relay transport security | ✅ TLS (self-signed cert); relay payload encrypted AES-256-GCM end-to-end |
+| P2P data transport security | ✅ AES-256-GCM session key derived via X25519 (ephemeral Diffie-Hellman); all peer messages encrypted |
+| TURN relay payload security | ✅ Relay only sees AES-256-GCM ciphertext — encryption happens before the relay layer |
+| TCP relay payload security | ✅ TLS transport + AES-256-GCM payload encrypted end-to-end |
+| STUN control channel | ⚠️ Plain UDP — registration and ping messages to the STUN server are unencrypted JSON (no file data, only IP:port pairs) |
+| Pre-handshake message authentication | ⚠️ `Sign.PubKey` is self-reported; post-handshake messages are authenticated via AES-256-GCM session key |
 | Metadata privacy (who talks to whom) | ⚠️ STUN server sees IP:port pairs during pairing |

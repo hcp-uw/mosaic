@@ -35,8 +35,7 @@ func SyncUserStubs() {
 		return
 	}
 
-	idx := filesystem.FindChainIndex(m, accountID)
-	if idx == -1 {
+	if !filesystem.UserExistsInNetwork(m, accountID) {
 		return // user has no files in the network manifest yet
 	}
 
@@ -46,7 +45,7 @@ func SyncUserStubs() {
 		return
 	}
 	metaKey := filesystem.MetaKeyFromKP(kp)
-	files := filesystem.ChainToFiles(m.Chains[idx], &metaKey)
+	files := filesystem.GetUserFiles(m, accountID, &metaKey)
 
 	// Build a set of currently-live names so we can detect deletions.
 	networkNames := make(map[string]bool, len(files))

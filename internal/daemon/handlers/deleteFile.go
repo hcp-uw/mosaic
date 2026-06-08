@@ -21,16 +21,7 @@ func shardHoldersForFile(nm filesystem.NetworkManifest, filename string) (conten
 	kp, err := filesystem.LoadOrCreateUserKey(shared.UserKeyPath())
 	if err == nil {
 		metaKey := filesystem.MetaKeyFromKP(kp)
-		accountID := helpers.GetAccountID()
-		idx := filesystem.FindChainIndex(nm, accountID)
-		if idx != -1 {
-			for _, f := range filesystem.ChainToFiles(nm.Chains[idx], &metaKey) {
-				if f.Name == filename {
-					contentHash = f.ContentHash
-					break
-				}
-			}
-		}
+		contentHash, _ = filesystem.FindFileByName(nm, helpers.GetAccountID(), filename, &metaKey)
 	}
 	if contentHash == "" || nm.ShardMap == nil {
 		return
@@ -100,8 +91,10 @@ func DeleteFile(req protocol.DeleteFileRequest) protocol.DeleteFileResponse {
 				// Capture contentHash and holder set before the remove block erases the entry.
 				contentHash, holderIDs = shardHoldersForFile(nm, filename)
 
-				if aerr := filesystem.AppendBlockRemove(&nm, helpers.GetAccountID(), filename, kp); aerr != nil {
-					fmt.Println("Warning: could not append remove block for", filename, "-", aerr)
+				if contentHash == "" {
+					fmt.Println("Warning: file not found in network manifest for", filename)
+				} else if aerr := filesystem.RecordFileRemove(&nm, helpers.GetAccountID(), contentHash, kp); aerr != nil {
+					fmt.Println("Warning: could not record file removal for", filename, "-", aerr)
 				} else if werr := filesystem.WriteNetworkManifestLocked(mosaicDir, aesKey, nm); werr != nil {
 					fmt.Println("Warning: could not write network manifest for", filename, "-", werr)
 				} else {

@@ -366,6 +366,58 @@ If chunks are dropped (UDP), `ShardStreamDone` triggers `ShardStreamAck` with mi
 
 ---
 
+## Storage Proofs (ShardProbe)
+
+Before redistributing a shard to a new peer, Mosaic verifies that the candidate peer actually holds the shard bytes — not just claims to in the ShardMap. This prevents a peer from lying about its storage and receiving shards it would duplicate without holding its share.
+
+### Challenge-Response Protocol
+
+```
+Prober (us)                         Holder (peer)
+    │                                    │
+    │── ShardProbe{fileHash, shardIdx, nonce} ──►│
+    │                                    │
+    │    computes SHA-256(nonce || shard_bytes)   │
+    │◄── ShardProbeAck{..., contentHash} ─────────│
+    │                                    │
+compare contentHash against our own
+SHA-256(nonce || our copy of the shard)
+```
+
+1. We read our local copy of the shard and compute `SHA-256(nonce || shard_bytes)` — this is the expected hash.
+2. We send a `ShardProbe` with a random 16-byte nonce. The nonce prevents pre-computation; a peer cannot know the expected hash without reading the actual shard bytes on demand.
+3. The peer reads its shard, computes `SHA-256(nonce || shard_bytes)`, and sends a `ShardProbeAck` with the result.
+4. We compare. If the hashes match, the proof passes. If they differ — or if no response arrives within 3 seconds — the proof fails.
+
+### Failure Handling
+
+`RecordProbeResult(peerID, success)` in `p2p/peer.go` tracks consecutive probe failures per peer. After 3 consecutive failures, the peer is evicted: removed from `p2p.Client.peers` and notified via `OnPeerLeft`, which removes the peer from the ShardMap and triggers shard redistribution.
+
+A single probe failure does not evict — it might be a transient shard load error. Three consecutive failures indicate the peer is systematically lying about its storage.
+
+Proof results only count when we have a local copy of the shard (so we can compute the expected hash). If we don't hold the shard, we skip the probe rather than recording a false failure.
+
+### Message Types
+
+```
+api.ShardProbe    → internal/transfer/probe.go:HandleShardProbe
+api.ShardProbeAck → internal/transfer/probe.go:HandleShardProbeAck
+```
+
+These are dispatched via callbacks registered in `daemon/handlers/joinNetwork.go` to avoid an import cycle (`transfer` imports `p2p`, so the dispatch is done in the daemon and forwarded to the transfer package).
+
+### Code Locations
+
+| Function | File |
+|---|---|
+| `ProbeShardAtPeer` — initiates the challenge, waits for response | `internal/transfer/probe.go` |
+| `HandleShardProbe` — responds to incoming challenges | `internal/transfer/probe.go` |
+| `HandleShardProbeAck` — delivers response to the waiting caller | `internal/transfer/probe.go` |
+| `RecordProbeResult` / `maxProbeFailures=3` | `internal/p2p/peer.go` |
+| Callback registration to break import cycle | `internal/daemon/handlers/joinNetwork.go` |
+
+---
+
 ## Routing in the Daemon
 
 In `internal/daemon/handlers/joinNetwork.go`, the `OnMessageReceived` callback checks the first byte:

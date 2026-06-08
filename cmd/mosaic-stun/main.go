@@ -16,7 +16,15 @@ import (
 func main() {
 	port := flag.String("port", "3478", "UDP port to listen on")
 	relayPort := flag.String("relay-port", "443", "TCP relay port (0 to disable); runs TLS with a self-signed cert")
+	noRateLimit := flag.Bool("no-rate-limit", false, "disable per-IP registration cap (for local dev with multiple test nodes)")
 	flag.Parse()
+
+	if os.Getenv("MOSAIC_STUN_NO_RATE_LIMIT") == "1" {
+		*noRateLimit = true
+	}
+	if *noRateLimit {
+		log.Println("Warning: per-IP rate limiting disabled (MOSAIC_STUN_NO_RATE_LIMIT or --no-rate-limit)")
+	}
 
 	config := &stun.ServerConfig{
 		ListenAddress: ":" + *port,
@@ -24,6 +32,7 @@ func main() {
 		PingInterval:  10 * time.Second,
 		MaxQueueSize:  100,
 		EnableLogging: true,
+		NoRateLimit:   *noRateLimit,
 	}
 
 	server := stun.NewServer(config)

@@ -68,13 +68,10 @@ func doFetchFileBytes(filename string) ([]byte, error) {
 		if kp, kerr := filesystem.LoadOrCreateUserKey(shared.UserKeyPath()); kerr == nil {
 			metaKey := filesystem.MetaKeyFromKP(kp)
 			accountID := helpers.GetAccountID()
-			idx := filesystem.FindChainIndex(nm, accountID)
-			if idx != -1 {
-				for _, f := range filesystem.ChainToFiles(nm.Chains[idx], &metaKey) {
-					if f.Name == filename {
-						transfer.EnsureShardMeta(f.ContentHash, f.Name, f.Size)
-						break
-					}
+			for _, f := range filesystem.GetUserFiles(nm, accountID, &metaKey) {
+				if f.Name == filename {
+					transfer.EnsureShardMeta(f.ContentHash, f.Name, f.Size)
+					break
 				}
 			}
 		}
