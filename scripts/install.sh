@@ -118,7 +118,7 @@ build_app() {
 
     local derived="${repo_dir}/MosaicApp/DerivedData"
 
-    xcodebuild \
+    if ! xcodebuild \
         -project "$project" \
         -scheme Mosaic \
         -configuration Release \
@@ -126,9 +126,7 @@ build_app() {
         CODE_SIGN_IDENTITY="-" \
         DEVELOPMENT_TEAM="" \
         CODE_SIGNING_ALLOWED=YES \
-        > /tmp/mosaic-xcodebuild.log 2>&1
-
-    if [ $? -ne 0 ]; then
+        > /tmp/mosaic-xcodebuild.log 2>&1; then
         echo -e " ${YELLOW}⚠ (failed — CLI works without it)${NC}"
         return 0
     fi
@@ -312,8 +310,13 @@ install_binaries() {
         chmod +x "${BIN_DIR}/${DAEMON_BIN}" 2>/dev/null || true
     fi
 
+    # If run with sudo, fix ownership of installed binaries so the real user owns them.
+    if [ -n "$SUDO_USER" ]; then
+        chown "$SUDO_USER" "${BIN_DIR}/${CLI_BIN}" "${BIN_DIR}/${DAEMON_BIN}" 2>/dev/null || true
+    fi
+
     echo -e " ${GREEN}✓${NC}"
-    
+
     # Check if BIN_DIR is in PATH
     if [[ ":$PATH:" != *":${BIN_DIR}:"* ]]; then
         echo -e "${YELLOW}  ⚠ ${BIN_DIR} is not in PATH — add to ~/.zshrc (or ~/.bashrc):${NC}"
@@ -332,6 +335,15 @@ start_daemon() {
     
     # Ensure clean state — remove files that may be owned by root from a previous sudo run.
     rm -f "${PID_FILE}" "${SOCK_FILE}" "${LOG_FILE}"
+
+    # ~/Mosaic/ is created by the daemon on first run, but the log redirect below
+    # needs the directory to already exist or bash won't start the daemon at all.
+    local mosaic_log_dir
+    mosaic_log_dir="$(dirname "${LOG_FILE}")"
+    mkdir -p "$mosaic_log_dir"
+    if [ -n "$SUDO_USER" ]; then
+        chown "$SUDO_USER" "$mosaic_log_dir" 2>/dev/null || true
+    fi
 
     # Start the daemon as the real user (not root), even if install.sh was run with sudo.
     if [ "$OS" = "Windows" ]; then
@@ -480,6 +492,17 @@ main() {
     set_platform_vars
     echo "Platform: $OS"
     echo ""
+
+    # On macOS, running with sudo creates root-owned sockets and files, which means
+    # every subsequent 'mos' command also needs sudo. Warn and continue rather than
+    # silently producing a broken install.
+    if [ "$OS" = "macOS" ] && [ -n "$SUDO_USER" ]; then
+        echo -e "${YELLOW}⚠ Running with sudo on macOS is not recommended.${NC}"
+        echo -e "${YELLOW}  Files created as root will require sudo for all future 'mos' commands.${NC}"
+        echo -e "${YELLOW}  If a previous sudo install broke things, run: sudo chown -R \$USER ~/Mosaic ~/.mosaic-* ~/.local/bin/mos ~/.local/bin/mosaicd /tmp/mosaicd.sock /tmp/mosaicd.pid 2>/dev/null${NC}"
+        echo -e "${YELLOW}  Then re-run without sudo: ./install.sh${NC}"
+        echo ""
+    fi
 
     # Check for Go
     if ! command -v go &> /dev/null; then
