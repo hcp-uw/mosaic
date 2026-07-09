@@ -350,7 +350,7 @@ When a new peer connects (`OnPeerAssigned`):
 
 ### 1. Manifest push
 
-`pushManifestToPeer` reads the local network manifest and sends it wrapped in a `ManifestSync` message. The new peer merges it with their own manifest via `MergeNetworkManifest`. If the merge brings in new data, the new peer broadcasts the combined result back.
+`pushManifestToPeer` sends the newly-connected peer the **full** local manifest wrapped in a `ManifestSync` message (first contact, so a full sync). The new peer merges it via `MergeNetworkManifest`; if that brings in new data, the peer broadcasts the combined result back. Subsequent broadcasts to that peer are **deltas** — only records it hasn't seen — see [manifest.md → Delta sync](manifest.md#delta-sync).
 
 ### 2. Shard redistribution
 

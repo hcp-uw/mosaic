@@ -434,3 +434,32 @@ func TestRepair_NoopWithoutOwnerKey(t *testing.T) {
 		t.Fatal("shard 3 should still be missing — non-owner must not write it")
 	}
 }
+
+// TestFetchFileBytes_EmptyFile is a regression test for the empty-file download
+// hang: a 0-byte file has no shard chunks, so fetching its shards never
+// completes. FetchFileBytes must reconstruct it directly as empty bytes.
+func TestFetchFileBytes_EmptyFile(t *testing.T) {
+	dir := useTempShardsDir(t)
+	hash := "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" // sha256("")
+
+	shardDir := filepath.Join(dir, hash)
+	if err := os.MkdirAll(shardDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeShardMeta(shardDir, ShardMeta{
+		FileName:        "empty.txt",
+		FileHash:        hash,
+		FileSize:        0,
+		TotalDataShards: DataShards,
+		TotalShards:     TotalShards,
+	})
+
+	// No shards on disk, nil client — must NOT try to fetch or hang; just return empty.
+	got, err := FetchFileBytes("empty.txt", nil, nil)
+	if err != nil {
+		t.Fatalf("FetchFileBytes on an empty file: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("empty file should reconstruct to 0 bytes, got %d", len(got))
+	}
+}

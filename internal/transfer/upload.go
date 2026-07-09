@@ -303,7 +303,12 @@ func sendPlaintextShardToPeer(srcPath string, shardIndex int, fileHash string, k
 		// QUIC path: HandleQUICStreamDone on the receiver side sends ShardStreamAck
 		// on stream EOF — no UDP signal needed and no risk of arriving too early.
 		// UDP path: send explicit ShardStreamDone to trigger the receiver's ack.
-		if !usedQUIC {
+		//
+		// Zero-chunk shard (an empty file): QUIC sends no frames, so the stream-EOF
+		// ACK can't fire (there's no frame to identify the shard). Send an explicit
+		// ShardStreamDone in that case too, so the receiver acks immediately instead
+		// of the sender hanging for the full ack timeout.
+		if !usedQUIC || totalChunks == 0 {
 			client.SendToPeer(peerID, api.NewShardStreamDoneMessage(client.GetID(), api.ShardStreamDoneData{ //nolint:errcheck
 				FileHash:    fileHash,
 				ShardIndex:  shardIndex,

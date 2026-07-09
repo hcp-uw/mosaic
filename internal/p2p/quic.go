@@ -140,19 +140,21 @@ func (c *Client) quicAcceptStreams(peerID string, conn *quic.Conn) {
 	}
 }
 
-// handleQUICStream reads length-prefixed binary shard frames from a QUIC receive
-// stream and delivers each frame to the appropriate handler.
+// handleQUICStream reads length-prefixed frames from a QUIC receive stream and
+// delivers each to the appropriate handler.
 //
 // Binary shard frames (magic 0x01) are dispatched SYNCHRONOUSLY via
-// callQUICBinaryFrameHandler so that the assembly map is fully updated before the
-// stream-done notification fires. All other frames use the async message path.
+// callQUICBinaryFrameHandler so the assembly map is updated before the stream-done
+// notification fires. Any other frame (e.g. a large session-encrypted control
+// message such as a manifest that didn't fit in a UDP datagram — magic 0x02) is
+// routed through processPeerMessage for decryption, authentication, and dispatch.
 //
 // notifyQUICStreamDone is only called on a CLEAN io.EOF (sender closed the stream
 // after the last frame). On connection drop or stream reset the read returns a
 // non-EOF error, and we exit without firing the done notification — doing so would
 // falsely report all chunks as missing and trigger a 30-second ack-timeout cascade.
 //
-// Frame format: [4-byte LE length][binary shard chunk frame (0x01 magic)].
+// Frame format: [4-byte LE length][frame].
 func (c *Client) handleQUICStream(peerID string, stream *quic.ReceiveStream) {
 	var lastFrame []byte
 	for {
@@ -177,9 +179,15 @@ func (c *Client) handleQUICStream(peerID string, stream *quic.ReceiveStream) {
 		}
 		lastFrame = frame
 		if len(frame) > 0 && frame[0] == 0x01 {
+			// Binary shard chunk — synchronous, so the assembly map is updated
+			// before the stream-done notification fires.
 			c.callQUICBinaryFrameHandler(peerID, frame)
 		} else {
-			c.notifyMessageReceived(frame)
+			// A control message routed over QUIC (e.g. a large manifest that didn't
+			// fit in a UDP datagram). Run it through processPeerMessage so the 0x02
+			// session envelope is decrypted, authenticated, and dispatched exactly
+			// as it would be off the UDP path.
+			c.processPeerMessage(frame, nil, false)
 		}
 	}
 }
@@ -288,4 +296,3 @@ func (c *Client) IsPeerViaTURN(peerID string) bool {
 	c.mutex.RUnlock()
 	return peer != nil && peer.ViaTURN
 }
-

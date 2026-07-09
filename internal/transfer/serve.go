@@ -46,7 +46,9 @@ func StreamShardToPeer(fileHash string, meta *ShardMeta, shardIndex int, peerID 
 
 		// QUIC path: stream EOF triggers ShardStreamAck via HandleQUICStreamDone.
 		// UDP path: send explicit ShardStreamDone to trigger the receiver's ack.
-		if !usedQUIC {
+		// Zero-chunk shard (empty file): QUIC sends no frames so the EOF ACK can't
+		// fire — send an explicit ShardStreamDone so the receiver still acks.
+		if !usedQUIC || totalChunks == 0 {
 			client.SendToPeer(peerID, api.NewShardStreamDoneMessage(client.GetID(), api.ShardStreamDoneData{ //nolint:errcheck
 				FileHash:    fileHash,
 				ShardIndex:  shardIndex,

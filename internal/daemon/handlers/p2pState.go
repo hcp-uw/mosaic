@@ -1,12 +1,11 @@
 package handlers
 
 import (
-	"fmt"
 	"sync"
 
 	"github.com/hcp-uw/mosaic/internal/api"
-	"github.com/hcp-uw/mosaic/internal/p2p"
 	filesystem "github.com/hcp-uw/mosaic/internal/fileSystem"
+	"github.com/hcp-uw/mosaic/internal/p2p"
 )
 
 // p2pClient is the live P2P client set when the node joins the network.
@@ -85,56 +84,15 @@ func SetP2PClient(c *p2p.Client) {
 	p2pClient = c
 }
 
-// BroadcastNetworkManifest serializes m and sends it to all connected peers.
-// Errors are logged but do not propagate — broadcast is best-effort.
+// BroadcastNetworkManifest sends each connected peer only the manifest records it
+// hasn't seen yet (plus the full ShardMap) — see manifestDelta.go. Best-effort.
 func BroadcastNetworkManifest(m filesystem.NetworkManifest) {
-	p2pClientMu.RLock()
-	c := p2pClient
-	p2pClientMu.RUnlock()
-
-	if c == nil || !c.IsPeerCommunicationAvailable() {
-		return
-	}
-
-	data, err := filesystem.ManifestToJSON(m)
-	if err != nil {
-		fmt.Println("BroadcastNetworkManifest: could not serialize manifest:", err)
-		return
-	}
-
-	msg := api.NewManifestSyncMessage(c.GetID(), data)
-
-	if err := c.SendToAllPeers(msg); err != nil {
-		fmt.Println("BroadcastNetworkManifest: send error:", err)
-	}
+	broadcastManifestDelta(m, "")
 }
 
-// BroadcastNetworkManifestExcluding serializes m and sends it to all connected
-// peers except excludePeerID. Used by handleManifestSync so a merged manifest
-// is not echoed back to the peer that just sent it, which would create an
-// infinite ping-pong between two nodes.
+// BroadcastNetworkManifestExcluding is BroadcastNetworkManifest but skips
+// excludePeerID. Used by handleManifestSync so a merged manifest is not echoed
+// back to the peer that just sent it (which would create an infinite ping-pong).
 func BroadcastNetworkManifestExcluding(m filesystem.NetworkManifest, excludePeerID string) {
-	p2pClientMu.RLock()
-	c := p2pClient
-	p2pClientMu.RUnlock()
-
-	if c == nil {
-		return
-	}
-
-	data, err := filesystem.ManifestToJSON(m)
-	if err != nil {
-		fmt.Println("BroadcastNetworkManifestExcluding: could not serialize manifest:", err)
-		return
-	}
-
-	msg := api.NewManifestSyncMessage(c.GetID(), data)
-	for _, peer := range c.GetConnectedPeers() {
-		if peer.ID == excludePeerID {
-			continue
-		}
-		if err := c.SendToPeer(peer.ID, msg); err != nil {
-			fmt.Printf("BroadcastNetworkManifestExcluding: send to %s error: %v\n", peer.ID, err)
-		}
-	}
+	broadcastManifestDelta(m, excludePeerID)
 }

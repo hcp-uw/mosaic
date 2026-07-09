@@ -312,13 +312,28 @@ If the hash check fails, the corrupted file is deleted immediately.
 
 When a node joins the network and connects to a peer:
 
-1. **On handshake complete** — `joinNetwork.go` calls `pushManifestToPeer`, which reads the local network manifest and sends it wrapped in a `ManifestSync` message
+1. **On handshake complete** — `joinNetwork.go` calls `pushManifestToPeer`, which sends the new peer the **full** local manifest (first contact) wrapped in a `ManifestSync` message
 2. **On manifest received** — `handleManifestSync` is called in a goroutine
-3. **On any local write** (upload, delete, rename) — the handler calls `BroadcastNetworkManifest` after successfully writing
+3. **On any local write** (upload, delete, rename, shard-holder change) — the handler calls `BroadcastNetworkManifest` after successfully writing
+
+### Delta sync
+
+Broadcasts (step 3) are **deltas**, not full manifests. With the LWW-Set CRDT every `FileRecord` carries a monotonic `Seq`, so each node tracks — per peer, **per file** (`(userID, contentHash)`) — the highest `Seq` it believes that peer already holds (`manifestSeen` in `manifestDelta.go`) and sends only the newer records. (It must be per file, not a per-user maximum: `Seq` counts from 1 *per file*, so a newly-added file starts at Seq 1 — a per-user max would treat it as "already seen" and it would never sync.) The tracker is updated both when we *send* to a peer (optimistically) and when we *receive* from it (the peer demonstrably has what it sent us). The **ShardMap** (a G-set with no `Seq`) is sent in full in every message — only the per-user file records are delta'd.
+
+Because the send-side update is optimistic, a delta lost over UDP would be missed, so a **periodic full-sync backstop** (`startManifestFullSync`, every 60 s) re-sends the complete manifest to every peer. CRDT merges are idempotent, so re-sending is always safe; the only risk delta sync introduces is under-sending, which the backstop heals. A departing peer's tracker is cleared, so a reconnection starts from a full sync.
+
+### Size-adaptive transport
+
+Manifests are sent with `SendReliableToPeer`, which picks a transport by size so the manifest can't outgrow the wire as the network scales:
+
+- **Small (≤ ~60 KB)** → the peer's normal connection (direct UDP / TURN / TCP relay), the fast path.
+- **Too big for a UDP datagram** (a UDP payload maxes at ~65 KB — roughly 50 files' worth of records + ShardMap) → **QUIC** (already established for shard transfer; reliable, ordered, no size limit), or if there's no QUIC connection, the **TCP relay** (reliable, up to 1 MB). The receive paths for both already run through `processPeerMessage`, so the message is decrypted and authenticated identically regardless of transport.
+
+Without this, a manifest larger than one UDP datagram would silently fail to send to direct/TURN peers, and the network would stop converging. (Delta sync keeps the *record* portion small, but the full ShardMap in every message is still the growth driver — delta-ing the ShardMap by a coarse version is a future refinement.)
 
 ### Convergence
 
-The LWW-Set merge is deterministic and commutative — both peers run the same `Seq`-wins logic on the same records and reach the same result regardless of order. When the merge brings in new data (`changed == true`), the node re-broadcasts the merged result so the update propagates to all connected peers.
+The LWW-Set merge is deterministic and commutative — both peers run the same `Seq`-wins logic on the same records and reach the same result regardless of order. When the merge brings in new data (`changed == true`), the node re-broadcasts the merged result (as a delta, excluding the sender) so the update propagates to all connected peers.
 
 ### The Outer AES Key
 

@@ -215,13 +215,14 @@ func runClient(serverAddr string, errCh chan<- error) {
 	// half the chunks potentially discarded.
 	client.OnHandshakeDone(func(peerID string) {
 		fmt.Printf("[P2P] Handshake done with %s — pushing manifest and redistributing shards\n", peerID)
-		go pushManifestToPeer(mosaicDir, client)
+		go pushManifestToPeer(mosaicDir, client, peerID)
 		go SyncUserStubs()
 		go redistributeShardsToNewPeer(peerID, client)
 	})
 
 	client.OnPeerLeft(func(peerID string) {
 		fmt.Printf("[P2P] Peer left: %s\n", peerID)
+		forgetManifestPeer(peerID) // reset delta-sync state so a reconnect gets a full sync
 		go handlePeerLeft(peerID, mosaicDir, client)
 	})
 
@@ -281,6 +282,10 @@ func runClient(serverAddr string, errCh chan<- error) {
 	// Activate the storage-proof audit: periodically challenge peers to prove
 	// they still hold the shards they claim, evicting any that repeatedly fail.
 	go startStorageAudit(client)
+
+	// Full-sync backstop: manifest broadcasts are deltas (only newer records), so
+	// a periodic full sync heals any delta lost over UDP.
+	go startManifestFullSync(client)
 }
 
 // loadOrCreateStunNodeID returns a stable per-machine identifier used by the STUN
@@ -308,8 +313,9 @@ func loadOrCreateStunNodeID() string {
 
 // pushManifestToPeer sends our local network manifest to a newly connected peer.
 // Retries until a peer is reachable (ConnectToPeer is async so Conn may not be
-// set yet when OnPeerAssigned fires).
-func pushManifestToPeer(mosaicDir string, client *p2p.Client) {
+// set yet when OnPeerAssigned fires). This is a FULL sync (first contact), which
+// also seeds the delta-sync state so subsequent broadcasts to this peer are deltas.
+func pushManifestToPeer(mosaicDir string, client *p2p.Client, peerID string) {
 	aesKey, err := filesystem.LoadOrCreateNetworkKey(shared.NetworkKeyPath())
 	if err != nil {
 		fmt.Println("pushManifestToPeer: could not load network key:", err)
@@ -329,13 +335,14 @@ func pushManifestToPeer(mosaicDir string, client *p2p.Client) {
 	msg := api.NewManifestSyncMessage(client.GetID(), data)
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if err := client.SendToAllPeers(msg); err == nil {
-			fmt.Println("pushManifestToPeer: manifest pushed to peer")
+		if err := client.SendReliableToPeer(peerID, msg); err == nil {
+			noteManifestSent(peerID, m)
+			fmt.Printf("pushManifestToPeer: full manifest pushed to %s\n", peerID)
 			return
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	fmt.Println("pushManifestToPeer: timed out waiting for a connected peer")
+	fmt.Printf("pushManifestToPeer: timed out sending to %s\n", peerID)
 }
 
 // handleManifestSync merges a received manifest into our local one.
@@ -365,6 +372,10 @@ func handleManifestSync(mosaicDir string, msg *api.Message) {
 		return
 	}
 	markManifestSynced()
+
+	// The sender demonstrably holds the records it just sent us, so record that so
+	// we never delta them back — and so a later broadcast to it skips them.
+	noteManifestReceived(msg.Sign.PubKey, remote)
 
 	// If the merge brought in new information, forward the combined result to
 	// all OTHER peers. Exclude the sender to prevent an infinite ping-pong
@@ -470,7 +481,10 @@ func recordShardHolderForPeer(client *p2p.Client, contentHash string, shardIndex
 		return
 	}
 	if changed {
-		BroadcastNetworkManifest(nm)
+		// Async: this fires from the shard-store hot path during an upload (once per
+		// shard), and the send can be slow for a large manifest — never block the
+		// transfer on it.
+		go BroadcastNetworkManifest(nm)
 	}
 }
 
@@ -496,7 +510,10 @@ func recordShardInManifest(client *p2p.Client, contentHash string, shardIndex in
 		return
 	}
 	if changed {
-		BroadcastNetworkManifest(nm)
+		// Async: this fires from the shard-store hot path during an upload (once per
+		// shard), and the send can be slow for a large manifest — never block the
+		// transfer on it.
+		go BroadcastNetworkManifest(nm)
 	}
 }
 

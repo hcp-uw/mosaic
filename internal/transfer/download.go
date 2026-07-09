@@ -22,6 +22,13 @@ func FetchFileBytes(filename string, client *p2p.Client, getHolders func(content
 		return nil, fmt.Errorf("shards for %q not found — file may not have been received yet", filename)
 	}
 
+	// An empty file has no shard chunks to transfer or reconstruct — fetching its
+	// (zero-chunk) shards would never complete, since the "shard received" path is
+	// driven by chunk arrival and no chunks ever arrive. Reconstruct it directly.
+	if meta.FileSize == 0 {
+		return []byte{}, nil
+	}
+
 	missing := missingDataShards(meta.FileHash, meta.TotalDataShards)
 
 	if len(missing) > 0 && client != nil && getHolders != nil {
