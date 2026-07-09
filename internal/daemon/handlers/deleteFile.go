@@ -15,8 +15,9 @@ import (
 
 // Deletes a file from the network and returns an DeleteFileResponse
 // shardHoldersForFile returns the contentHash of filename and the deduplicated
-// set of node IDs that hold at least one shard for it (excluding this node).
-func shardHoldersForFile(nm filesystem.NetworkManifest, filename string) (contentHash string, holderIDs []string) {
+// set of holder node IDs (stable STUN node IDs) for it, excluding our own so the
+// result answers "does any OTHER node hold shards for this file?".
+func shardHoldersForFile(nm filesystem.NetworkManifest, filename, ourNodeID string) (contentHash string, holderIDs []string) {
 	// Only the owner can delete their own files — scan only the own chain with the meta key.
 	kp, err := filesystem.LoadOrCreateUserKey(shared.UserKeyPath())
 	if err == nil {
@@ -31,10 +32,9 @@ func shardHoldersForFile(nm filesystem.NetworkManifest, filename string) (conten
 		return
 	}
 	seen := make(map[string]bool)
-	myNodeID := fmt.Sprintf("%d", helpers.GetNodeID())
 	for _, ids := range loc.Holders {
 		for _, id := range ids {
-			if id != myNodeID && !seen[id] {
+			if id != ourNodeID && !seen[id] {
 				seen[id] = true
 				holderIDs = append(holderIDs, id)
 			}
@@ -43,10 +43,9 @@ func shardHoldersForFile(nm filesystem.NetworkManifest, filename string) (conten
 	return
 }
 
-// signalShardDelete sends a ShardDelete message to each holder node ID.
-// Node IDs in the ShardMap are numeric strings; peers are looked up by their
-// P2P string ID which is the public key. We broadcast to all peers and let
-// each recipient decide whether to act on it.
+// signalShardDelete tells shard holders to delete their copies of contentHash.
+// We broadcast to all peers (holderIDs only gates whether a broadcast is worth
+// sending); each recipient deletes its shards for that hash if it has any.
 func signalShardDelete(contentHash string, holderIDs []string) {
 	client := GetP2PClient()
 	if client == nil {
@@ -89,7 +88,11 @@ func DeleteFile(req protocol.DeleteFileRequest) protocol.DeleteFileResponse {
 		if kp, kerr := filesystem.LoadOrCreateUserKey(shared.UserKeyPath()); kerr == nil {
 			if nm, err := filesystem.ReadNetworkManifest(mosaicDir, aesKey); err == nil {
 				// Capture contentHash and holder set before the remove block erases the entry.
-				contentHash, holderIDs = shardHoldersForFile(nm, filename)
+				ourNodeID := ""
+				if c := GetP2PClient(); c != nil {
+					ourNodeID = c.GetNodeID()
+				}
+				contentHash, holderIDs = shardHoldersForFile(nm, filename, ourNodeID)
 
 				if contentHash == "" {
 					fmt.Println("Warning: file not found in network manifest for", filename)

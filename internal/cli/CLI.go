@@ -273,6 +273,12 @@ func Run(Args []string) {
 			fmt.Println("  mos debug transfer           Log transfer diagnostics every 500ms for 15s")
 			os.Exit(1)
 		}
+	case "doctor":
+		if len(args) != 2 {
+			fmt.Println("Usage: mos doctor    Run connectivity and health self-tests.")
+			os.Exit(1)
+		}
+		doctor()
 	case "wipe":
 		wipeState()
 	case "shutdown":
@@ -306,6 +312,10 @@ func joinNetwork(serverAddr string) {
 	var cmdResp protocol.JoinResponse
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
+	}
+	if !cmdResp.Success {
+		fmt.Printf("\nCould not join network: %s\n", cmdResp.Details)
+		os.Exit(1)
 	}
 
 	// Block until the post-join manifest + shard sync has settled.
@@ -1435,4 +1445,51 @@ func debugTransfer() {
 		os.Exit(1)
 	}
 	fmt.Println(cmdResp.Details)
+}
+
+// doctor runs the daemon self-test and prints a per-check report. The daemon
+// reachability check is done here (CLI-side) because a dead daemon can't report
+// its own absence — if the socket doesn't answer, that is the first failed line.
+func doctor() {
+	fmt.Print("\nMosaic Doctor — self-test\n\n")
+
+	resp, err := client.SendRequest("doctor", protocol.DoctorRequest{}, 20*time.Second)
+	if err != nil {
+		fmt.Printf("  %s daemon            not running or unreachable\n", doctorSymbol("fail"))
+		fmt.Printf("       %v\n", err)
+		fmt.Println("\n  Start it with:  ./install.sh   (or)   mosaic-node > /tmp/mosaicd.log 2>&1 &")
+		os.Exit(1)
+	}
+	fmt.Printf("  %s daemon            running\n", doctorSymbol("ok"))
+
+	var cmdResp protocol.DoctorResponse
+	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
+		exitOnErr(err, "Error parsing response.")
+	}
+
+	for _, c := range cmdResp.Checks {
+		fmt.Printf("  %s %-16s  %s\n", doctorSymbol(c.Status), c.Name, c.Detail)
+	}
+
+	fmt.Println()
+	if cmdResp.Success {
+		fmt.Println("  All critical checks passed.")
+	} else {
+		fmt.Println("  Some checks failed — see the ✗ lines above.")
+		os.Exit(1)
+	}
+}
+
+// doctorSymbol maps a check status to a display glyph.
+func doctorSymbol(status string) string {
+	switch status {
+	case "ok":
+		return "✓"
+	case "warn":
+		return "⚠"
+	case "fail":
+		return "✗"
+	default: // "skip"
+		return "–"
+	}
 }

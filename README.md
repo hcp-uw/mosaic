@@ -120,6 +120,8 @@ mos join network
 
 This connects to the STUN server, performs UDP hole punching, and pairs you with a peer. Once connected, manifests sync automatically.
 
+**Joining requires being logged in.** Every peer signs its connection handshake with its account key so others can verify who it is (this prevents impersonation and man-in-the-middle); a node with no account key can't complete a handshake, so `mos join` refuses until you `mos login`.
+
 ### Upload a File
 
 ```bash

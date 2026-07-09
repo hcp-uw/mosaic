@@ -4,6 +4,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -43,6 +44,42 @@ func encryptChunk(key [32]byte, plaintext []byte) ([]byte, error) {
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, err
 	}
+	return gcm.Seal(nonce, nonce, plaintext, nil), nil
+}
+
+// shardChunkNonce derives a deterministic 12-byte AES-GCM nonce for a specific
+// shard chunk from its coordinates. Every (fileHash, shardIndex, chunkIndex)
+// triple identifies a unique plaintext (fileHash fixes the file bytes, hence the
+// shard bytes, hence the chunk bytes) under the user's single shard key, so a
+// coordinate-derived nonce is never reused across two different plaintexts — the
+// only condition AES-GCM requires. Determinism is what makes every node's copy
+// of a shard byte-identical, which in turn lets storage proofs (probe.go) compare
+// SHA-256 hashes across holders and lets repair (repair.go) regenerate a missing
+// shard with exactly the same bytes the original had.
+func shardChunkNonce(fileHash string, shardIndex, chunkIndex int) []byte {
+	h := sha256.New()
+	h.Write([]byte("mosaic-shard-nonce\x00"))
+	h.Write([]byte(fileHash))
+	var coords [8]byte
+	binary.LittleEndian.PutUint32(coords[0:4], uint32(shardIndex))
+	binary.LittleEndian.PutUint32(coords[4:8], uint32(chunkIndex))
+	h.Write(coords[:])
+	return h.Sum(nil)[:12] // AES-GCM standard nonce size
+}
+
+// encryptChunkDeterministic encrypts one shard chunk with a coordinate-derived
+// nonce (see shardChunkNonce) so the ciphertext is identical on every node that
+// encrypts the same chunk. Output format matches encryptChunk: [nonce][ct+tag].
+func encryptChunkDeterministic(key [32]byte, fileHash string, shardIndex, chunkIndex int, plaintext []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonce := shardChunkNonce(fileHash, shardIndex, chunkIndex)
 	return gcm.Seal(nonce, nonce, plaintext, nil), nil
 }
 
@@ -136,11 +173,17 @@ func decryptShardToPlaintext(path string, key [32]byte) ([]byte, error) {
 }
 
 // encryptAndStoreShardFile reads srcPath in chunkSizeOnDisk windows, encrypts each
-// chunk with AES-GCM, and writes the length-prefixed encrypted chunks to dstPath
-// in the same on-disk format as writeEncryptedShardFile. 8 KB chunks reduce the
-// per-shard frame count ~7× vs the 1200-byte UDP wire size while remaining safely
-// below the 65507-byte UDP datagram limit for the serve fallback path.
-func encryptAndStoreShardFile(srcPath, dstPath string, key [32]byte) error {
+// chunk with a deterministic per-chunk nonce (see shardChunkNonce), and writes the
+// length-prefixed encrypted chunks to dstPath in the same on-disk format as
+// writeEncryptedShardFile. 8 KB chunks reduce the per-shard frame count ~7× vs the
+// 1200-byte UDP wire size while remaining safely below the 65507-byte UDP datagram
+// limit for the serve fallback path.
+//
+// fileHash and shardIndex are the shard's coordinates: with chunkIndex they select
+// the deterministic nonce, so this file is byte-identical to what any other node
+// produces (or forwards over the wire) for the same shard — the invariant storage
+// proofs and repair depend on.
+func encryptAndStoreShardFile(srcPath, dstPath string, key [32]byte, fileHash string, shardIndex int) error {
 	info, err := os.Stat(srcPath)
 	if err != nil {
 		return err
@@ -166,10 +209,10 @@ func encryptAndStoreShardFile(srcPath, dstPath string, key [32]byte) error {
 	}
 
 	buf := make([]byte, chunkSizeOnDisk)
-	for {
+	for chunkIndex := 0; ; chunkIndex++ {
 		n, err := io.ReadFull(src, buf)
 		if n > 0 {
-			encrypted, eerr := encryptChunk(key, buf[:n])
+			encrypted, eerr := encryptChunkDeterministic(key, fileHash, shardIndex, chunkIndex, buf[:n])
 			if eerr != nil {
 				return eerr
 			}

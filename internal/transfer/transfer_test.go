@@ -462,6 +462,44 @@ func TestEnsureShardMeta_Idempotent(t *testing.T) {
 	}
 }
 
+// TestEnsureShardMeta_UpgradesStrippedMeta is a regression test for the download
+// failure where a file received via redistribution (shards carry no name/size, so
+// finalizeShard writes a privacy-stripped meta) could never be found by name. The
+// owner's EnsureShardMeta must fill in the name/size and recompute the block size.
+func TestEnsureShardMeta_UpgradesStrippedMeta(t *testing.T) {
+	dir := useTempShardsDir(t)
+	hash := "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
+
+	// Simulate a blind-courier meta: name/size empty, block size from size 0.
+	shardDir := filepath.Join(dir, hash)
+	if err := os.MkdirAll(shardDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeShardMeta(shardDir, ShardMeta{
+		FileHash:        hash,
+		TotalDataShards: DataShards,
+		TotalShards:     TotalShards,
+		BlockSize:       1, // ComputeBlockSize(0, ...) → 1
+	})
+	if FindShardMeta("big.dat") != nil {
+		t.Fatal("stripped meta should not be findable by name")
+	}
+
+	// The owner learns the real name/size from the manifest and calls EnsureShardMeta.
+	EnsureShardMeta(hash, "big.dat", 10*1024*1024)
+
+	m := FindShardMeta("big.dat")
+	if m == nil {
+		t.Fatal("after EnsureShardMeta the file must be findable by name")
+	}
+	if m.FileSize != 10*1024*1024 {
+		t.Errorf("file size not filled in: got %d", m.FileSize)
+	}
+	if m.BlockSize <= 1 {
+		t.Errorf("block size must be recomputed from the real size, got %d", m.BlockSize)
+	}
+}
+
 // ──────────────────────────────────────────────────────────
 // UploadFile staging and error propagation
 // ──────────────────────────────────────────────────────────

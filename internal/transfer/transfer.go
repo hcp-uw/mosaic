@@ -27,14 +27,23 @@ const (
 	// size (1280 frames vs 8739 for a 10 MB shard), meaning fewer QUIC writes.
 	chunkSizeOnDisk = 8 * 1024
 
-	// chunkSizeQUIC is used when streaming shards directly inline over QUIC.
-	// QUIC's reliable delivery makes large frames safe; 256 KB reduces frame
-	// count to ~40 per 10 MB shard.
-	chunkSizeQUIC = 256 * 1024
-
 	// binaryMagic is the first byte of every binary shard frame.
 	// JSON messages always start with '{' (0x7B) so 0x01 is unambiguous.
 	binaryMagic byte = 0x01
+
+	// assemblyIdleTimeout is how long a partially-received shard assembly may sit
+	// with no new chunk before the GC drops it. The download idle timeouts (10s
+	// first chunk, 30s between) are well under this, so a legitimate transfer
+	// never idles this long — only a stalled or malicious never-completing stream
+	// does. This bounds the memory an attacker can hold by opening many assemblies.
+	assemblyIdleTimeout = 60 * time.Second
+	assemblyGCInterval  = 30 * time.Second
+
+	// maxChunksPerShard bounds the totalChunks field from untrusted peer messages
+	// so a malicious value can't drive a huge allocation (e.g. make([]int, 4e9)).
+	// At the 8 KB canonical chunk size this permits shards up to ~32 GB — far
+	// beyond any real shard (a 320 GB file) — so it never rejects legitimate data.
+	maxChunksPerShard = 4_000_000
 )
 
 // ShardMeta is stored alongside each shard set so FetchFileBytes can look up
@@ -63,6 +72,7 @@ type shardAssembly struct {
 	totalDataShards int
 	totalShards     int
 	firstChunkAt    time.Time // when the first chunk arrived; used for per-shard timing logs
+	lastChunkAt     time.Time // updated on every chunk; used to GC stalled assemblies
 }
 
 var (

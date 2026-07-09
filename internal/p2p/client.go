@@ -3,6 +3,7 @@ package p2p
 import (
 	"context"
 	"crypto/ecdh"
+	"crypto/ecdsa"
 	"crypto/hkdf"
 	"crypto/sha256"
 	"fmt"
@@ -17,7 +18,13 @@ import (
 // Client represents a STUN client
 type Client struct {
 	id            string
-	queuePosition int // server-assigned position; 1 = leader, 2 = next, etc.
+	nodeID        string // stable per-machine ID sent to STUN for queue-position persistence
+	queuePosition int    // server-assigned position; 1 = leader, 2 = next, etc.
+
+	// Account identity — used to sign the handshake so peers can verify which
+	// account a session belongs to (MITM/impersonation protection).
+	accountPriv   *ecdsa.PrivateKey
+	accountPubDER []byte // PKIX DER of accountPriv's public key
 	serverAddr       *net.UDPAddr
 	serverConn       *net.UDPConn
 	turnAddr         string // TURN server "host:port", empty = disabled
@@ -75,6 +82,9 @@ type ClientConfig struct {
 	TURNUsername     string
 	TURNPassword     string
 	TCPRelayAddress  string // optional — TCP relay fallback for UDP-blocked networks
+	NodeID           string // optional — stable per-machine ID for STUN queue-position persistence
+	AccountPrivKey   *ecdsa.PrivateKey // account signing key (required to join — signs the handshake)
+	AccountPubKeyDER []byte            // PKIX DER of the account public key
 	PingInterval     time.Duration
 	ConnectTimeout   time.Duration
 }
@@ -110,6 +120,9 @@ func NewClient(config *ClientConfig) (*Client, error) {
 		turnUsername:     config.TURNUsername,
 		turnPassword:     config.TURNPassword,
 		tcpRelayAddr:     config.TCPRelayAddress,
+		nodeID:           config.NodeID,
+		accountPriv:      config.AccountPrivKey,
+		accountPubDER:    config.AccountPubKeyDER,
 		state:            StateDisconnected,
 		peers:            make(map[string]*PeerInfo),
 		ctx:              ctx,
@@ -136,6 +149,56 @@ func (c *Client) GetID() string {
 	return c.id
 }
 
+// GetNodeID returns our stable per-machine STUN node ID (empty if not set). This
+// is the canonical shard-holder identity recorded in the network manifest.
+func (c *Client) GetNodeID() string {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	return c.nodeID
+}
+
+// buildHandshakeInit constructs a HandshakeInit for the given ephemeral public
+// key, signed with our account key so the peer can verify which account this
+// session belongs to. All three handshake-send sites go through here so every
+// HandshakeInit (initial send and NAT/relay resends) carries the signature.
+func (c *Client) buildHandshakeInit(ephPub []byte) *api.Message {
+	c.mutex.RLock()
+	myID, quicPort, nodeID := c.id, c.quicPort, c.nodeID
+	accountPub, accountPriv := c.accountPubDER, c.accountPriv
+	c.mutex.RUnlock()
+
+	sig, _ := signHandshake(accountPriv, accountPub, ephPub, nodeID)
+	return api.NewHandshakeInitMessage(myID, ephPub, quicPort, nodeID, accountPub, sig)
+}
+
+// StunNodeIDForPeer returns the stable STUN node ID a connected peer advertised
+// during its handshake, or "" if the peer is unknown or hasn't handshaked yet.
+func (c *Client) StunNodeIDForPeer(p2pID string) string {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	if peer, ok := c.peers[p2pID]; ok && peer != nil {
+		return peer.StunNodeID
+	}
+	return ""
+}
+
+// PeerIDForStunNodeID returns the P2P id of a connected peer whose stable STUN
+// node ID matches stunNodeID, or "" if no connected peer matches. Used to route
+// a request to a specific holder recorded in the manifest by its stable id.
+func (c *Client) PeerIDForStunNodeID(stunNodeID string) string {
+	if stunNodeID == "" {
+		return ""
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	for id, peer := range c.peers {
+		if peer != nil && peer.Conn != nil && peer.StunNodeID == stunNodeID {
+			return id
+		}
+	}
+	return ""
+}
+
 func (c *Client) GetConnectedPeers() []*PeerInfo {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
@@ -157,7 +220,7 @@ func (c *Client) GetPeerById(id string) *PeerInfo {
 
 // register sends registration message to server.
 func (c *Client) register() error {
-	msg := api.NewClientRegisterMessage()
+	msg := api.NewClientRegisterMessage(c.nodeID)
 	return c.sendToServer(msg)
 }
 
@@ -253,10 +316,23 @@ func (c *Client) completeHandshake(msg *api.Message, peer *PeerInfo) {
 	}
 
 	c.mutex.RLock()
+	alreadyDone := peer.HandshakeDone
 	ephPrivBytes := peer.EphemeralPrivKey
 	c.mutex.RUnlock()
+	if alreadyDone {
+		return // session already established — ignore repeat/spoofed HandshakeInit (no reset)
+	}
 	if len(ephPrivBytes) == 0 {
 		return // we haven't sent our own HandshakeInit yet — drop
+	}
+
+	// Verify the handshake is signed by the account it claims. This binds the
+	// ephemeral DH key to a real account, so a man-in-the-middle can't substitute
+	// its own key under a victim's identity. An unsigned or forged handshake is
+	// rejected — no session is established.
+	if !verifyHandshake(d.AccountPubKey, d.EphemeralPubKey, d.NodeID, d.Signature) {
+		fmt.Printf("[P2P] Rejecting handshake from %s: missing or invalid account signature\n", peer.ID)
+		return
 	}
 
 	ephPriv, err := ecdh.X25519().NewPrivateKey(ephPrivBytes)
@@ -281,6 +357,8 @@ func (c *Client) completeHandshake(msg *api.Message, peer *PeerInfo) {
 	peer.HandshakeDone = true
 	peer.EphemeralPrivKey = nil
 	peer.QUICPort = d.QUICPort
+	peer.StunNodeID = d.NodeID
+	peer.AccountPubKey = d.AccountPubKey // verified above — this session is bound to this account
 	peerID := peer.ID
 	c.mutex.Unlock()
 
@@ -297,12 +375,47 @@ func (c *Client) completeHandshake(msg *api.Message, peer *PeerInfo) {
 	}
 }
 
+// plaintextAllowed reports whether a control message is legitimately allowed to
+// arrive unencrypted. Only two cases qualify:
+//
+//   - HandshakeInit: the session key cannot exist yet, so the first exchange is
+//     necessarily plaintext. (completeHandshake ignores a repeat once the session
+//     is established, so a plaintext HandshakeInit can't reset a live session.)
+//   - PeerPing / PeerPong before the peer's session is established: liveness pings
+//     flow during connection setup. Once the peer's handshake is done, its pings
+//     are sent encrypted and a plaintext one is rejected — closing the spoofed-ping
+//     address-rewrite attack against established peers.
+//
+// Everything else must be authenticated.
+func (c *Client) plaintextAllowed(msg *api.Message) bool {
+	switch msg.Type {
+	case api.HandshakeInit:
+		return true
+	case api.PeerPing, api.PeerPong:
+		c.mutex.RLock()
+		peer := c.peers[msg.Sign.PubKey]
+		established := peer != nil && peer.HandshakeDone
+		c.mutex.RUnlock()
+		return !established
+	default:
+		return false
+	}
+}
+
 // processPeerMessage processes a message from a peer
 func (c *Client) processPeerMessage(data []byte, fromAddr *net.UDPAddr, direct bool) {
 	// Filter out STUN punch packets — just discard silently.
 	if string(data) == "STUN_PUNCH" {
 		return
 	}
+
+	// authenticated is true only when the message arrived inside the AES-256-GCM
+	// session envelope (0x02) — proof it came from a peer holding the session key.
+	// Plaintext (authenticated=false) is trusted only for the handshake bootstrap
+	// and pre-session liveness pings; every other control message and all shard
+	// frames must be authenticated, otherwise anyone able to send UDP to this port
+	// could inject them (spoofed NodeLeave, ShardRequest, ShardDelete, etc.).
+	authenticated := false
 
 	// Decrypt session-encrypted frame (magic byte 0x02).
 	// Try the peer by source address first; if that fails (e.g. message arrived
@@ -315,16 +428,25 @@ func (c *Client) processPeerMessage(data []byte, fromAddr *net.UDPAddr, direct b
 			return
 		}
 		data = inner
+		authenticated = true
 	}
 
 	// Binary shard frames start with 0x01 (checked after potential decryption).
+	// A raw 0x01 that did not come out of the session envelope is an injection
+	// attempt — legitimate shard frames are always sent through the encrypted path.
 	if len(data) > 0 && data[0] == 0x01 {
+		if !authenticated {
+			return
+		}
 		c.notifyMessageReceived(data)
 		return
 	}
 
 	// Try to parse as a structured message first.
 	if msg, err := api.DeserializeMessage(data); err == nil {
+		if !authenticated && !c.plaintextAllowed(msg) {
+			return // must-be-authenticated control message arrived in the clear — drop
+		}
 		switch msg.Type {
 		case api.PeerPing:
 			// Update peer address to actual source so subsequent sends (pong,
@@ -369,51 +491,9 @@ func (c *Client) processPeerMessage(data []byte, fromAddr *net.UDPAddr, direct b
 			c.notifyMessageReceived(data)
 
 		case api.NewPeerJoiner:
-			data, err := msg.GetNewPeerJoinerData()
-			if err != nil {
-				c.notifyError(fmt.Errorf("Failed to parse new joiner data %w", err))
-				return
-			}
-
-			peerAddr, err := net.ResolveUDPAddr("udp", data.JoinerAddress)
-			if err != nil {
-				c.notifyError(fmt.Errorf("failed to resolve peer address: %w", err))
-				return
-			}
-			peerInfo := &PeerInfo{
-				Address: peerAddr,
-				ID:      data.JoinerID,
-			}
-
-			c.mutex.Lock()
-			c.peers[data.JoinerID] = peerInfo
-			c.mutex.Unlock()
-
-			c.notifyPeerAssigned(peerInfo)
+			c.handleNewPeerJoiner(msg)
 		case api.CurrentMembers:
-			data, err := msg.GetCurrentMembersData()
-			if err != nil {
-				c.notifyError(fmt.Errorf("failed to parse peer assignment: %w", err))
-				return
-			}
-
-			for id, addr := range data.Members {
-				peerAddr, err := net.ResolveUDPAddr("udp", addr)
-				if err != nil {
-					c.notifyError(fmt.Errorf("failed to resolve peer address: %w", err))
-					return
-				}
-				peerInfo := &PeerInfo{
-					Address: peerAddr,
-					ID:      id,
-				}
-
-				c.mutex.Lock()
-				c.peers[id] = peerInfo
-				c.mutex.Unlock()
-
-				c.notifyPeerAssigned(peerInfo)
-			}
+			c.handleCurrentMembers(msg)
 
 		case api.NodeLeave:
 			// Peer is disconnecting gracefully — evict immediately.
@@ -443,7 +523,6 @@ func (c *Client) processPeerMessage(data []byte, fromAddr *net.UDPAddr, direct b
 			if peer != nil && fromAddr != nil {
 				var resendPrivBytes []byte
 				var resendAddr *net.UDPAddr
-				var myID, myQUICPort = "", 0
 
 				c.mutex.Lock()
 				if !peer.ViaTURN && (peer.Address == nil || peer.Address.String() != fromAddr.String()) {
@@ -452,8 +531,6 @@ func (c *Client) processPeerMessage(data []byte, fromAddr *net.UDPAddr, direct b
 						resendPrivBytes = make([]byte, len(peer.EphemeralPrivKey))
 						copy(resendPrivBytes, peer.EphemeralPrivKey)
 						resendAddr = fromAddr
-						myID = c.id
-						myQUICPort = c.quicPort
 					}
 				}
 				c.mutex.Unlock()
@@ -464,7 +541,7 @@ func (c *Client) processPeerMessage(data []byte, fromAddr *net.UDPAddr, direct b
 						if err != nil {
 							return
 						}
-						initMsg := api.NewHandshakeInitMessage(myID, ephPriv.PublicKey().Bytes(), myQUICPort)
+						initMsg := c.buildHandshakeInit(ephPriv.PublicKey().Bytes())
 						initData, err := initMsg.Serialize()
 						if err != nil {
 							return
@@ -518,11 +595,74 @@ func (c *Client) processPeerMessage(data []byte, fromAddr *net.UDPAddr, direct b
 	}
 }
 
+// addRosterPeer adds a peer learned from a membership roster (CurrentMembers or
+// NewPeerJoiner) and kicks off a connection to it. It is idempotent: if the peer
+// is already known (connecting or connected) it does nothing, so duplicate roster
+// information — which now arrives from BOTH the STUN server and the leader — never
+// resets an in-progress or established session. First assignment wins.
+func (c *Client) addRosterPeer(id string, addr *net.UDPAddr) {
+	c.mutex.Lock()
+	if id == "" || id == c.id {
+		c.mutex.Unlock()
+		return
+	}
+	if _, exists := c.peers[id]; exists {
+		c.mutex.Unlock()
+		return // already known — don't overwrite / re-handshake
+	}
+	peerInfo := &PeerInfo{Address: addr, ID: id}
+	c.peers[id] = peerInfo
+	c.mutex.Unlock()
+
+	c.notifyPeerAssigned(peerInfo)
+}
+
+// handleNewPeerJoiner processes a NewPeerJoiner roster message (from the STUN
+// server or the leader) announcing a single new member.
+func (c *Client) handleNewPeerJoiner(msg *api.Message) {
+	data, err := msg.GetNewPeerJoinerData()
+	if err != nil {
+		c.notifyError(fmt.Errorf("failed to parse new joiner data: %w", err))
+		return
+	}
+	peerAddr, err := net.ResolveUDPAddr("udp", data.JoinerAddress)
+	if err != nil {
+		c.notifyError(fmt.Errorf("failed to resolve joiner address: %w", err))
+		return
+	}
+	c.addRosterPeer(data.JoinerID, peerAddr)
+}
+
+// handleCurrentMembers processes a CurrentMembers roster message listing all
+// current members, connecting to any we don't already know.
+func (c *Client) handleCurrentMembers(msg *api.Message) {
+	data, err := msg.GetCurrentMembersData()
+	if err != nil {
+		c.notifyError(fmt.Errorf("failed to parse current members: %w", err))
+		return
+	}
+	for id, addr := range data.Members {
+		peerAddr, err := net.ResolveUDPAddr("udp", addr)
+		if err != nil {
+			c.notifyError(fmt.Errorf("failed to resolve member address: %w", err))
+			continue
+		}
+		c.addRosterPeer(id, peerAddr)
+	}
+}
+
 // processMessage processes a message from the server
 func (c *Client) processMessage(msg *api.Message) {
 	switch msg.Type {
 	case api.WaitingForPeer:
 		c.setState(StateWaiting)
+
+	// Roster messages sent directly by the STUN server (in addition to the
+	// leader's gossip) so mesh formation doesn't depend solely on the leader.
+	case api.CurrentMembers:
+		c.handleCurrentMembers(msg)
+	case api.NewPeerJoiner:
+		c.handleNewPeerJoiner(msg)
 
 	case api.AssignedAsLeader:
 		_, err := msg.GetAssignedAsLeaderData()

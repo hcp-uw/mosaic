@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -96,7 +97,7 @@ func HandleJoin(req protocol.JoinRequest) protocol.JoinResponse {
 	go runClient(req.ServerAddress, errCh)
 
 	if err := <-errCh; err != nil {
-		return protocol.JoinResponse{Success: false, Details: fmt.Sprintf("failed to connect to STUN server: %v", err)}
+		return protocol.JoinResponse{Success: false, Details: err.Error()}
 	}
 
 	return protocol.JoinResponse{Success: true, Details: "Joined network successfully."}
@@ -106,8 +107,26 @@ func runClient(serverAddr string, errCh chan<- error) {
 	mosaicDir := shared.MosaicDir()
 	resetJoinSyncState()
 
+	// The account key signs the handshake so peers can verify which account this
+	// session belongs to. It only exists after login, so joining requires being
+	// logged in — an anonymous (unsigned) peer would let a man-in-the-middle strip
+	// the signature and impersonate, defeating the whole point.
+	kp, kpErr := filesystem.LoadOrCreateUserKey(shared.UserKeyPath())
+	if kpErr != nil {
+		errCh <- fmt.Errorf("must be logged in to join the network (run 'mos login <key>'): %w", kpErr)
+		return
+	}
+	accountPubDER, pderr := filesystem.PublicKeyBytes(kp.Public)
+	if pderr != nil {
+		errCh <- fmt.Errorf("could not encode account public key: %w", pderr)
+		return
+	}
+
 	config := p2p.DefaultClientConfig(serverAddr, shared.DefaultTURNServer, shared.TURNUsername, shared.TURNPassword)
 	config.TCPRelayAddress = shared.DefaultTCPRelayServer
+	config.NodeID = loadOrCreateStunNodeID()
+	config.AccountPrivKey = kp.Private
+	config.AccountPubKeyDER = accountPubDER
 	client, err := p2p.NewClient(config)
 	if err != nil {
 		log.Printf("Failed to create P2P client: %v", err)
@@ -124,13 +143,13 @@ func runClient(serverAddr string, errCh chan<- error) {
 	// Register the shard-stored callback so the manifest is updated and
 	// broadcast each time this node stores a new shard (upload or receive).
 	transfer.SetShardStoredCallback(func(contentHash string, shardIndex int) {
-		recordShardInManifest(contentHash, shardIndex)
+		recordShardInManifest(client, contentHash, shardIndex)
 	})
 
 	// Register the shard-sent callback so we record the peer as a holder
 	// immediately after sending, without waiting for the peer's assembly.
 	transfer.SetShardSentCallback(func(contentHash string, shardIndex int, peerID string) {
-		recordShardHolderForPeer(contentHash, shardIndex, peerID)
+		recordShardHolderForPeer(client, contentHash, shardIndex, peerID)
 	})
 
 	// Register QUIC shard-stream handlers.
@@ -143,9 +162,11 @@ func runClient(serverAddr string, errCh chan<- error) {
 	// quicStreamDoneFn fires (in a goroutine) on stream EOF and sends ShardStreamAck
 	// directly — replacing the UDP ShardStreamDone / race-condition path.
 	client.SetQUICBinaryFrameHandler(func(_ string, data []byte) {
+		defer recoverPanic("quicBinaryFrame")
 		transfer.HandleBinaryShardChunk(data)
 	})
 	client.SetQUICStreamDoneCallback(func(senderID string, lastFrame []byte) {
+		defer recoverPanic("quicStreamDone")
 		transfer.HandleQUICStreamDone(senderID, lastFrame, client)
 	})
 
@@ -209,9 +230,11 @@ func runClient(serverAddr string, errCh chan<- error) {
 	})
 
 	client.OnMessageReceived(func(data []byte) {
-		// Binary shard frame — skip JSON parsing entirely.
+		// Binary shard frame — skip JSON parsing entirely. Every handler runs via
+		// safeGo (or defer recoverPanic) so a malformed message from an untrusted
+		// peer can only fail that one message, never crash the daemon.
 		if len(data) > 0 && data[0] == 0x01 {
-			go transfer.HandleBinaryShardChunk(data)
+			safeGo("binaryShardChunk", func() { transfer.HandleBinaryShardChunk(data) })
 			return
 		}
 		msg, err := api.DeserializeMessage(data)
@@ -225,23 +248,23 @@ func runClient(serverAddr string, errCh chan<- error) {
 				fmt.Printf("[DEBUG] received from %s: %q\n", msg.Sign.PubKey, d.Message)
 			}
 		case api.ManifestSync:
-			go handleManifestSync(mosaicDir, msg)
+			safeGo("manifestSync", func() { handleManifestSync(mosaicDir, msg) })
 		case api.ShardRequest:
-			go transfer.HandleShardRequest(msg, client)
+			safeGo("shardRequest", func() { transfer.HandleShardRequest(msg, client) })
 		case api.ShardStreamDone:
-			go transfer.HandleShardStreamDone(msg, client)
+			safeGo("shardStreamDone", func() { transfer.HandleShardStreamDone(msg, client) })
 		case api.ShardStreamAck:
-			go transfer.HandleShardStreamAck(msg, client)
+			safeGo("shardStreamAck", func() { transfer.HandleShardStreamAck(msg, client) })
 		case api.ShardResponse:
-			go handleShardResponse(msg)
+			safeGo("shardResponse", func() { handleShardResponse(msg) })
 		case api.IdentityAnnounce:
 			// nothing to store — pubkey is in msg.Sign.PubKey, used passively
 		case api.IdentityChallenge:
-			go handleIdentityChallenge(msg, client)
+			safeGo("identityChallenge", func() { handleIdentityChallenge(msg, client) })
 		case api.IdentityResponse:
-			go DeliverChallengeResponse(msg)
+			safeGo("identityResponse", func() { DeliverChallengeResponse(msg) })
 		case api.ShardDelete:
-			go handleShardDelete(msg)
+			safeGo("shardDelete", func() { handleShardDelete(msg) })
 		}
 	})
 
@@ -254,6 +277,33 @@ func runClient(serverAddr string, errCh chan<- error) {
 	}
 	errCh <- nil
 	fmt.Println("[P2P] Connected. Waiting for peers.")
+
+	// Activate the storage-proof audit: periodically challenge peers to prove
+	// they still hold the shards they claim, evicting any that repeatedly fail.
+	go startStorageAudit(client)
+}
+
+// loadOrCreateStunNodeID returns a stable per-machine identifier used by the STUN
+// server to restore this node's queue position after a server restart. It is a
+// random 16-byte hex string persisted at ~/.mosaic-stun-id, generated on first
+// use. On any I/O error it returns "" so registration falls back to the old
+// stateless behaviour rather than failing.
+func loadOrCreateStunNodeID() string {
+	path := shared.StunNodeIDPath()
+	if data, err := os.ReadFile(path); err == nil {
+		if id := strings.TrimSpace(string(data)); id != "" {
+			return id
+		}
+	}
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return ""
+	}
+	id := hex.EncodeToString(buf)
+	if err := os.WriteFile(path, []byte(id), 0600); err != nil {
+		fmt.Printf("[P2P] could not persist STUN node ID: %v\n", err)
+	}
+	return id
 }
 
 // pushManifestToPeer sends our local network manifest to a newly connected peer.
@@ -395,17 +445,26 @@ func handleShardDelete(msg *api.Message) {
 	transfer.DeleteLocalShards(d.ContentHash)
 }
 
-// recordShardHolderForPeer records that peerID holds shardIndex for contentHash
-// in the network manifest. Called immediately after a successful shard send so
-// the ShardMap reflects the peer as a holder without waiting for assembly.
-func recordShardHolderForPeer(contentHash string, shardIndex int, peerID string) {
+// recordShardHolderForPeer records that the peer reached via peerID holds
+// shardIndex for contentHash. It records the peer's STABLE STUN node ID (resolved
+// from the live session), not the ephemeral P2P id, so the entry stays valid
+// across the peer's future reconnections. If the peer's stable id isn't known yet
+// (handshake not complete), it skips rather than recording a soon-stale id.
+func recordShardHolderForPeer(client *p2p.Client, contentHash string, shardIndex int, peerID string) {
+	if client == nil {
+		return
+	}
+	stunNodeID := client.StunNodeIDForPeer(peerID)
+	if stunNodeID == "" {
+		return // stable identity not established yet — don't record an ephemeral id
+	}
 	mosaicDir := shared.MosaicDir()
 	aesKey, err := filesystem.LoadOrCreateNetworkKey(shared.NetworkKeyPath())
 	if err != nil {
 		fmt.Printf("recordShardHolderForPeer: could not load network key: %v\n", err)
 		return
 	}
-	nm, changed, err := filesystem.RecordShardHolderAndWrite(mosaicDir, aesKey, contentHash, shardIndex, peerID)
+	nm, changed, err := filesystem.RecordShardHolderAndWrite(mosaicDir, aesKey, contentHash, shardIndex, stunNodeID)
 	if err != nil {
 		fmt.Printf("recordShardHolderForPeer: could not write manifest: %v\n", err)
 		return
@@ -415,12 +474,17 @@ func recordShardHolderForPeer(contentHash string, shardIndex int, peerID string)
 	}
 }
 
-// recordShardInManifest records that this node holds shardIndex for the file
-// with contentHash, then writes and broadcasts the updated manifest.
-func recordShardInManifest(contentHash string, shardIndex int) {
+// recordShardInManifest records that THIS node holds shardIndex for contentHash,
+// keyed by our own stable STUN node ID, then writes and broadcasts the manifest.
+func recordShardInManifest(client *p2p.Client, contentHash string, shardIndex int) {
+	nodeID := ""
+	if client != nil {
+		nodeID = client.GetNodeID()
+	}
+	if nodeID == "" {
+		return // no stable identity (not joined) — don't record a placeholder id
+	}
 	mosaicDir := shared.MosaicDir()
-	nodeID := fmt.Sprintf("%d", helpers.GetNodeID())
-
 	aesKey, err := filesystem.LoadOrCreateNetworkKey(shared.NetworkKeyPath())
 	if err != nil {
 		fmt.Printf("recordShardInManifest: could not load network key: %v\n", err)
@@ -436,29 +500,17 @@ func recordShardInManifest(contentHash string, shardIndex int) {
 	}
 }
 
-// handlePeerLeft runs when a peer is evicted after a pong timeout.
-// It removes the departed peer from the ShardMap (so future fetches don't route
-// to a dead node) and re-routes any locally held shards that now map to a
-// different peer under the updated routing.
+// handlePeerLeft runs when a peer is evicted (pong timeout or graceful leave).
+// It re-routes any locally held shards that now map to a different peer under the
+// updated routing.
+//
+// It deliberately does NOT remove the departed peer from the ShardMap. Holders
+// are now keyed by stable STUN node ID: a peer going offline hasn't stopped
+// holding its shards, and G-set removal doesn't converge anyway (a merge from any
+// peer that didn't see the removal re-adds it). The ShardMap is treated as
+// add-only claims, verified at point of use — the storage audit proves possession
+// and locally suppresses any peer caught lying (see storageAudit.go).
 func handlePeerLeft(peerID string, mosaicDir string, client *p2p.Client) {
-	aesKey, err := filesystem.LoadOrCreateNetworkKey(shared.NetworkKeyPath())
-	if err != nil {
-		fmt.Printf("handlePeerLeft: cannot load network key: %v\n", err)
-		return
-	}
-	nm, err := filesystem.ReadNetworkManifest(mosaicDir, aesKey)
-	if err != nil {
-		fmt.Printf("handlePeerLeft: cannot read manifest: %v\n", err)
-		return
-	}
-	if filesystem.RemoveShardHolder(&nm, peerID) {
-		if err := filesystem.WriteNetworkManifestLocked(mosaicDir, aesKey, nm); err != nil {
-			fmt.Printf("handlePeerLeft: cannot write manifest: %v\n", err)
-			return
-		}
-		BroadcastNetworkManifest(nm)
-	}
-
 	// Rebuild sorted peer ordering without the departed peer.
 	ourID := client.GetID()
 	connected := client.GetConnectedPeers()
@@ -496,6 +548,19 @@ func handlePeerLeft(peerID string, mosaicDir string, client *p2p.Client) {
 		if meta == nil {
 			continue
 		}
+
+		// If we own this file, regenerate any shards missing from our local disk
+		// before re-routing, so a departure can't leave a shard index with no
+		// holder as long as we can still reconstruct. No-op for non-owners (the
+		// decrypt fails) and when we already hold every shard (the common case
+		// for an uploader).
+		if regenerated, rerr := transfer.RepairShardFile(fileHash); rerr != nil {
+			fmt.Printf("[Repair] %s: %v\n", fileHash[:8], rerr)
+		} else if len(regenerated) > 0 {
+			fmt.Printf("[Repair] %s: regenerated %d shard(s) after %s left\n",
+				fileHash[:8], len(regenerated), transfer.ShortPeer(peerID))
+		}
+
 		for shardIdx := 0; shardIdx < meta.TotalShards; shardIdx++ {
 			shardPath := fmt.Sprintf("%s/%s/shard%d_%s.dat",
 				transfer.ShardsDir(), fileHash, shardIdx, fileHash)
@@ -511,7 +576,7 @@ func handlePeerLeft(peerID string, mosaicDir string, client *p2p.Client) {
 		}
 	}
 	fmt.Printf("[P2P] Peer %s left — re-routed %d shards across %d remaining peers\n",
-		peerID[:8], sent, len(connected))
+		transfer.ShortPeer(peerID), sent, len(connected))
 }
 
 // redistributeShardsToNewPeer scans locally stored shards and sends to peerID
@@ -587,7 +652,7 @@ func redistributeShardsToNewPeer(peerID string, client *p2p.Client) {
 			sent++
 		}
 	}
-	fmt.Printf("[P2P] Redistribution to %s: queued %d shards (%d peers total)\n", peerID[:8], sent, numPeers)
+	fmt.Printf("[P2P] Redistribution to %s: queued %d shards (%d peers total)\n", transfer.ShortPeer(peerID), sent, numPeers)
 }
 
 // handleShardResponse processes a shard received in reply to a ShardRequest.
@@ -619,7 +684,7 @@ func handleShardResponse(msg *api.Message) {
 				return
 			}
 		}
-		fmt.Printf("handleShardResponse: no metadata found for hash %s\n", d.FileHash[:12])
+		fmt.Printf("handleShardResponse: no metadata found for hash %s\n", transfer.ShortHash(d.FileHash))
 		return
 	}
 

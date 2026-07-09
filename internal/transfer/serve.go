@@ -118,9 +118,9 @@ func streamEncryptedChunks(shardPath string, meta *ShardMeta, shardIndex int, on
 	}
 	if quicErr == nil {
 		defer quicStream.Close()
-		fmt.Printf("[Transfer] Shard %d → %s: using QUIC stream\n", shardIndex, peerID[:8])
+		fmt.Printf("[Transfer] Shard %d → %s: using QUIC stream\n", shardIndex, ShortPeer(peerID))
 	} else {
-		fmt.Printf("[Transfer] Shard %d → %s: QUIC unavailable (%v), using UDP\n", shardIndex, peerID[:8], quicErr)
+		fmt.Printf("[Transfer] Shard %d → %s: QUIC unavailable (%v), using UDP\n", shardIndex, ShortPeer(peerID), quicErr)
 	}
 
 	// Per-shard pacer for the UDP fallback path. Using a per-goroutine pacer
@@ -149,9 +149,9 @@ func streamEncryptedChunks(shardPath string, meta *ShardMeta, shardIndex int, on
 		}
 
 		frame, err := encodeBinaryShardChunk(binaryShardChunk{
-			fileHash:        meta.FileHash,
-			fileName:        meta.FileName,
-			fileSize:        meta.FileSize,
+			fileHash: meta.FileHash,
+			// fileName/fileSize deliberately omitted — a peer we serve or redistribute
+			// to must not learn our file names or sizes (blind-courier privacy).
 			shardIndex:      shardIndex,
 			chunkIndex:      chunkIdx,
 			totalChunks:     totalChunks,
@@ -165,7 +165,7 @@ func streamEncryptedChunks(shardPath string, meta *ShardMeta, shardIndex int, on
 
 		if quicErr == nil {
 			if err := sendFrameViaQUIC(quicStream, frame); err != nil {
-				fmt.Printf("[Transfer] streamEncryptedChunks: shard %d chunk %d → %s (QUIC) failed: %v\n", shardIndex, chunkIdx, peerID[:8], err)
+				fmt.Printf("[Transfer] streamEncryptedChunks: shard %d chunk %d → %s (QUIC) failed: %v\n", shardIndex, chunkIdx, ShortPeer(peerID), err)
 				return totalChunks, true, false
 			}
 		} else {
@@ -205,14 +205,14 @@ func HandleShardRequest(msg *api.Message, client *p2p.Client) {
 		// Fast path: we have it — binary stream to the requester.
 		meta := FindShardMetaByHash(d.FileHash)
 		if meta == nil {
-			fmt.Printf("[Transfer] HandleShardRequest: shard %d of %s found on disk but meta.json missing — cannot serve\n", d.ShardIndex, d.FileHash[:12])
+			fmt.Printf("[Transfer] HandleShardRequest: shard %d of %s found on disk but meta.json missing — cannot serve\n", d.ShardIndex, ShortHash(d.FileHash))
 			return
 		}
 		serveKey := fmt.Sprintf("%s:%d:%s", d.FileHash, d.ShardIndex, requesterID)
 		if _, alreadyServing := inProgressServes.LoadOrStore(serveKey, struct{}{}); alreadyServing {
 			return // duplicate request — first goroutine already handling it
 		}
-		fmt.Printf("[Transfer] Serving shard %d of %s → %s\n", d.ShardIndex, d.FileHash[:12], requesterID[:8])
+		fmt.Printf("[Transfer] Serving shard %d of %s → %s\n", d.ShardIndex, ShortHash(d.FileHash), ShortPeer(requesterID))
 		go func() {
 			defer inProgressServes.Delete(serveKey)
 			StreamShardToPeer(d.FileHash, meta, d.ShardIndex, requesterID, client)
@@ -225,7 +225,7 @@ func HandleShardRequest(msg *api.Message, client *p2p.Client) {
 		return
 	}
 
-	fmt.Printf("[Transfer] Shard %d of %s not found locally — relaying for %s\n", d.ShardIndex, d.FileHash[:12], requesterID[:8])
+	fmt.Printf("[Transfer] Shard %d of %s not found locally — relaying for %s\n", d.ShardIndex, ShortHash(d.FileHash), ShortPeer(requesterID))
 	registerPendingShardRequest(d.FileHash, d.ShardIndex, requesterID)
 	relay := api.NewShardRequestMessage(api.NewSignature(client.GetID()), api.ShardRequestData{
 		FileHash:   d.FileHash,
@@ -243,6 +243,9 @@ func HandleShardStreamDone(msg *api.Message, client *p2p.Client) {
 	d, err := msg.GetShardStreamDoneData()
 	if err != nil {
 		return
+	}
+	if d.TotalChunks < 0 || d.TotalChunks > maxChunksPerShard {
+		return // implausible chunk count from an untrusted peer — drop
 	}
 	senderID := msg.Sign.PubKey
 
@@ -294,7 +297,7 @@ func HandleShardStreamDone(msg *api.Message, client *p2p.Client) {
 
 	if len(missing) > 0 {
 		fmt.Printf("[Transfer] Shard %d of %s: %d/%d chunks missing — acking for retransmit\n",
-			d.ShardIndex, d.FileHash[:12], len(missing), d.TotalChunks)
+			d.ShardIndex, ShortHash(d.FileHash), len(missing), d.TotalChunks)
 	}
 	sendAck(missing)
 }
@@ -362,7 +365,7 @@ func HandleQUICStreamDone(senderID string, lastFrame []byte, client *p2p.Client)
 
 	if len(missing) > 0 {
 		fmt.Printf("[Transfer] Shard %d of %s: %d/%d chunks missing (QUIC EOF ack)\n",
-			chunk.shardIndex, chunk.fileHash[:12], len(missing), chunk.totalChunks)
+			chunk.shardIndex, ShortHash(chunk.fileHash), len(missing), chunk.totalChunks)
 	}
 	sendAck(missing)
 }

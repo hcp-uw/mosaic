@@ -38,6 +38,7 @@ Debug:
 
 Other:
   version                                 Display current Mosaic client version.
+  doctor                                  Run connectivity and health self-tests (daemon, keys, STUN, TCP relay, per-peer transport).
   wipe                                    Delete all local state for testing (~/Mosaic/, keys, shards). Prompts for confirmation.
   shutdown                                Stop the daemon and uninstall binaries.
   help                                    Show this help message.

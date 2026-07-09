@@ -112,7 +112,13 @@ func NewSignature(pubKey string) Signature {
 }
 
 // ClientRegisterData represents client registration information.
-type ClientRegisterData struct{}
+// NodeID is a stable, per-machine random identifier that lets the STUN server
+// restore a client's original queue position after a server restart (see the
+// position store in internal/stun). It is empty for pings/deregisters and for
+// diagnostic probes that should not claim a persistent position.
+type ClientRegisterData struct {
+	NodeID string `json:"nodeID,omitempty"`
+}
 
 type RegisterSuccessData struct {
 	Message       string `json:"message"`
@@ -215,11 +221,11 @@ func NewServerAssignedLeaderMessage() *Message {
 }
 
 // NewClientRegisterMessage creates a client registration message.
-func NewClientRegisterMessage() *Message {
+func NewClientRegisterMessage(nodeID string) *Message {
 	return &Message{
 		Type:      ClientRegister,
 		Timestamp: time.Now(),
-		Data:      ClientRegisterData{},
+		Data:      ClientRegisterData{NodeID: nodeID},
 	}
 }
 
@@ -749,18 +755,34 @@ type IdentityResponseData struct {
 type HandshakeInitData struct {
 	EphemeralPubKey []byte `json:"ephemeralPubKey"`
 	QUICPort        int    `json:"quicPort,omitempty"`
+	// NodeID is the sender's stable per-machine STUN node ID. The receiver stores
+	// it on PeerInfo so it can map this session's transport (P2P id) to a stable
+	// identity — used as the canonical shard-holder ID in the network manifest.
+	NodeID string `json:"nodeID,omitempty"`
+	// AccountPubKey (PKIX DER of the account ECDSA public key) and Signature bind
+	// the ephemeral handshake key to the sender's account, so the receiver can
+	// verify WHICH account this session belongs to and reject impersonation/MITM.
+	// Signature is ECDSA (ASN.1) over SHA-256("mosaic-handshake-v1" || accountPubKey
+	// || ephemeralPubKey || nodeID).
+	AccountPubKey []byte `json:"accountPubKey,omitempty"`
+	Signature     []byte `json:"handshakeSig,omitempty"`
 }
 
 // NewHandshakeInitMessage creates a handshake message carrying the sender's
-// ephemeral X25519 public key. senderID is the P2P peer ID (used by the
-// receiver to look up the right PeerInfo). quicPort is the sender's QUIC
-// listening port (0 if QUIC is not started).
-func NewHandshakeInitMessage(senderID string, ephemeralPubKey []byte, quicPort int) *Message {
+// ephemeral X25519 public key, QUIC port, stable node ID, account public key, and
+// a signature binding the ephemeral key to that account (see HandshakeInitData).
+func NewHandshakeInitMessage(senderID string, ephemeralPubKey []byte, quicPort int, nodeID string, accountPubKey, signature []byte) *Message {
 	return &Message{
 		Sign:      NewSignature(senderID),
 		Type:      HandshakeInit,
 		Timestamp: time.Now(),
-		Data:      HandshakeInitData{EphemeralPubKey: ephemeralPubKey, QUICPort: quicPort},
+		Data: HandshakeInitData{
+			EphemeralPubKey: ephemeralPubKey,
+			QUICPort:        quicPort,
+			NodeID:          nodeID,
+			AccountPubKey:   accountPubKey,
+			Signature:       signature,
+		},
 	}
 }
 

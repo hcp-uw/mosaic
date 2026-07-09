@@ -80,11 +80,23 @@ func doFetchFileBytes(filename string) ([]byte, error) {
 		}
 	}
 
-	// Build shard-holder lookup from the manifest.
+	// Build shard-holder lookup from the manifest. Holders are recorded by stable
+	// STUN node ID; resolve them to the P2P ids of holders we can currently reach,
+	// skipping any locally proven to be lying. The returned ids are ready to
+	// SendToPeer; an empty result means "no known reachable holder — broadcast".
 	var getHolders func(contentHash string, shardIndex int) []string
 	if client != nil && manifestLoaded {
 		getHolders = func(contentHash string, shardIndex int) []string {
-			return filesystem.GetShardHolders(nm, contentHash, shardIndex)
+			var reachable []string
+			for _, holderStunID := range filesystem.GetShardHolders(nm, contentHash, shardIndex) {
+				if IsHolderSuppressed(holderStunID, contentHash, shardIndex) {
+					continue
+				}
+				if p2pID := client.PeerIDForStunNodeID(holderStunID); p2pID != "" {
+					reachable = append(reachable, p2pID)
+				}
+			}
+			return reachable
 		}
 	}
 

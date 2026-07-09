@@ -150,7 +150,7 @@ func UploadFile(path string, client *p2p.Client) (fileHash string, fileSize int,
 			encWg.Add(1)
 			go func(idx int, src, dst string, ours bool) {
 				defer encWg.Done()
-				if writeErr := encryptAndStoreShardFile(src, dst, netKey); writeErr != nil {
+				if writeErr := encryptAndStoreShardFile(src, dst, netKey, fileHash, idx); writeErr != nil {
 					return
 				}
 				shardStoredCbMu.Lock()
@@ -171,7 +171,7 @@ func UploadFile(path string, client *p2p.Client) (fileHash string, fileSize int,
 				go func(shardIdx int, peerID string, src string) {
 					defer func() { <-sem }()
 					defer wg.Done()
-					if err := sendPlaintextShardToPeer(src, shardIdx, fileHash, filename, fileSize, netKey, peerID, client); err != nil {
+					if err := sendPlaintextShardToPeer(src, shardIdx, fileHash, netKey, peerID, client); err != nil {
 						fmt.Printf("[Transfer] Shard %d → peer %s failed: %v\n", shardIdx, peerID[:8], err)
 					} else {
 						shardSentCbMu.Lock()
@@ -193,7 +193,7 @@ func UploadFile(path string, client *p2p.Client) (fileHash string, fileSize int,
 			targetIndex := i % numNodes
 			isOurs := targetIndex == ourIndex
 
-			if writeErr := encryptAndStoreShardFile(srcPath, dst, netKey); writeErr == nil {
+			if writeErr := encryptAndStoreShardFile(srcPath, dst, netKey, fileHash, i); writeErr == nil {
 				shardStoredCbMu.Lock()
 				cb := shardStoredCb
 				shardStoredCbMu.Unlock()
@@ -212,7 +212,7 @@ func UploadFile(path string, client *p2p.Client) (fileHash string, fileSize int,
 				go func(shardIdx int, peerID string, src string) {
 					defer func() { <-sem }()
 					defer wg.Done()
-					if err := sendPlaintextShardToPeer(src, shardIdx, fileHash, filename, fileSize, netKey, peerID, client); err != nil {
+					if err := sendPlaintextShardToPeer(src, shardIdx, fileHash, netKey, peerID, client); err != nil {
 						fmt.Printf("[Transfer] Shard %d → peer %s failed: %v\n", shardIdx, peerID[:8], err)
 					} else {
 						shardSentCbMu.Lock()
@@ -251,23 +251,28 @@ func UploadFile(path string, client *p2p.Client) (fileHash string, fileSize int,
 // For UDP: we send an explicit ShardStreamDone after all chunks and wait for the
 // receiver's ShardStreamAck listing any missing chunks. Missing chunks are
 // retransmitted and the loop repeats until the receiver reports none missing.
-func sendPlaintextShardToPeer(srcPath string, shardIndex int, fileHash, fileName string, fileSize int, key [32]byte, peerID string, client *p2p.Client) error {
+//
+// The file name and size are NOT sent in the frames (blind-courier privacy): a
+// peer storing shards for us must not learn our file names or sizes. Only the
+// owner needs them, and the owner always has them in its local meta.json (written
+// at upload time or bootstrapped from the network manifest at download time).
+func sendPlaintextShardToPeer(srcPath string, shardIndex int, fileHash string, key [32]byte, peerID string, client *p2p.Client) error {
 	info, err := os.Stat(srcPath)
 	if err != nil {
 		return fmt.Errorf("stat shard %d: %w", shardIndex, err)
 	}
 
-	// Open a QUIC stream now, before computing totalChunks, so the chunk size
-	// is based on the transport that actually works. HasQUICConnection() can
-	// return true even when OpenUniStreamSync races and fails; by opening first
-	// we avoid committing to 256 KB chunks that then fall back to UDP (which
-	// has a 65507-byte datagram limit → "sendto: message too long").
+	// Open a QUIC stream now (before computing totalChunks) so the first send
+	// iteration reuses it. HasQUICConnection() can return true even when
+	// OpenUniStreamSync races and fails; opening first avoids that ambiguity.
 	firstStream, firstStreamErr := client.OpenShardStream(peerID)
-	effChunk := int64(chunkSize)
-	if firstStreamErr == nil {
-		effChunk = int64(chunkSizeQUIC)
-	}
 
+	// Canonical chunking: encrypt with the same 8 KB windows and deterministic
+	// per-chunk nonces as encryptAndStoreShardFile, so the peer's stored copy is
+	// byte-identical to our local copy. That identity is what storage proofs and
+	// repair rely on. The transport (QUIC vs UDP) no longer changes the chunk size;
+	// 8 KB stays safely under the 65507-byte UDP datagram limit for the UDP path.
+	effChunk := int64(chunkSizeOnDisk)
 	totalChunks := int((info.Size() + effChunk - 1) / effChunk)
 	ackKey := fmt.Sprintf("%s:%d:%s", fileHash, shardIndex, peerID)
 	shardStart := time.Now()
@@ -288,7 +293,7 @@ func sendPlaintextShardToPeer(srcPath string, shardIndex int, fileHash, fileName
 		ackCh := make(chan []int, 1)
 		shardAckChans.Store(ackKey, ackCh)
 
-		usedQUIC, serr := sendPlaintextChunks(srcPath, currentMissing, shardIndex, fileHash, fileName, fileSize, totalChunks, int(effChunk), key, peerID, client, preStream)
+		usedQUIC, serr := sendPlaintextChunks(srcPath, currentMissing, shardIndex, fileHash, totalChunks, int(effChunk), key, peerID, client, preStream)
 		preStream = nil // consumed; retries open their own stream
 		if serr != nil {
 			shardAckChans.Delete(ackKey)
@@ -352,7 +357,7 @@ func sendPlaintextShardToPeer(srcPath string, shardIndex int, fileHash, fileName
 // preOpenedStream, if non-nil, is used directly (and closed on return) instead
 // of opening a new QUIC stream; pass nil for retransmit iterations.
 // Returns (usedQUIC, error) so the caller can decide whether to send ShardStreamDone.
-func sendPlaintextChunks(srcPath string, onlyChunks map[int]struct{}, shardIndex int, fileHash, fileName string, fileSize, totalChunks, effectiveChunkSize int, key [32]byte, peerID string, client *p2p.Client, preOpenedStream io.WriteCloser) (bool, error) {
+func sendPlaintextChunks(srcPath string, onlyChunks map[int]struct{}, shardIndex int, fileHash string, totalChunks, effectiveChunkSize int, key [32]byte, peerID string, client *p2p.Client, preOpenedStream io.WriteCloser) (bool, error) {
 	sf, err := os.Open(srcPath)
 	if err != nil {
 		return false, fmt.Errorf("open shard %d: %w", shardIndex, err)
@@ -373,14 +378,15 @@ func sendPlaintextChunks(srcPath string, onlyChunks map[int]struct{}, shardIndex
 	usedQUIC := quicStream != nil
 
 	sendOne := func(plaintext []byte, chunkIndex int) error {
-		encrypted, err := encryptChunk(key, plaintext)
+		// Deterministic nonce keyed by (fileHash, shardIndex, chunkIndex) so the
+		// ciphertext the peer stores is byte-identical to our local on-disk copy.
+		encrypted, err := encryptChunkDeterministic(key, fileHash, shardIndex, chunkIndex, plaintext)
 		if err != nil {
 			return fmt.Errorf("encrypt shard %d chunk %d: %w", shardIndex, chunkIndex, err)
 		}
 		frame, err := encodeBinaryShardChunk(binaryShardChunk{
-			fileHash:        fileHash,
-			fileName:        fileName,
-			fileSize:        fileSize,
+			fileHash: fileHash,
+			// fileName/fileSize deliberately omitted — peers must not learn them.
 			shardIndex:      shardIndex,
 			chunkIndex:      chunkIndex,
 			totalChunks:     totalChunks,

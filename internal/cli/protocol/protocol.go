@@ -325,3 +325,18 @@ type DebugTransferResponse struct {
 	Success bool   `json:"success"`
 	Details string `json:"details"`
 }
+
+type DoctorRequest struct{}
+
+// DoctorCheck is one line of the `mos doctor` self-test report.
+// Status is one of: "ok", "warn", "fail", "skip".
+type DoctorCheck struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Detail string `json:"detail"`
+}
+
+type DoctorResponse struct {
+	Success bool          `json:"success"`
+	Checks  []DoctorCheck `json:"checks"`
+}

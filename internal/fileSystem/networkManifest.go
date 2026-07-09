@@ -387,7 +387,7 @@ func EnsureNetworkManifest(mosaicDir string, key [32]byte) error {
 	if _, err := os.Stat(p); err == nil {
 		return nil // already exists
 	}
-	empty := NetworkManifest{Version: 3, Users: make(map[int]*UserState), ShardMap: make(map[string]*ShardLocations)}
+	empty := NetworkManifest{Version: 4, Users: make(map[int]*UserState), ShardMap: make(map[string]*ShardLocations)}
 	return WriteNetworkManifest(mosaicDir, key, empty)
 }
 
@@ -395,7 +395,7 @@ func EnsureNetworkManifest(mosaicDir string, key [32]byte) error {
 // Returns an empty v3 manifest if the file does not exist.
 // Manifests with version < 3 are treated as empty (no migration).
 func ReadNetworkManifest(mosaicDir string, key [32]byte) (NetworkManifest, error) {
-	empty := NetworkManifest{Version: 3, Users: make(map[int]*UserState), ShardMap: make(map[string]*ShardLocations)}
+	empty := NetworkManifest{Version: 4, Users: make(map[int]*UserState), ShardMap: make(map[string]*ShardLocations)}
 
 	data, err := os.ReadFile(networkManifestPath(mosaicDir))
 	if os.IsNotExist(err) {
@@ -416,7 +416,15 @@ func ReadNetworkManifest(mosaicDir string, key [32]byte) (NetworkManifest, error
 	}
 
 	if m.Version < 3 {
-		return empty, nil
+		return empty, nil // pre-v3 (blockchain) format: discard, no migration
+	}
+	if m.Version == 3 {
+		// v3 → v4: ShardMap holder IDs in v3 were unstable placeholders (self was
+		// always "1"; peers were ephemeral IP:port). Drop the ShardMap so it
+		// rebuilds with stable STUN node IDs. The signed file records (Users) are
+		// unaffected and carried forward.
+		m.ShardMap = make(map[string]*ShardLocations)
+		m.Version = 4
 	}
 	if m.Users == nil {
 		m.Users = make(map[int]*UserState)
@@ -467,7 +475,7 @@ func RecordShardHolderAndWrite(mosaicDir string, key [32]byte, contentHash strin
 
 	m, err := ReadNetworkManifest(mosaicDir, key)
 	if err != nil {
-		m = NetworkManifest{Version: 3, Users: make(map[int]*UserState), ShardMap: make(map[string]*ShardLocations)}
+		m = NetworkManifest{Version: 4, Users: make(map[int]*UserState), ShardMap: make(map[string]*ShardLocations)}
 	}
 	if !RecordShardHolder(&m, contentHash, shardIndex, nodeID) {
 		return m, false, nil
@@ -486,7 +494,7 @@ func MergeAndWriteNetworkManifest(mosaicDir string, key [32]byte, remote Network
 	local, err := ReadNetworkManifest(mosaicDir, key)
 	if err != nil {
 		fmt.Printf("MergeAndWriteNetworkManifest: local manifest unreadable (%v) — recovering from remote\n", err)
-		local = NetworkManifest{Version: 3, Users: make(map[int]*UserState), ShardMap: make(map[string]*ShardLocations)}
+		local = NetworkManifest{Version: 4, Users: make(map[int]*UserState), ShardMap: make(map[string]*ShardLocations)}
 	}
 
 	merged, changed := MergeNetworkManifest(local, remote)
@@ -584,30 +592,6 @@ func RecordShardHolder(m *NetworkManifest, contentHash string, shardIndex int, n
 	}
 	loc.Holders[shardIndex] = append(loc.Holders[shardIndex], nodeID)
 	return true
-}
-
-// RemoveShardHolder removes nodeID from every shard holder list in the manifest.
-// Called when a peer is evicted so GetShardHolders stops routing to dead nodes.
-// Returns true if any entry was removed.
-func RemoveShardHolder(m *NetworkManifest, nodeID string) bool {
-	if m.ShardMap == nil {
-		return false
-	}
-	changed := false
-	for _, loc := range m.ShardMap {
-		for shardIdx, holders := range loc.Holders {
-			filtered := holders[:0]
-			for _, id := range holders {
-				if id != nodeID {
-					filtered = append(filtered, id)
-				} else {
-					changed = true
-				}
-			}
-			loc.Holders[shardIdx] = filtered
-		}
-	}
-	return changed
 }
 
 // GetShardHolders returns the list of node IDs that hold shardIndex for the

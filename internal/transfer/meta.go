@@ -10,13 +10,20 @@ import (
 	"github.com/hcp-uw/mosaic/internal/encoding"
 )
 
-// EnsureShardMeta writes a meta.json for the given file if one does not already
-// exist. Call this when you have file info from the network manifest but no
-// shards have been received yet, so that FetchFileBytes can proceed to request
-// missing shards from peers rather than bailing out immediately.
+// EnsureShardMeta writes (or completes) the meta.json for a file the owner knows
+// about from the network manifest. Call it when you have the real file name/size
+// but may not have received (all) the shards yet, so that FetchFileBytes can find
+// the file by name and request missing shards from peers.
+//
+// It is idempotent for a COMPLETE meta (one that already has a file name). But a
+// privacy-stripped meta — the empty-name/zero-size meta written by finalizeShard
+// when we receive shards as a blind courier — must be UPGRADED here with the
+// owner's real name and size (and a block size recomputed from the real size,
+// since the stripped meta was computed from size 0). Without this, the owner can
+// never locate its own file by name after receiving its shards via redistribution.
 func EnsureShardMeta(fileHash, fileName string, fileSize int) {
-	if FindShardMetaByHash(fileHash) != nil {
-		return
+	if existing := FindShardMetaByHash(fileHash); existing != nil && existing.FileName != "" {
+		return // already complete
 	}
 	shardDir := filepath.Join(ShardsDir(), fileHash)
 	if err := os.MkdirAll(shardDir, 0755); err != nil {

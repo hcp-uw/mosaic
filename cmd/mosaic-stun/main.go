@@ -17,6 +17,7 @@ func main() {
 	port := flag.String("port", "3478", "UDP port to listen on")
 	relayPort := flag.String("relay-port", "443", "TCP relay port (0 to disable); runs TLS with a self-signed cert")
 	noRateLimit := flag.Bool("no-rate-limit", false, "disable per-IP registration cap (for local dev with multiple test nodes)")
+	positionStore := flag.String("position-store", "/var/run/mosaic/stun-positions.json", "file for persisting queue positions across restarts (empty to disable)")
 	flag.Parse()
 
 	if os.Getenv("MOSAIC_STUN_NO_RATE_LIMIT") == "1" {
@@ -27,12 +28,13 @@ func main() {
 	}
 
 	config := &stun.ServerConfig{
-		ListenAddress: ":" + *port,
-		ClientTimeout: 30 * time.Second,
-		PingInterval:  10 * time.Second,
-		MaxQueueSize:  100,
-		EnableLogging: true,
-		NoRateLimit:   *noRateLimit,
+		ListenAddress:     ":" + *port,
+		ClientTimeout:     30 * time.Second,
+		PingInterval:      10 * time.Second,
+		MaxQueueSize:      100,
+		EnableLogging:     true,
+		NoRateLimit:       *noRateLimit,
+		PositionStorePath: *positionStore,
 	}
 
 	server := stun.NewServer(config)

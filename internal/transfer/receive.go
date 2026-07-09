@@ -1,6 +1,7 @@
 package transfer
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -44,6 +45,7 @@ func HandleBinaryShardChunk(data []byte) {
 			totalDataShards: c.totalDataShards,
 			totalShards:     c.totalShards,
 			firstChunkAt:    time.Now(),
+			lastChunkAt:     time.Now(),
 		}
 		assemblies[key] = asm
 		fileFirstChunkNano.LoadOrStore(c.fileHash, time.Now().UnixNano())
@@ -52,6 +54,7 @@ func HandleBinaryShardChunk(data []byte) {
 
 	asm.mu.Lock()
 	asm.chunks[c.chunkIndex] = c.data // store encrypted blob as-is
+	asm.lastChunkAt = time.Now()
 	received := len(asm.chunks)
 	total := asm.totalChunks
 	asm.mu.Unlock()
@@ -85,6 +88,46 @@ func HandleBinaryShardChunk(data []byte) {
 			defer finalizingShards.Delete(key)
 			finalizeShard(finalAsm)
 		}()
+	}
+}
+
+// startAssemblyGC periodically drops shard assemblies that have gone idle (no new
+// chunk within assemblyIdleTimeout), reclaiming memory from stalled or malicious
+// never-completing streams. Runs until ctx is cancelled.
+func startAssemblyGC(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(assemblyGCInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				gcStaleAssemblies()
+			}
+		}
+	}()
+}
+
+// gcStaleAssemblies removes assemblies whose last chunk arrived longer ago than
+// assemblyIdleTimeout, along with their per-shard activity bookkeeping.
+func gcStaleAssemblies() {
+	now := time.Now()
+	removed := 0
+	assemblyMu.Lock()
+	for key, asm := range assemblies {
+		asm.mu.Lock()
+		stale := now.Sub(asm.lastChunkAt) > assemblyIdleTimeout
+		asm.mu.Unlock()
+		if stale {
+			delete(assemblies, key)
+			shardLastChunkNano.Delete(key)
+			removed++
+		}
+	}
+	assemblyMu.Unlock()
+	if removed > 0 {
+		fmt.Printf("[Transfer] GC: dropped %d stalled shard assembly(ies)\n", removed)
 	}
 }
 
@@ -158,13 +201,32 @@ func finalizeShard(asm *shardAssembly) {
 		}
 	}
 
+	// Shard frames no longer carry the file name/size (blind-courier privacy), so
+	// asm.fileName/fileSize are empty for received shards. Never downgrade an
+	// existing richer meta: preserve any identity fields we already have (the owner
+	// writes them at upload time or via EnsureShardMeta from the network manifest).
+	// A pure peer keeps stripped meta (empty name/size) — which is exactly the
+	// privacy-preserving state.
+	name, size := asm.fileName, asm.fileSize
+	blockSize := encoding.ComputeBlockSize(asm.fileSize, asm.totalDataShards)
+	if existing := FindShardMetaByHash(asm.fileHash); existing != nil {
+		if name == "" {
+			name = existing.FileName
+		}
+		if size == 0 {
+			size = existing.FileSize
+		}
+		if existing.BlockSize > 0 {
+			blockSize = existing.BlockSize
+		}
+	}
 	writeShardMeta(shardDir, ShardMeta{
-		FileName:        asm.fileName,
+		FileName:        name,
 		FileHash:        asm.fileHash,
-		FileSize:        asm.fileSize,
+		FileSize:        size,
 		TotalDataShards: asm.totalDataShards,
 		TotalShards:     asm.totalShards,
-		BlockSize:       encoding.ComputeBlockSize(asm.fileSize, asm.totalDataShards),
+		BlockSize:       blockSize,
 	})
 
 	count := 0
@@ -183,6 +245,27 @@ func finalizeShard(asm *shardAssembly) {
 
 func autoReconstruct(asm *shardAssembly) {
 	mosaicDir := shared.MosaicDir()
+
+	// Frames no longer carry the file name/size, so resolve them from local meta.
+	// Only the owner has meta with these fields populated (written at upload time
+	// or via EnsureShardMeta from the network manifest at download time). A pure
+	// blind-courier peer has no name/size and cannot — and should not — materialize
+	// the file, so bail out early.
+	fileName := asm.fileName
+	fileSize := asm.fileSize
+	if m := FindShardMetaByHash(asm.fileHash); m != nil {
+		if fileName == "" {
+			fileName = m.FileName
+		}
+		if fileSize == 0 {
+			fileSize = m.FileSize
+		}
+	}
+	if fileName == "" || fileSize == 0 {
+		reconstructed.Delete(asm.fileHash)
+		return
+	}
+
 	outDir, err := os.MkdirTemp("", "mosaic-recon-*")
 	if err != nil {
 		fmt.Printf("[Transfer] Reconstruct: cannot create output dir: %v\n", err)
@@ -220,13 +303,13 @@ func autoReconstruct(asm *shardAssembly) {
 		return
 	}
 	// Use stored block size if available; fall back to computing from file size.
-	blockSize := encoding.ComputeBlockSize(asm.fileSize, asm.totalDataShards)
+	blockSize := encoding.ComputeBlockSize(fileSize, asm.totalDataShards)
 	if m := FindShardMetaByHash(asm.fileHash); m != nil && m.BlockSize > 0 {
 		blockSize = m.BlockSize
 	}
 	enc.SetBlockSize(blockSize)
 	fmt.Printf("[Transfer] Reconstructing %s…\n", asm.fileHash[:12])
-	if err := enc.DecodeShards(asm.fileHash, asm.fileSize); err != nil {
+	if err := enc.DecodeShards(asm.fileHash, fileSize); err != nil {
 		fmt.Printf("[Transfer] Reconstruct: decode failed: %v\n", err)
 		reconstructed.Delete(asm.fileHash)
 		return
@@ -239,7 +322,7 @@ func autoReconstruct(asm *shardAssembly) {
 		return
 	}
 
-	destPath := filepath.Join(mosaicDir, asm.fileName)
+	destPath := filepath.Join(mosaicDir, fileName)
 	if err := copyFile(matches[0], destPath); err != nil {
 		fmt.Printf("[Transfer] Reconstruct: could not write %s: %v\n", destPath, err)
 		reconstructed.Delete(asm.fileHash)
@@ -249,7 +332,7 @@ func autoReconstruct(asm *shardAssembly) {
 	totalElapsed := ""
 	if v, ok := fileFirstChunkNano.LoadAndDelete(asm.fileHash); ok {
 		d := time.Since(time.Unix(0, v.(int64)))
-		sizeMB := float64(asm.fileSize) / (1024 * 1024)
+		sizeMB := float64(fileSize) / (1024 * 1024)
 		totalElapsed = fmt.Sprintf(" (%.1fs total, %.2f MB/s)", d.Seconds(), sizeMB/d.Seconds())
 	}
 	fmt.Printf("[Transfer] File ready: %s%s\n", destPath, totalElapsed)
@@ -280,7 +363,7 @@ func StoreShardData(fileHash, fileName string, fileSize, shardIndex, totalDataSh
 		fmt.Printf("[Transfer] StoreShardData: cannot write shard %d: %v\n", shardIndex, err)
 		return
 	}
-	fmt.Printf("[Transfer] Stored received shard %d for %s\n", shardIndex, fileHash[:12])
+	fmt.Printf("[Transfer] Stored received shard %d for %s\n", shardIndex, ShortHash(fileHash))
 
 	// Track download progress when this shard was fetched for FetchFileBytes.
 	downloadTargetMu.Lock()

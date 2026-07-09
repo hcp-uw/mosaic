@@ -88,6 +88,8 @@ Run these commands on the server (after SSH-ing in).
 
 Both processes run in the background. PIDs are written to `/var/run/mosaic/` and logs go to `/var/log/mosaic/`.
 
+`mosaic-stun` also persists queue positions to `/var/run/mosaic/stun-positions.json` (override with `-position-store <path>`, or `-position-store ""` to disable) so nodes reclaim their original queue position across a server restart. The directory must be writable by the STUN process; `/var/run/mosaic/` already is under the default layout.
+
 ### Stop
 
 ```bash

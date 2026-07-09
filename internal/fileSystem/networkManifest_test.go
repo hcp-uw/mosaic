@@ -415,85 +415,46 @@ func TestMerge_ShardMapIdempotent(t *testing.T) {
 	}
 }
 
-// ──────────────────────────────────────────────────────────
-// RemoveShardHolder
-// ──────────────────────────────────────────────────────────
-
-func TestRemoveShardHolder_RemovesTargetNode(t *testing.T) {
-	m := emptyManifest()
-	RecordShardHolder(&m, "file1", 0, "node-A")
-	RecordShardHolder(&m, "file1", 0, "node-B")
-	RecordShardHolder(&m, "file1", 1, "node-A")
-
-	changed := RemoveShardHolder(&m, "node-A")
-	if !changed {
-		t.Fatal("expected changed=true")
+// TestReadNetworkManifest_V3ToV4Migration verifies that reading a v3 manifest
+// drops the (unstable) ShardMap and upgrades to v4 while preserving the signed
+// file records. This is the one-time clean-up for the holder-ID rework.
+func TestReadNetworkManifest_V3ToV4Migration(t *testing.T) {
+	dir := t.TempDir()
+	var key [32]byte
+	for i := range key {
+		key[i] = byte(i + 1)
 	}
-	for _, shardIdx := range []int{0, 1} {
-		for _, id := range GetShardHolders(m, "file1", shardIdx) {
-			if id == "node-A" {
-				t.Errorf("node-A still present in shard %d after removal", shardIdx)
-			}
-		}
+
+	// Build and persist a v3 manifest with a user record and stale ShardMap data.
+	v3 := NetworkManifest{
+		Version: 3,
+		Users: map[int]*UserState{
+			7: {UserID: 7, Username: "alice", Records: map[string]*FileRecord{
+				"hashA": {ContentHash: "hashA", Seq: 1},
+			}},
+		},
+		ShardMap: map[string]*ShardLocations{
+			"hashA": {Holders: map[int][]string{0: {"1", "203.0.113.5:51005"}}},
+		},
 	}
-}
-
-func TestRemoveShardHolder_PreservesOtherNodes(t *testing.T) {
-	m := emptyManifest()
-	RecordShardHolder(&m, "file1", 0, "node-A")
-	RecordShardHolder(&m, "file1", 0, "node-B")
-	RecordShardHolder(&m, "file1", 0, "node-C")
-
-	RemoveShardHolder(&m, "node-A")
-
-	holders := GetShardHolders(m, "file1", 0)
-	found := map[string]bool{}
-	for _, id := range holders {
-		found[id] = true
-		if id == "node-A" {
-			t.Error("node-A should have been removed")
-		}
+	if err := WriteNetworkManifest(dir, key, v3); err != nil {
+		t.Fatalf("write v3: %v", err)
 	}
-	if !found["node-B"] || !found["node-C"] {
-		t.Errorf("node-B and node-C should still be present; got %v", holders)
+
+	got, err := ReadNetworkManifest(dir, key)
+	if err != nil {
+		t.Fatalf("read: %v", err)
 	}
-}
-
-func TestRemoveShardHolder_ReturnsFalseWhenNotPresent(t *testing.T) {
-	m := emptyManifest()
-	RecordShardHolder(&m, "file1", 0, "node-A")
-
-	changed := RemoveShardHolder(&m, "node-Z")
-	if changed {
-		t.Fatal("expected changed=false when node not present")
+	if got.Version != 4 {
+		t.Errorf("version: got %d, want 4", got.Version)
 	}
-}
-
-func TestRemoveShardHolder_AcrossMultipleFiles(t *testing.T) {
-	m := emptyManifest()
-	RecordShardHolder(&m, "file1", 0, "node-X")
-	RecordShardHolder(&m, "file2", 3, "node-X")
-	RecordShardHolder(&m, "file2", 7, "node-X")
-	RecordShardHolder(&m, "file2", 7, "node-Y")
-
-	RemoveShardHolder(&m, "node-X")
-
-	if len(GetShardHolders(m, "file1", 0)) != 0 {
-		t.Error("file1 shard 0 should have no holders")
+	if len(got.ShardMap) != 0 {
+		t.Errorf("ShardMap should be cleared on v3→v4, got %v", got.ShardMap)
 	}
-	if len(GetShardHolders(m, "file2", 3)) != 0 {
-		t.Error("file2 shard 3 should have no holders")
+	if got.Users[7] == nil || got.Users[7].Records["hashA"] == nil {
+		t.Fatal("user file records must survive the migration")
 	}
-	holders := GetShardHolders(m, "file2", 7)
-	if len(holders) != 1 || holders[0] != "node-Y" {
-		t.Errorf("file2 shard 7 should only have node-Y; got %v", holders)
-	}
-}
-
-func TestRemoveShardHolder_EmptyMap(t *testing.T) {
-	m := emptyManifest()
-	changed := RemoveShardHolder(&m, "node-A")
-	if changed {
-		t.Fatal("expected changed=false on empty ShardMap")
+	if got.Users[7].Username != "alice" {
+		t.Errorf("username should survive: got %q", got.Users[7].Username)
 	}
 }

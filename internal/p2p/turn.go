@@ -43,14 +43,21 @@ import (
 // direct UDP hole-punching. Set to true to simulate symmetric NAT in testing.
 const forceTURN = false
 
-// turnFallbackTimeout is how long we wait for a direct pong before falling
-// back to the relay. 1s when forceTURN is set (instant fallback for testing);
-// 25s in production so peers get at least two full ping cycles before relay.
+// turnFallbackTimeout is how long we wait for a direct pong before falling back
+// to the relay (TURN if enabled, otherwise the TCP relay). 1s when forceTURN is
+// set (instant fallback for testing).
+//
+// In production this must sit a full ping cycle below peerPongTimeout (30s) so
+// the fallback fires on the t=20s tick and gets a chance to reset LastPeerPong
+// before the t=30s eviction tick. With pings every 10s, 15s triggers after two
+// missed pings (t=20s) while leaving a 10s margin before eviction. A value ≥20s
+// would collide with eviction on the same tick and could evict the peer instead
+// of relaying it.
 var turnFallbackTimeout = func() time.Duration {
 	if forceTURN {
 		return 1 * time.Second
 	}
-	return 25 * time.Second
+	return 15 * time.Second
 }()
 
 // relayDialTimeout is how long ConnectViaTURN / connectAsRelayFollower waits
@@ -271,8 +278,6 @@ func (c *Client) connectAsRelayFollower(initiatorID, relayServerAddr string) {
 	peer.ViaTURN = true
 	peer.LastPeerPong = time.Now()
 	ephPrivBytes := peer.EphemeralPrivKey
-	myID := c.id
-	quicPort := c.quicPort
 	c.mutex.Unlock()
 
 	go c.handleTURNMessages(initiatorID, rs)
@@ -287,7 +292,7 @@ func (c *Client) connectAsRelayFollower(initiatorID, relayServerAddr string) {
 			if err != nil {
 				return
 			}
-			initMsg := api.NewHandshakeInitMessage(myID, ephPriv.PublicKey().Bytes(), quicPort)
+			initMsg := c.buildHandshakeInit(ephPriv.PublicKey().Bytes())
 			data, _ := initMsg.Serialize()
 			rpc.WriteTo(data, nil) //nolint:errcheck — best-effort
 		}()

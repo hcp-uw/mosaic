@@ -35,12 +35,15 @@ All peer-to-peer UDP traffic is encrypted using an **ephemeral X25519 Diffie-Hel
 A connects to B (via STUN hole-punch or TURN relay)
     │
     ├─ A: generate ephemeral X25519 keypair (privA, pubA)
-    │    send HandshakeInit{senderID=A, pubA}  →→→  B
+    │    sigA = ECDSA(accountPrivA, H("mosaic-handshake-v1" || accountPubA || pubA || nodeIDA))
+    │    send HandshakeInit{senderID=A, pubA, accountPubA, sigA}  →→→  B
     │
     └─ B: generate ephemeral X25519 keypair (privB, pubB)
-         send HandshakeInit{senderID=B, pubB}  →→→  A
+         sigB = ECDSA(accountPrivB, ...)
+         send HandshakeInit{senderID=B, pubB, accountPubB, sigB}  →→→  A
 
-Both sides compute independently:
+Each side, on receiving the other's HandshakeInit:
+    verify sigX against accountPubX over the transcript   ← reject if invalid
     sharedSecret = X25519(myEphemeralPriv, theirEphemeralPub)
     sessionKey   = HKDF-SHA256(sharedSecret, info="mosaic-session", 32 bytes)
 
@@ -48,6 +51,19 @@ HandshakeDone = true  →  all subsequent messages are encrypted
 ```
 
 `HandshakeInit` messages are sent in plaintext (the session key can only exist after the exchange completes). Ephemeral public keys are not secret — an observer learns nothing useful from them.
+
+### Signed handshake (identity binding, MITM protection)
+
+Each `HandshakeInit` is **signed with the sender's account ECDSA key**, over `SHA-256("mosaic-handshake-v1" || accountPubKey || ephemeralPubKey || nodeID)`. The receiver **rejects** any handshake whose signature doesn't verify against the presented account key — no session is established. This binds the ephemeral Diffie-Hellman key to a real account, so:
+
+- A man-in-the-middle can't substitute its own ephemeral key under a victim's account identity (it can't forge the victim's signature), so it can't impersonate an account or splice itself between two honest peers.
+- After the handshake, the peer's verified account public key is stored on `PeerInfo.AccountPubKey` — so downstream identity checks (same-account detection, holder trust) rest on a cryptographically verified identity, not a self-reported claim.
+
+Because the signature is **required**, every peer must have an account key — so **joining the network requires being logged in** (`mos join` refuses otherwise). This is intentional: allowing anonymous, unsigned handshakes would let a MITM simply strip the signature and downgrade the connection. It is *authentication* (which account a peer is), not *authorization* — Mosaic stays permissionless, anyone with an account may connect, and the STUN server is not involved in any of this (identity is established peer-to-peer).
+
+The account keypair is derived deterministically from the login key (see below), so "logged in on this machine" is exactly "able to prove this account."
+
+`HandshakeInit` also carries the sender's QUIC port and its **stable STUN node ID** (`~/.mosaic-stun-id`). The receiver stores the node ID on `PeerInfo`, giving each side a `stun-node-id ↔ live P2P id` mapping for the session — used to key shard-holder entries in the network manifest by a stable identity rather than the ephemeral transport address (see [transfer.md → ShardMap](transfer.md#holder-identity-stable-stun-node-id)).
 
 ### Encrypted Frame Format
 
@@ -61,11 +77,22 @@ The first byte acts as a routing tag:
 
 | First byte | Meaning |
 |---|---|
-| `0x7B` (`{`) | Plaintext JSON — only `HandshakeInit` during the initial exchange |
+| `0x7B` (`{`) | Plaintext JSON — only the handshake bootstrap and pre-session pings (see below) |
 | `0x02` | Session-encrypted frame — decrypt before routing |
 | `0x01` | Binary shard frame (only appears inside the decrypted envelope after `0x02` unwrap) |
 
 Overhead: 1 (magic) + 12 (nonce) + 16 (GCM tag) = **29 bytes per message** — less than 0.1% of a 32 KB shard chunk.
+
+### Authentication enforcement
+
+Producing a valid `0x02` frame requires the session key, so a `0x02` message is proof it came from the peer we did the X25519 exchange with. `processPeerMessage` **enforces** this: a message is trusted only if it arrived inside the `0x02` envelope. The sole exceptions (`plaintextAllowed`) are:
+
+- **`HandshakeInit`** — the session key can't exist yet, so the first exchange is necessarily plaintext. `completeHandshake` ignores a repeat once the session is live, so a plaintext `HandshakeInit` cannot reset an established session.
+- **`PeerPing` / `PeerPong` before the peer's session is established** — liveness pings flow during setup. Once a peer's handshake is done its pings are sent encrypted (`writeToPeer`), and a plaintext ping claiming to be that peer is rejected — closing the spoofed-ping address-rewrite attack.
+
+Everything else — `ShardRequest`, `ShardDelete`, `NodeLeave`, `ManifestSync`, shard frames, identity messages, etc. — is dropped if it arrives unencrypted. Before this, any host that could send UDP to a peer's port could inject those control messages with no key (e.g. spoof a `NodeLeave` to evict a peer, or a `ShardRequest` for bandwidth amplification).
+
+> **Scope:** this authenticates that a message came from *the party we handshaked with*, and — because the handshake itself is now [signed with the account key](#signed-handshake-identity-binding-mitm-protection) — *which account* that party is. The STUN control channel remains deliberately plaintext and untrusted (a dumb rendezvous); security lives at the peer endpoints, not the server.
 
 ### TURN Relay
 

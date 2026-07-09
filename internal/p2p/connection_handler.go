@@ -16,7 +16,6 @@ This keeps STUN traffic minimal and reflects Mosaic's decentralized design.
 
 import (
 	"fmt"
-	"net"
 	"time"
 
 	"github.com/hcp-uw/mosaic/internal/api"
@@ -93,14 +92,9 @@ func (c *Client) tickStunPing(state ClientState) {
 // tickPeerPings sends a ping to every connected peer and evicts any that have
 // timed out. If the evicted peer was the network leader, triggers STUN re-registration.
 func (c *Client) tickPeerPings(state ClientState) {
-	type pingTarget struct {
-		conn net.PacketConn
-		addr *net.UDPAddr
-	}
-
 	c.mutex.Lock()
 	now := time.Now()
-	var toSend []pingTarget
+	var toSend []*PeerInfo
 	deadLeaderFound := false
 	var turnFallbackIDs []string    // peers to try TURN for (direct timed out)
 	var tcpRelayFallbackIDs []string // peers to try TCP relay for (TURN unavailable/failed)
@@ -141,16 +135,16 @@ func (c *Client) tickPeerPings(state ClientState) {
 			stunRetryIDs = append(stunRetryIDs, id)
 		}
 
-		toSend = append(toSend, pingTarget{conn: peer.Conn, addr: peer.Address})
+		toSend = append(toSend, peer)
 	}
 	c.mutex.Unlock()
 
-	// Send pings outside the lock to avoid holding it during I/O.
-	for _, t := range toSend {
+	// Send pings outside the lock to avoid holding it during I/O. writeToPeer
+	// encrypts once the peer's handshake is done, so an established peer's pings
+	// are authenticated — a plaintext ping claiming to be that peer is rejected.
+	for _, peer := range toSend {
 		msg := api.NewPeerPingMessage(api.NewSignature(c.id))
-		if data, err := msg.Serialize(); err == nil {
-			t.conn.WriteTo(data, t.addr) //nolint:errcheck — best-effort UDP
-		}
+		c.writeToPeer(peer, msg) //nolint:errcheck — best-effort
 	}
 
 	// TURN fallback: direct hole-punch timed out, TURN is configured.
@@ -269,14 +263,8 @@ func (c *Client) sendPeerPing(peerID string) error {
 		return fmt.Errorf("peer %s not connected", peerID)
 	}
 
-	msg := api.NewPeerPingMessage(api.NewSignature(c.id))
-	data, err := msg.Serialize()
-	if err != nil {
-		return fmt.Errorf("failed to serialize peer ping: %w", err)
-	}
-
-	_, err = peer.Conn.WriteTo(data, peer.Address)
-	return err
+	// Encrypts once the handshake is done so the ping is authenticated.
+	return c.writeToPeer(peer, api.NewPeerPingMessage(api.NewSignature(c.id)))
 }
 
 // sendPeerPong sends a pong response to a peer identified by their public key / ID.
@@ -289,12 +277,6 @@ func (c *Client) sendPeerPong(peerId string) error {
 		return fmt.Errorf("peer %s not connected", peerId)
 	}
 
-	msg := api.NewPeerPongMessage(api.NewSignature(c.id))
-	data, err := msg.Serialize()
-	if err != nil {
-		return fmt.Errorf("failed to serialize peer pong: %w", err)
-	}
-
-	_, err = peer.Conn.WriteTo(data, peer.Address)
-	return err
+	// Encrypts once the handshake is done so the pong is authenticated.
+	return c.writeToPeer(peer, api.NewPeerPongMessage(api.NewSignature(c.id)))
 }

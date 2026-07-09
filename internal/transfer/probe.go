@@ -21,23 +21,42 @@ var probeChans sync.Map
 
 const probeTimeout = 3 * time.Second
 
+// ProbeOutcome is the result of a storage-proof challenge.
+type ProbeOutcome int
+
+const (
+	// ProbeNoLocalCopy: we don't hold the shard, so we can't compute the expected
+	// hash and no probe was sent. Not counted against the peer.
+	ProbeNoLocalCopy ProbeOutcome = iota
+	// ProbePass: the peer returned the correct hash — possession proven.
+	ProbePass
+	// ProbeWrongHash: the peer responded but with the wrong hash — a proven false
+	// claim. Safe to suppress this (holder, shard) locally.
+	ProbeWrongHash
+	// ProbeNoResponse: no response within the timeout — inconclusive (could be
+	// transient or offline). Counts toward eviction but is NOT proof of a lie.
+	ProbeNoResponse
+)
+
 // ProbeShardAtPeer asks peerID to prove it holds shardIndex of fileHash by
-// responding with SHA-256(nonce || shard_bytes). Returns true only when the
-// peer responds with the hash that matches our local copy of the same shard.
+// responding with SHA-256(nonce || shard_bytes), and returns the outcome. A
+// ProbePass means the peer returned the hash matching our own local copy.
 //
-// A false return means the peer doesn't have the shard, didn't respond in
-// time, or produced a wrong hash (possible forgery attempt).
-func ProbeShardAtPeer(fileHash string, shardIndex int, peerID string, client *p2p.Client) bool {
+// It records pass/fail toward the peer's consecutive-failure eviction counter
+// (a wrong hash or a timeout both count). The distinct ProbeWrongHash outcome
+// lets the caller locally suppress a proven false claim without also suppressing
+// on an inconclusive timeout.
+func ProbeShardAtPeer(fileHash string, shardIndex int, peerID string, client *p2p.Client) ProbeOutcome {
 	nonceBytes := make([]byte, 16)
 	if _, err := rand.Read(nonceBytes); err != nil {
-		return false
+		return ProbeNoResponse
 	}
 	nonce := hex.EncodeToString(nonceBytes)
 
 	expectedHash, err := hashShardFileWithNonce(fileHash, shardIndex, nonceBytes)
 	if err != nil {
 		// We don't have the shard locally — can't compute expected hash.
-		return false
+		return ProbeNoLocalCopy
 	}
 
 	key := fmt.Sprintf("%s:%d:%s", fileHash, shardIndex, nonce)
@@ -50,18 +69,22 @@ func ProbeShardAtPeer(fileHash string, shardIndex int, peerID string, client *p2
 		ShardIndex: shardIndex,
 		Nonce:      nonce,
 	})); err != nil {
-		return false
+		return ProbeNoResponse // send failed (peer transiently unreachable) — don't penalize
 	}
 
-	var result bool
+	var outcome ProbeOutcome
 	select {
 	case reportedHash := <-ch:
-		result = reportedHash == expectedHash
+		if reportedHash == expectedHash {
+			outcome = ProbePass
+		} else {
+			outcome = ProbeWrongHash
+		}
 	case <-time.After(probeTimeout):
-		result = false
+		outcome = ProbeNoResponse
 	}
-	client.RecordProbeResult(peerID, result)
-	return result
+	client.RecordProbeResult(peerID, outcome == ProbePass)
+	return outcome
 }
 
 // HandleShardProbe responds to a ShardProbe from a peer. If we hold the

@@ -30,8 +30,6 @@ const (
 	tcpRelayTagDataSend byte = 0x01
 	tcpRelayTagDataRecv byte = 0x02
 	tcpRelayTagAck      byte = 0x03
-
-	tcpRelayFallbackTimeout = 30 * time.Second // try TCP relay after this long with no pong
 )
 
 // sharedTCPRelay is one TCP connection to the relay server shared by all peers.

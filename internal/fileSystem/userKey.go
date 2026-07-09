@@ -100,7 +100,7 @@ func LoadOrCreateUserKey(keyPath string) (UserKeyPair, error) {
 
 	if os.IsNotExist(err) {
 		return UserKeyPair{}, fmt.Errorf(
-			"no user key found — run 'mos login account <username> <key>' to derive your keypair",
+			"no user key found — run 'mos login <key>' to derive your keypair",
 		)
 	}
 

@@ -36,6 +36,17 @@ type PeerInfo struct {
 	QUICPort int        // peer's QUIC listening port (from their HandshakeInit)
 	QUICConn *quic.Conn // nil until QUIC connection is established
 
+	// StunNodeID is the peer's stable per-machine STUN node ID (from their
+	// HandshakeInit). It maps this session's transport to a stable identity used
+	// as the canonical shard-holder ID in the network manifest. Empty until the
+	// handshake completes.
+	StunNodeID string
+
+	// AccountPubKey is the peer's account public key (PKIX DER), verified during
+	// the handshake — so this is the account this session cryptographically belongs
+	// to, not a self-reported claim. Empty until the handshake completes.
+	AccountPubKey []byte
+
 	// Shard probe tracking — consecutive failures evict the peer.
 	ProbeFailures int
 }
@@ -296,8 +307,6 @@ func (c *Client) ConnectToPeer(peer *PeerInfo) error {
 	peerAddr := c.peers[peer.ID].Address
 	peerID := peer.ID
 	pubKeyBytes := ephPriv.PublicKey().Bytes()
-	myID := c.id
-	quicPort := c.quicPort
 	c.mutex.Unlock()
 
 	go c.establishPeerConnection(peerID, peerAddr)
@@ -305,7 +314,7 @@ func (c *Client) ConnectToPeer(peer *PeerInfo) error {
 	// Send HandshakeInit after punch packets have had a chance to open the path.
 	go func() {
 		time.Sleep(300 * time.Millisecond)
-		msg := api.NewHandshakeInitMessage(myID, pubKeyBytes, quicPort)
+		msg := c.buildHandshakeInit(pubKeyBytes)
 		// Send directly (plaintext) — session key doesn't exist yet.
 		c.mutex.RLock()
 		p := c.peers[peerID]

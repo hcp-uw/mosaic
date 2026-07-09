@@ -66,7 +66,7 @@ type NetworkManifest struct {
     Version   int                        // 3 for the LWW-Set CRDT format
     UpdatedAt string                     // RFC3339 UTC; updated on every write
     Users     map[int]*UserState         // userID → UserState
-    ShardMap  map[string]*ShardLocations // contentHash → shard holder G-set
+    ShardMap  map[string]*ShardLocations // contentHash → shard-holder G-set (keyed by stable STUN node ID)
 }
 ```
 
@@ -259,7 +259,7 @@ This is a cryptographic guarantee, not a display-layer filter — the ciphertext
 | Key compromise | If the private key leaks, an attacker can create records with arbitrarily high `Seq` and override any state. No revocation mechanism exists. |
 | Sybil attacks | Any string can be used as a login key; one person can generate thousands of identities. The per-IP STUN registration cap reduces broadcast amplification but does not prevent multi-identity users. |
 | File name privacy is only as strong as the login key | The encryption key derives from the private key which derives from the login key. Obtaining the login key allows decryption of all metadata. |
-| No storage proof | `FileRecord` is a claim, not a proof. A user can record a file they never uploaded. Storage proofs (ShardProbe challenges) verify shard possession at transfer time but do not validate the manifest entry itself. |
+| Manifest entry is not itself a possession proof | `FileRecord` is a claim: a user can record a file they never actually stored. Storage proofs (ShardProbe challenges, run by the periodic audit) verify that peers hold the *shards* they claim in the ShardMap and evict liars, but they do not validate the `FileRecord` entry itself. |
 
 ---
 

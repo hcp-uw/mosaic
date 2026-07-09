@@ -111,6 +111,9 @@ func decodeBinaryShardChunk(frame []byte) (*binaryShardChunk, error) {
 	off += 4
 	totalChunks := int(binary.LittleEndian.Uint32(frame[off:]))
 	off += 4
+	if totalChunks < 0 || totalChunks > maxChunksPerShard {
+		return nil, fmt.Errorf("implausible totalChunks %d", totalChunks)
+	}
 	totalDataShards := int(frame[off])
 	off++
 	totalShards := int(frame[off])
@@ -224,14 +227,15 @@ func (p *adaptivePacer) ackLoss(lossRate float64) {
 	p.mu.Unlock()
 }
 
-// Init resets the adaptive pacer to its initial rate. Safe to call multiple
-// times; only the first call takes effect.
-func Init(_ context.Context) {
+// Init resets the adaptive pacer to its initial rate and starts the background
+// shard-assembly GC. Safe to call multiple times; only the first call takes effect.
+func Init(ctx context.Context) {
 	initOnce.Do(func() {
 		udpPacer.mu.Lock()
 		udpPacer.interval = pacerInitInterval
 		udpPacer.nextSend = time.Time{}
 		udpPacer.mu.Unlock()
+		startAssemblyGC(ctx)
 	})
 }
 

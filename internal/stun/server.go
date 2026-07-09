@@ -42,6 +42,10 @@ type Server struct {
 
 	noRateLimit bool // disables per-IP cap; set via --no-rate-limit or MOSAIC_STUN_NO_RATE_LIMIT=1
 
+	// positions persists nodeID → queuePosition so a returning client reclaims
+	// its original position after a server restart (fixes the restart-race).
+	positions *positionStore
+
 	// Legacy fields kept for compatibility.
 	waitingQueue             []*ClientInfo
 	currentTerm              uint
@@ -60,6 +64,11 @@ const maxPerIPConcurrent = 10
 // Disabled when NoRateLimit is set.
 const minPingInterval = 5 * time.Second
 
+// rosterSenderID is the sender field on membership-roster messages the STUN
+// server sends directly. The client routes by source address, not this ID, so it
+// is purely informational — it just marks the message as originating from STUN.
+const rosterSenderID = "stun-server"
+
 // ServerConfig holds server configuration.
 type ServerConfig struct {
 	ListenAddress string
@@ -71,6 +80,10 @@ type ServerConfig struct {
 	// local development so multiple test nodes on the same machine aren't blocked.
 	// Enable via --no-rate-limit flag or MOSAIC_STUN_NO_RATE_LIMIT=1 env var.
 	NoRateLimit bool
+
+	// PositionStorePath is where the nodeID → queuePosition map is persisted so
+	// positions survive a server restart. Empty disables persistence (in-memory).
+	PositionStorePath string
 }
 
 // DefaultServerConfig returns a default configuration.
@@ -90,6 +103,7 @@ func NewServer(config *ServerConfig) *Server {
 		config = DefaultServerConfig()
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	store := loadPositionStore(config.PositionStorePath)
 	return &Server{
 		clients:      make(map[string]*ClientInfo),
 		waitingQueue:  make([]*ClientInfo, 0),
@@ -97,6 +111,10 @@ func NewServer(config *ServerConfig) *Server {
 		cancel:        cancel,
 		done:          make(chan bool),
 		noRateLimit:   config.NoRateLimit,
+		positions:     store,
+		// Seed the counter above the highest restored position so freshly-assigned
+		// positions never collide with one a returning node will reclaim.
+		queueCounter: store.maxPosition(),
 	}
 }
 
@@ -206,7 +224,8 @@ func (s *Server) processMessage(data []byte, clientAddr *net.UDPAddr, enableLogg
 // ──────────────────────────────────────────────────────────────────────────────
 
 func (s *Server) handleClientRegister(msg *api.Message, clientAddr *net.UDPAddr, enableLogging bool) {
-	if _, err := msg.GetClientRegisterData(); err != nil {
+	regData, err := msg.GetClientRegisterData()
+	if err != nil {
 		if enableLogging {
 			log.Printf("Failed to parse client register data: %v", err)
 		}
@@ -248,9 +267,24 @@ func (s *Server) handleClientRegister(msg *api.Message, clientAddr *net.UDPAddr,
 		}
 	}
 
-	// Assign next queue position.
-	s.queueCounter++
-	queuePos := s.queueCounter
+	// Assign a queue position. If the client sent a stable node ID we've seen
+	// before (across a server restart), reclaim its original position; otherwise
+	// assign the next fresh position and remember it for that node ID.
+	var queuePos int
+	restored := false
+	if regData.NodeID != "" {
+		if pos, ok := s.positions.get(regData.NodeID); ok {
+			queuePos = pos
+			restored = true
+		} else {
+			s.queueCounter++
+			queuePos = s.queueCounter
+			s.positions.put(regData.NodeID, queuePos)
+		}
+	} else {
+		s.queueCounter++
+		queuePos = s.queueCounter
+	}
 
 	clientInfo := &ClientInfo{
 		ID:            clientID,
@@ -262,7 +296,11 @@ func (s *Server) handleClientRegister(msg *api.Message, clientAddr *net.UDPAddr,
 	s.clients[clientID] = clientInfo
 
 	if enableLogging {
-		log.Printf("Client %s registered (queue position %d)", clientID, queuePos)
+		if restored {
+			log.Printf("Client %s registered (queue position %d, restored for node %s)", clientID, queuePos, regData.NodeID)
+		} else {
+			log.Printf("Client %s registered (queue position %d)", clientID, queuePos)
+		}
 	}
 
 	s.sendRegistrationSuccess(clientID, clientAddr, queuePos)
@@ -271,6 +309,35 @@ func (s *Server) handleClientRegister(msg *api.Message, clientAddr *net.UDPAddr,
 		s.promoteAsLeader(clientInfo, enableLogging)
 	} else {
 		s.pairWithLeader(clientInfo, enableLogging)
+	}
+
+	// Distribute the full membership roster directly from STUN so the mesh forms
+	// even if the leader is slow or dies mid-formation. This complements (does not
+	// replace) the leader's gossip; the client's addRosterPeer dedups the overlap.
+	s.distributeRoster(clientInfo, enableLogging)
+}
+
+// distributeRoster tells the joiner about every active member except the leader
+// (already paired via pairWithLeader) and itself, and tells each of those members
+// about the joiner. Making STUN authoritative for membership removes the sole
+// dependence on the leader forwarding CurrentMembers/NewPeerJoiner — the fragile
+// point where a leader dying mid-formation left members not knowing each other.
+// Must be called with s.mutex held.
+func (s *Server) distributeRoster(joiner *ClientInfo, enableLogging bool) {
+	members := make(map[string]*net.UDPAddr)
+	for id, member := range s.clients {
+		if id == joiner.ID || id == s.currentLeaderID {
+			continue
+		}
+		members[id] = member.Address
+		// Tell the existing member about the joiner.
+		s.sendMessage(member.Address, api.NewNewPeerJoinerMessage(rosterSenderID, joiner.ID, joiner.Address.String()))
+	}
+	if len(members) > 0 {
+		s.sendMessage(joiner.Address, api.NewCurrentMembersMessage(members, rosterSenderID))
+		if enableLogging {
+			log.Printf("Distributed roster of %d member(s) to joiner %s", len(members), joiner.ID)
+		}
 	}
 }
 

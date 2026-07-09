@@ -107,7 +107,17 @@ func FetchFileBytes(filename string, client *p2p.Client, getHolders func(content
 						FileHash:   meta.FileHash,
 						ShardIndex: idx,
 					})
-					_ = client.SendToAllPeers(msg)
+					// Targeted-first: on the initial attempt, ask only the known
+					// reachable holders (holders holds their P2P ids). On retries, or
+					// when no holder is known, broadcast to all peers as a fallback so
+					// a stale or incomplete holder list can never block the fetch.
+					if len(holders) > 0 && attempt == 0 {
+						for _, h := range holders {
+							_ = client.SendToPeer(h, msg)
+						}
+					} else {
+						_ = client.SendToAllPeers(msg)
+					}
 
 					idleTimer := time.NewTimer(shardFirstChunkTimeout)
 				waitShard:
