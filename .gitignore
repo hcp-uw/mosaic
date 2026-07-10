@@ -6,3 +6,6 @@ bin/
 MosaicApp/DerivedData/
 *notes.md
 .env
+# macOS Finder metadata
+.DS_Store
+**/.DS_Store
