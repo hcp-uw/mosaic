@@ -2,10 +2,13 @@
 
 Mosaic's public infrastructure is a single server running two processes:
 
-| Process | Port | Purpose |
-|---|---|---|
-| `mosaic-stun` | 3478 UDP | Peer discovery and hole punching |
-| `mosaic-turn` | 3479 UDP | Relay fallback for peers behind strict NAT |
+| Process | Port | Protocol | Purpose |
+|---|---|---|---|
+| `mosaic-stun` | 3478 | UDP | Peer discovery, hole punching, TCP relay (embedded) |
+| `mosaic-stun` | 443 | TCP + TLS | TCP relay fallback for UDP-blocked networks |
+| `mosaic-turn` | 3479 | UDP | TURN relay fallback for symmetric NAT |
+
+The TCP relay is embedded inside `mosaic-stun` (not a separate binary). It uses a self-signed TLS certificate generated at startup and listens on port 443 so it passes through firewalls that only allow HTTPS traffic.
 
 Throughout this guide, replace the following placeholders with your actual values:
 
@@ -85,6 +88,8 @@ Run these commands on the server (after SSH-ing in).
 
 Both processes run in the background. PIDs are written to `/var/run/mosaic/` and logs go to `/var/log/mosaic/`.
 
+`mosaic-stun` also persists queue positions to `/var/run/mosaic/stun-positions.json` (override with `-position-store <path>`, or `-position-store ""` to disable) so nodes reclaim their original queue position across a server restart. The directory must be writable by the STUN process; `/var/run/mosaic/` already is under the default layout.
+
 ### Stop
 
 ```bash
@@ -163,10 +168,21 @@ Open the required ports and enable the firewall:
 ```bash
 ufw allow 22/tcp     # SSH — do this first so you don't lock yourself out
 ufw allow 3478/udp   # STUN
-ufw allow 3479/udp   # TURN
+ufw allow 3479/udp   # TURN (UDP relay)
+ufw allow 443/tcp    # TCP relay (TLS — fallback for UDP-blocked networks)
 ufw enable
 ufw status
 ```
+
+### Port 443 capability (if not running as root)
+
+Binding port 443 on Linux requires either root or the `net_bind_service` capability. `start.sh` tries to grant this automatically, but if it fails:
+
+```bash
+sudo setcap 'cap_net_bind_service=+ep' ./bin/mosaic-stun
+```
+
+Or run `start.sh` as root. If the capability is missing, the TCP relay will fail to bind and log an error — STUN and TURN will still work normally.
 
 ### Harden SSH
 
@@ -190,7 +206,22 @@ systemctl restart ssh
 Once the STUN server is running, clients connect with:
 
 ```bash
-mos join <server-ip>:3478
+mos join network
+```
+
+## Deploying new versions
+
+After pushing to github, if you want to bump then run
+```bash
+./scripts/bump.sh          # edits version.go, commits
+./scripts/deploy.sh        # pushes to server, publishes new version
+```
+
+or also
+
+```bash
+./scripts/bump.sh minor
+./scripts/bump.sh major
 ```
 
 ---
@@ -224,6 +255,14 @@ If the port is already in use (a stale process is running):
 pkill -9 -f mosaic-stun
 ./scripts/start.sh <server-ip>
 ```
+
+**TCP relay fails to bind port 443**
+The log will show `relay: listen :443: bind: permission denied`. Fix:
+```bash
+sudo setcap 'cap_net_bind_service=+ep' ./bin/mosaic-stun
+./scripts/stop.sh && ./scripts/start.sh <server-ip>
+```
+`start.sh` attempts this automatically, but `setcap` requires `sudo`. Alternatively, run the whole script as root.
 
 **PID file exists but process is dead**
 The stop script cleans up stale PIDs automatically. To do it manually:

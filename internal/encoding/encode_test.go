@@ -54,6 +54,91 @@ func TestNewEncoder_InvalidDirectories(t *testing.T) {
 	}
 }
 
+// --- ComputeBlockSize ---
+
+func TestComputeBlockSize_SmallFile(t *testing.T) {
+	// 20 KB file with 10 data shards → 2 KB block size, not 20 MB.
+	bs := ComputeBlockSize(20*1024, 10)
+	if bs != 2*1024 {
+		t.Errorf("expected 2048, got %d", bs)
+	}
+}
+
+func TestComputeBlockSize_ZeroFile(t *testing.T) {
+	bs := ComputeBlockSize(0, 10)
+	if bs < 1 {
+		t.Errorf("block size must be at least 1, got %d", bs)
+	}
+}
+
+func TestComputeBlockSize_LargeFileCapped(t *testing.T) {
+	// 10 GB file with 10 shards → would be 1 GB per shard, should be capped at 20 MB.
+	bs := ComputeBlockSize(10*1024*1024*1024, 10)
+	if bs != 20*1024*1024 {
+		t.Errorf("expected 20 MB cap, got %d", bs)
+	}
+}
+
+// --- ShardSizeIsProportionalToFileSize verifies the shard output isn't bloated ---
+
+func TestEncodeFile_ShardSizeProportionalToInput(t *testing.T) {
+	const dataShards = 4
+	const parityShards = 2
+	const totalShards = dataShards + parityShards
+
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".bin"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a 20 KB file — the bug produced hundreds of MB of shards for this.
+	fileSize := 20 * 1024
+	fileName := "small.txt"
+	data := make([]byte, fileSize)
+	for i := range data {
+		data[i] = byte(i % 256)
+	}
+	if err := os.WriteFile(filepath.Join(dir, fileName), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	enc, err := NewEncoder(dataShards, parityShards, dir, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.EncodeFile(fileName); err != nil {
+		t.Fatal(err)
+	}
+
+	// Each shard should be roughly fileSize/dataShards, not 20 MB.
+	expectedBlockSize := ComputeBlockSize(fileSize, dataShards)
+	if enc.BlockSize() != expectedBlockSize {
+		t.Errorf("BlockSize: got %d, want %d", enc.BlockSize(), expectedBlockSize)
+	}
+
+	// Total shard output should be ≤ 2× the file size (data + parity overhead),
+	// not hundreds of MB.
+	shardDir := filepath.Join(dir, ".bin", fileName)
+	entries, err := os.ReadDir(shardDir)
+	if err != nil {
+		t.Fatalf("shard dir not found: %v", err)
+	}
+	var totalShardBytes int64
+	for _, e := range entries {
+		info, _ := e.Info()
+		totalShardBytes += info.Size()
+	}
+
+	// Allow 3× headroom for parity + alignment padding.
+	maxAllowed := int64(fileSize * 3)
+	if totalShardBytes > maxAllowed {
+		t.Errorf("total shard output %d bytes exceeds %d (3× file size %d) — bloat detected",
+			totalShardBytes, maxAllowed, fileSize)
+	}
+	t.Logf("file=%d bytes, total shards=%d bytes (%.1f×)", fileSize, totalShardBytes,
+		float64(totalShardBytes)/float64(fileSize))
+}
+
 // --- Benchmark-like test for EncodeFile throughput ---
 
 func TestEncodeFile_Performance(t *testing.T) {

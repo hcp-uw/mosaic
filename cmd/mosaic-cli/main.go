@@ -13,5 +13,5 @@ func main() {
 		return
 	}
 
-	fmt.Println("welcome to mosaic")
+	fmt.Println("Welcome to Mosaic")
 }

@@ -17,9 +17,12 @@ type UploadFileRequest struct {
 
 type UploadFileResponse struct {
 	Success          bool   `json:"success"`
+	Busy             bool   `json:"busy"`
+	BusyWith         string `json:"busyWith"`
 	Details          string `json:"details"`
 	FileName         string `json:"fileName"`
 	AvailableStorage int    `json:"availableStorage"`
+	PeersReached     int    `json:"peersReached"`
 }
 
 type UploadFolderRequest struct {
@@ -38,12 +41,16 @@ type NetworkStatusRequest struct {
 }
 
 type NetworkStatusResponse struct {
-	Success          bool   `json:"success"`
-	Details          string `json:"details"`
-	NetworkStorage   int    `json:"networkStorage"`
-	AvailableStorage int    `json:"availableStorage"`
-	StorageUsed      int    `json:"storageUsed"`
-	Peers            int    `json:"peers"`
+	Success          bool     `json:"success"`
+	Details          string   `json:"details"`
+	NetworkStorage   int      `json:"networkStorage"`
+	AvailableStorage int      `json:"availableStorage"`
+	StorageUsed      int      `json:"storageUsed"`
+	Peers            int      `json:"peers"`
+	Connected        bool     `json:"connected"`
+	State            string   `json:"state"`
+	IsLeader         bool     `json:"isLeader"`
+	PeerAddresses    []string `json:"peerAddresses"`
 }
 
 type JoinRequest struct {
@@ -55,16 +62,30 @@ type JoinResponse struct {
 	Details string `json:"details"`
 }
 
-type NodeStatusRequest struct {
-	ID string `json:"id"`
+type NodeStatusRequest struct{}
+
+// SameKeyNode describes a peer that claims the same account identity and whether
+// the claim was verified via ECDSA challenge-response.
+type SameKeyNode struct {
+	PeerID        string `json:"peerID"`
+	Authenticated bool   `json:"authenticated"`
 }
 
 type NodeStatusResponse struct {
-	Success      bool   `json:"success"`
-	Details      string `json:"details"`
-	Username     string `json:"username"`
-	ID           string `json:"id"`
-	StorageShare int    `json:"storageShare"`
+	Success      bool          `json:"success"`
+	Details      string        `json:"details"`
+	Username     string        `json:"username"`
+	ID           string        `json:"id"`
+	StorageShare int           `json:"storageShare"`
+	SameKeyNodes []SameKeyNode `json:"sameKeyNodes"`
+}
+
+type LoginStatusRequest struct{}
+
+type LoginStatusResponse struct {
+	LoggedIn   bool   `json:"loggedIn"`
+	PublicKey  string `json:"publicKey"`
+	HasKeyPair bool   `json:"hasKeyPair"` // true if ~/.mosaic-user.key exists on disk
 }
 
 type LoginKeyRequest struct {
@@ -72,10 +93,9 @@ type LoginKeyRequest struct {
 }
 
 type LoginKeyResponse struct {
-	Success     bool   `json:"success"`
-	Details     string `json:"details"`
-	CurrentNode int    `json:"currentNode"`
-	Username    string `json:"username"`
+	Success         bool   `json:"success"`
+	Details         string `json:"details"`
+	AlreadyLoggedIn bool   `json:"alreadyLoggedIn"`
 }
 
 type SetStorageRequest struct {
@@ -157,11 +177,16 @@ type ListFilesRequest struct {
 	AccountID int `json:"accountID"`
 }
 
+type LocalFileEntry struct {
+	Name   string `json:"name"`
+	Cached bool   `json:"cached"`
+}
+
 type ListFilesResponse struct {
-	Success  bool     `json:"success"`
-	Details  string   `json:"details"`
-	Username string   `json:"username"`
-	Files    []string `json:"files"`
+	Success  bool             `json:"success"`
+	Details  string           `json:"details"`
+	Username string           `json:"username"`
+	Files    []LocalFileEntry `json:"files"`
 }
 
 type DeleteFileRequest struct {
@@ -173,6 +198,16 @@ type DeleteFileResponse struct {
 	Details          string `json:"details"`
 	FileName         string `json:"name"`
 	AvailableStorage int    `json:"availableStorage"`
+}
+
+type DeleteStubRequest struct {
+	FilePath string `json:"filePath"`
+}
+
+type DeleteStubResponse struct {
+	Success  bool   `json:"success"`
+	Details  string `json:"details"`
+	FileName string `json:"name"`
 }
 
 type DeleteFolderRequest struct {
@@ -191,6 +226,8 @@ type DownloadFileRequest struct {
 
 type DownloadFileResponse struct {
 	Success          bool   `json:"success"`
+	Busy             bool   `json:"busy"`
+	BusyWith         string `json:"busyWith"`
 	Details          string `json:"details"`
 	FileName         string `json:"name"`
 	AvailableStorage int    `json:"availableStorage"`
@@ -241,4 +278,65 @@ type VersionResponse struct {
 	Success bool   `json:"success"`
 	Details string `json:"details"`
 	Version string `json:"version"`
+}
+
+type RenameFileRequest struct {
+	FilePath string `json:"filePath"`
+	NewName  string `json:"newName"`
+}
+
+type RenameFileResponse struct {
+	Success     bool   `json:"success"`
+	Details     string `json:"details"`
+	FileName    string `json:"fileName"`
+	Username    string `json:"username"`
+	CurrentNode int    `json:"currentNode"`
+}
+
+type ListManifestRequest struct{}
+
+type ManifestFileEntry struct {
+	Name      string `json:"name"`
+	Size      int    `json:"size"`
+	NodeID    int    `json:"nodeID"`
+	DateAdded string `json:"dateAdded"`
+	Cached    bool   `json:"cached"`
+}
+
+type ListManifestResponse struct {
+	Success bool                `json:"success"`
+	Details string              `json:"details"`
+	Files   []ManifestFileEntry `json:"files"`
+}
+
+type DebugSendMsgRequest struct {
+	Message string `json:"message"`
+}
+
+type DebugSendMsgResponse struct {
+	Success   bool   `json:"success"`
+	Details   string `json:"details"`
+	PeerCount int    `json:"peerCount"`
+}
+
+type DebugTransferRequest struct{}
+
+type DebugTransferResponse struct {
+	Success bool   `json:"success"`
+	Details string `json:"details"`
+}
+
+type DoctorRequest struct{}
+
+// DoctorCheck is one line of the `mos doctor` self-test report.
+// Status is one of: "ok", "warn", "fail", "skip".
+type DoctorCheck struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Detail string `json:"detail"`
+}
+
+type DoctorResponse struct {
+	Success bool          `json:"success"`
+	Checks  []DoctorCheck `json:"checks"`
 }

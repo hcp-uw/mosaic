@@ -7,15 +7,13 @@ import (
 	"github.com/hcp-uw/mosaic/internal/daemon/handlers/helpers"
 )
 
-// Deletes a file from the network and returns an DownloadFolderResponse
+// Downloads a folder from the network. TODO: implement real folder download.
 func DownloadFolder(req protocol.DownloadFolderRequest) protocol.DownloadFolderResponse {
-	fmt.Println("Daemon: handling download for", req.FolderPath)
-	// all the actual logic and stuff goes here
-	// Details goes in the logs (not printed in terminal)
+	fmt.Println("Daemon: handling folder download for", req.FolderPath)
 	return protocol.DownloadFolderResponse{
 		Success:          true,
 		Details:          "Download processed by daemon",
-		FolderName:       removePath(req.FolderPath), // Remove path code in upload.go
+		FolderName:       removePath(req.FolderPath),
 		AvailableStorage: helpers.AvailableStorage(),
 	}
 }

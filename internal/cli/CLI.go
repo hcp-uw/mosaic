@@ -1,21 +1,28 @@
 package cli
 
 import (
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/hcp-uw/mosaic/internal/cli/client"
 	"github.com/hcp-uw/mosaic/internal/cli/protocol"
+	"github.com/hcp-uw/mosaic/internal/cli/shared"
 	"github.com/hcp-uw/mosaic/internal/daemon/handlers/helpers"
+	buildversion "github.com/hcp-uw/mosaic/internal/version"
 )
 
 //go:embed HelpMessage.txt
@@ -32,33 +39,24 @@ func Run(Args []string) {
 
 	switch args[1] {
 	case "login":
-		if len(args) != 4 {
+		if len(args) == 3 && args[2] == "status" {
+			loginStatus()
+		} else if len(args) == 3 {
+			loginWithKey(args[2])
+		} else {
 			fmt.Println()
 			fmt.Println("Usage:")
-			fmt.Println("- mos login key <key>    Login with a key.")
-			os.Exit(1)
-		}
-		switch args[2] {
-		case "key":
-			loginWithKey()
-		default:
-			fmt.Println("Unknown argument:", args[2])
+			fmt.Println("  mos login <key>      Log in with your key.")
+			fmt.Println("  mos login status     Show current login status.")
 			os.Exit(1)
 		}
 	case "logout":
-		if len(args) != 3 {
+		if len(args) != 3 || args[2] != "account" {
 			fmt.Println()
-			fmt.Println("Usage:")
-			fmt.Println("- mos logout account    Logout from the account.")
+			fmt.Println("Usage: mos logout account")
 			os.Exit(1)
 		}
-		switch args[2] {
-		case "account":
-			logoutAccount()
-		default:
-			fmt.Println("Unknown argument:", args[2])
-			os.Exit(1)
-		}
+		logoutAccount()
 	case "version":
 		if len(args) != 2 {
 			fmt.Println()
@@ -68,15 +66,19 @@ func Run(Args []string) {
 		}
 		version()
 	case "join":
-		if len(args) != 4 {
+		if len(args) < 3 {
 			fmt.Println()
 			fmt.Println("Usage:")
-			fmt.Println("- mos join network <Server address to connect to (e.g., 127.0.0.1:3478)> Join the network.")
+			fmt.Println("- mos join network    Join the network.")
 			os.Exit(1)
 		}
 		switch args[2] {
 		case "network":
-			joinNetwork(args[3])
+			addr := stunServerAddr()
+			if len(args) == 4 {
+				addr = args[3] // optional override
+			}
+			joinNetwork(addr)
 		default:
 			fmt.Println("Unknown argument:", args[2])
 			os.Exit(1)
@@ -110,9 +112,9 @@ func Run(Args []string) {
 			}
 			statusNetwork()
 		case "node":
-			if len(args) != 4 {
+			if len(args) != 3 {
 				fmt.Println("Usage:")
-				fmt.Println("- mos status node <node_id>    View node status.")
+				fmt.Println("- mos status node    Scan for other nodes running under your account key.")
 				os.Exit(1)
 			}
 			statusNode()
@@ -169,12 +171,15 @@ func Run(Args []string) {
 	case "list":
 		if len(args) != 3 {
 			fmt.Println("Usage:")
-			fmt.Println("- mos list file    List all files on the network.")
+			fmt.Println("- mos list file        List files tracked on this machine.")
+			fmt.Println("- mos list manifest    List all files in your network manifest.")
 			os.Exit(1)
 		}
 		switch args[2] {
 		case "file":
 			listFile()
+		case "manifest":
+			listManifest()
 		default:
 			fmt.Println("Unknown argument:", args[2])
 			os.Exit(1)
@@ -228,22 +233,54 @@ func Run(Args []string) {
 			fmt.Println("Unknown argument:", args[2])
 			os.Exit(1)
 		}
-	case "delete":
-		if len(args) != 4 {
+	case "rename":
+		if len(args) != 5 || args[2] != "file" {
 			fmt.Println("Usage:")
-			fmt.Println("- mos delete file <path>    Delete a file.")
-			fmt.Println("- mos delete folder <path>  Delete a folder.")
+			fmt.Println("- mos rename file <oldname> <newname>    Rename a file on the network.")
 			os.Exit(1)
 		}
-		switch args[2] {
-		case "file":
+		if args[4] == "-" || args[4] == "--" {
+			fmt.Println("Error: invalid new name. Do not use -> syntax.")
+			fmt.Println("Usage:")
+			fmt.Println("- mos rename file <oldname> <newname>    Rename a file on the network.")
+			os.Exit(1)
+		}
+		renameFile()
+	case "delete":
+		switch {
+		case len(args) == 4 && args[2] == "file":
 			deleteFile()
-		case "folder":
+		case len(args) == 5 && args[2] == "file" && args[3] == "-s":
+			deleteStub()
+		case len(args) == 4 && args[2] == "folder":
 			deleteFolder()
 		default:
-			fmt.Println("Unknown argument:", args[2])
+			fmt.Println("Usage:")
+			fmt.Println("- mos delete file <name>       Delete a file from the network.")
+			fmt.Println("- mos delete file -s <name>    Remove local stub only (keeps file in manifest).")
+			fmt.Println("- mos delete folder <name>     Delete a folder.")
 			os.Exit(1)
 		}
+	case "debug":
+		switch {
+		case len(args) == 4 && args[2] == "msg":
+			debugSendMsg(args[3])
+		case len(args) == 3 && args[2] == "transfer":
+			debugTransfer()
+		default:
+			fmt.Println("Usage:")
+			fmt.Println("  mos debug msg \"<text>\"      Send a text message to all peers (tests P2P link)")
+			fmt.Println("  mos debug transfer           Log transfer diagnostics every 500ms for 15s")
+			os.Exit(1)
+		}
+	case "doctor":
+		if len(args) != 2 {
+			fmt.Println("Usage: mos doctor    Run connectivity and health self-tests.")
+			os.Exit(1)
+		}
+		doctor()
+	case "wipe":
+		wipeState()
 	case "shutdown":
 		if len(args) != 2 {
 			fmt.Println("Please give a valid command.")
@@ -259,6 +296,15 @@ func Run(Args []string) {
 }
 
 // Connects the user to the mosaic network
+// stunServerAddr returns the STUN server address from STUN_SERVER env var,
+// defaulting to the production droplet.
+func stunServerAddr() string {
+	if v := os.Getenv("STUN_SERVER"); v != "" {
+		return v
+	}
+	return shared.DefaultSTUNServer
+}
+
 func joinNetwork(serverAddr string) {
 	resp, err := client.SendRequest("joinNetwork", protocol.JoinRequest{ServerAddress: serverAddr})
 	exitOnErr(err, "Error joining network.")
@@ -267,8 +313,60 @@ func joinNetwork(serverAddr string) {
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
-	message := fmt.Sprintf("\nJoined network successfully.\n- Connected to %d peers.\n", 0)
-	fmt.Println(message)
+	if !cmdResp.Success {
+		fmt.Printf("\nCould not join network: %s\n", cmdResp.Details)
+		os.Exit(1)
+	}
+
+	// Block until the post-join manifest + shard sync has settled.
+	// This prevents uploading or downloading against a half-synced node.
+	fmt.Println("\nConnected to network.")
+	httpClient := &http.Client{Timeout: 500 * time.Millisecond}
+	frames := []string{"|", "/", "-", "\\"}
+	frame := 0
+	start := time.Now()
+
+	for {
+		time.Sleep(300 * time.Millisecond)
+		elapsed := int(time.Since(start).Seconds())
+
+		var status struct {
+			Settled        bool  `json:"settled"`
+			ManifestSynced bool  `json:"manifestSynced"`
+			ShardsReceived int   `json:"shardsReceived"`
+			ElapsedMs      int64 `json:"elapsedMs"`
+		}
+		if r, err2 := httpClient.Get("http://localhost:7777/join-sync-status"); err2 == nil {
+			json.NewDecoder(r.Body).Decode(&status)
+			r.Body.Close()
+		}
+
+		if status.Settled {
+			fmt.Print("\r" + strings.Repeat(" ", 60) + "\r")
+			if status.ShardsReceived > 0 {
+				fmt.Printf("  Sync complete in %ds — %d shards received.\n\n",
+					elapsed, status.ShardsReceived)
+			} else {
+				fmt.Printf("  Sync complete in %ds.\n\n", elapsed)
+			}
+			break
+		}
+
+		if status.ManifestSynced {
+			fmt.Printf("\r  %s  Syncing shards (%d received)...  %ds  ",
+				frames[frame%len(frames)], status.ShardsReceived, elapsed)
+		} else {
+			fmt.Printf("\r  %s  Waiting for peers...  %ds  ", frames[frame%len(frames)], elapsed)
+		}
+		frame++
+
+		if elapsed > 30 {
+			fmt.Print("\r" + strings.Repeat(" ", 60) + "\r")
+			fmt.Println("  Sync timed out after 30s — proceeding anyway.")
+			fmt.Println()
+			break
+		}
+	}
 }
 
 // Gets overall network status
@@ -276,26 +374,70 @@ func statusNetwork() {
 	resp, err := client.SendRequest("statusNetwork", protocol.NetworkStatusRequest{})
 	exitOnErr(err, "Error getting network status.")
 
-	var cmdResp protocol.NetworkStatusResponse
-	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
+	var r protocol.NetworkStatusResponse
+	if err := mapToStruct(resp.Data, &r); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
-	message := fmt.Sprintf("\nNetwork Status:\n- Total Network Storage: %d GB\n- Your Available Storage: %d GB\n- Number of Peers: %d\n",
-		cmdResp.NetworkStorage, cmdResp.AvailableStorage, cmdResp.Peers)
-	fmt.Println(message)
+
+	fmt.Println()
+	fmt.Println("Network Status")
+	fmt.Println("──────────────")
+
+	if !r.Connected {
+		fmt.Println("  Connection:  not connected (run: mos join network")
+	} else {
+		role := "member"
+		if r.IsLeader {
+			role = "leader"
+		}
+		fmt.Printf("  Connection:  connected (%s)\n", role)
+		fmt.Printf("  State:       %s\n", r.State)
+		fmt.Printf("  Peers:       %d\n", r.Peers)
+		if len(r.PeerAddresses) > 0 {
+			fmt.Println("  Peer addresses:")
+			for _, addr := range r.PeerAddresses {
+				fmt.Printf("    - %s\n", addr)
+			}
+		}
+	}
+
+	fmt.Println()
+	fmt.Printf("  Network storage:    %d GB\n", r.NetworkStorage)
+	fmt.Printf("  Available storage:  %d GB\n", r.AvailableStorage)
+	fmt.Println()
 }
 
 // Gets info about a specific node in the network
 func statusNode() {
-	nodeID := args[3]
-	resp, err := client.SendRequest("statusNode", protocol.NodeStatusRequest{ID: nodeID})
+	waitForActiveOp()
+	resp, err := client.SendRequest("statusNode", protocol.NodeStatusRequest{})
 	exitOnErr(err, "Error getting node status.")
 
 	var cmdResp protocol.NodeStatusResponse
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
-	message := fmt.Sprintf("\nNode status processed successfully.\n- Node ID: %s@node-%v\n- Storage Shared: %d GB\n", cmdResp.Username, cmdResp.ID, cmdResp.StorageShare)
+
+	if !cmdResp.Success {
+		fmt.Println("\nError:", cmdResp.Details)
+		os.Exit(1)
+	}
+
+	message := fmt.Sprintf("\nNode scan complete.\n- This node: %s (storage shared: %d GB)\n- %s\n",
+		cmdResp.Username, cmdResp.StorageShare, cmdResp.Details)
+
+	if len(cmdResp.SameKeyNodes) == 0 {
+		message += "- No other nodes running under this account were found.\n"
+	} else {
+		message += "- Same-account nodes found:\n"
+		for _, n := range cmdResp.SameKeyNodes {
+			status := "AUTHENTICATED"
+			if !n.Authenticated {
+				status = "FAILED (could not verify key)"
+			}
+			message += fmt.Sprintf("  • %s... [%s]\n", n.PeerID, status)
+		}
+	}
 	fmt.Println(message)
 }
 
@@ -313,31 +455,64 @@ func statusAccount() {
 	fmt.Println(message)
 }
 
-// Logs in with a provided key
-func loginWithKey() {
-	key := args[3]
+// Shows current login status
+func loginStatus() {
+	resp, err := client.SendRequest("loginStatus", protocol.LoginStatusRequest{})
+	exitOnErr(err, "Error getting login status.")
+
+	var cmdResp protocol.LoginStatusResponse
+	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
+		exitOnErr(err, "Error parsing response.")
+	}
+	if !cmdResp.LoggedIn {
+		fmt.Println("\nNot logged in.")
+		return
+	}
+
+	keyStatus := "missing"
+	if cmdResp.HasKeyPair {
+		keyStatus = "present"
+	}
+	raw, _ := hex.DecodeString(cmdResp.PublicKey)
+	h := sha256.Sum256(raw)
+	fp := hex.EncodeToString(h[:])[:8]
+	fmt.Printf("\nLogged in.\n- Identity:  %s...\n- Key pair:  %s\n", fp, keyStatus)
+	if !cmdResp.HasKeyPair {
+		fmt.Println("\nWarning: key pair file is missing. Try logging out and back in.")
+	}
+}
+
+// Logs in with a key — no auth server, identity derived from the key.
+func loginWithKey(key string) {
 	resp, err := client.SendRequest("loginKey", protocol.LoginKeyRequest{Key: key})
-	exitOnErr(err, "Error logging in with key.")
+	exitOnErr(err, "Error logging in.")
 
 	var cmdResp protocol.LoginKeyResponse
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
-	message := fmt.Sprintf("\nLogged in with key successfully.\n- Current Node: %s@node-%v\n", cmdResp.Username, cmdResp.CurrentNode)
-	fmt.Println(message)
+	if !cmdResp.Success {
+		if cmdResp.AlreadyLoggedIn {
+			fmt.Println("\nAlready logged in. Run 'mos logout account' first.")
+		} else {
+			fmt.Println("\nLogin failed:", cmdResp.Details)
+		}
+		os.Exit(1)
+	}
+	fmt.Println("\n" + cmdResp.Details)
 }
 
 // Logs out of the current account
 func logoutAccount() {
-	resp, err := client.SendRequest("logout", protocol.LogoutRequest{AccountID: helpers.GetAccountID()})
+	waitForActiveOp()
+	resp, err := client.SendRequest("logout", protocol.LogoutRequest{})
 	exitOnErr(err, "Error logging out.")
 
 	var cmdResp protocol.LogoutResponse
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
-	message := fmt.Sprintf("\nLogged out successfully.\n- Username: %s\n", cmdResp.Username)
-	fmt.Println(message)
+	fmt.Println("\nLogged out successfully.")
 }
 
 // List some data on all the peers in the network
@@ -350,6 +525,10 @@ func peersNetwork() {
 		exitOnErr(err, "Error parsing response.")
 	}
 
+	if !cmdResp.Success || len(cmdResp.Peers) == 0 {
+		fmt.Println("\nYou are not connected to anyone.")
+		return
+	}
 	message := "\nPeers in Network:\n"
 	for _, peer := range cmdResp.Peers {
 		message += fmt.Sprintf("- %s@node-%d | Shared: %d GB\n", peer.Username, peer.NodeID, peer.StorageShared)
@@ -385,6 +564,7 @@ func setStorage() {
 
 // Empties all storage allocated by the user in the network (deletes all their data from the network)
 func emptyStorage() {
+	waitForActiveOp()
 	resp, err := client.SendRequest("emptyStorage", protocol.EmptyStorageRequest{AccountID: helpers.GetAccountID()})
 	exitOnErr(err, "Error emptying storage.")
 
@@ -399,6 +579,7 @@ func emptyStorage() {
 
 // The user leaves the network, deleting all their data from the network as well?
 func leaveNetwork() {
+	waitForActiveOp()
 	resp, err := client.SendRequest("leaveNetwork", protocol.LeaveNetworkRequest{AccountID: helpers.GetAccountID()})
 	exitOnErr(err, "Error leaving network.")
 
@@ -421,11 +602,79 @@ func listFile() {
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
-	message := "\nFiles on Network:\n"
-	for _, file := range cmdResp.Files {
-		message += fmt.Sprintf("- %s\n", file)
+	if len(cmdResp.Files) == 0 {
+		fmt.Println("\nNo local files.")
+		return
 	}
-	fmt.Println(message)
+	fmt.Println("\nLocal Files:")
+	for _, f := range cmdResp.Files {
+		status := "stub"
+		if f.Cached {
+			status = "cached"
+		}
+		fmt.Printf("- %-30s [%s]\n", f.Name, status)
+	}
+	fmt.Println()
+}
+
+// Lists all files in the user's network manifest (cross-machine view)
+func listManifest() {
+	resp, err := client.SendRequest("listManifest", protocol.ListManifestRequest{})
+	exitOnErr(err, "Error listing manifest.")
+
+	var cmdResp protocol.ListManifestResponse
+	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
+		exitOnErr(err, "Error parsing response.")
+	}
+	if !cmdResp.Success {
+		fmt.Println("\nError:", cmdResp.Details)
+		os.Exit(1)
+	}
+	if len(cmdResp.Files) == 0 {
+		fmt.Println("\nNo files in network manifest.")
+		return
+	}
+	fmt.Println("\nNetwork Manifest:")
+	for _, f := range cmdResp.Files {
+		cached := "stub"
+		if f.Cached {
+			cached = "cached"
+		}
+		fmt.Printf("- %-30s  %d KB  added %s  [%s]\n", f.Name, f.Size/1024, f.DateAdded, cached)
+	}
+	fmt.Println()
+}
+
+// waitForActiveOp polls the daemon's /active-op endpoint and blocks until
+// no operation is running, printing a status line while waiting.
+func waitForActiveOp() {
+	httpClient := &http.Client{Timeout: 500 * time.Millisecond}
+	type opResp struct {
+		Kind        string `json:"kind"`
+		Description string `json:"description"`
+	}
+	waiting := false
+	for {
+		r, err := httpClient.Get("http://localhost:7777/active-op")
+		if err != nil {
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		r.Body.Close()
+		s := strings.TrimSpace(string(body))
+		if s == "null" || s == "" {
+			if waiting {
+				fmt.Print("\r" + strings.Repeat(" ", 60) + "\r")
+			}
+			return
+		}
+		var op opResp
+		if json.Unmarshal(body, &op) == nil && op.Description != "" {
+			fmt.Printf("\r  Waiting: %s...  ", op.Description)
+			waiting = true
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 // Uploads a file to the network
@@ -444,20 +693,98 @@ func uploadFile() {
 		os.Exit(1)
 	}
 
-	fileSize := fileInfo.Size() / 1024
-	fmt.Printf("Uploading file: %s (%d KB)\n", fileInfo.Name(), fileSize)
+	absPath, err := filepath.Abs(filePath)
+	exitOnErr(err, "Error resolving path:")
+
+	fileSizeBytes := fileInfo.Size()
+	fmt.Printf("Uploading file: %s (%d KB)\n", fileInfo.Name(), fileSizeBytes/1024)
+
+	waitForActiveOp()
+
+	// Allow 90s base + 30s per 10 MB, capped at 15 minutes. The old formula
+	// (60s + 60s/GB) gave only 2 minutes for a 100 MB file — too tight for slow
+	// or relay paths. With QUIC and 256 KB chunks, typical uploads are much
+	// faster; the cap exists to surface genuine hangs rather than wait forever.
+	fileSizeMB := fileSizeBytes / (1024 * 1024)
+	uploadTimeout := 90*time.Second + time.Duration(fileSizeMB/10+1)*30*time.Second
+	if uploadTimeout > 15*time.Minute {
+		uploadTimeout = 15 * time.Minute
+	}
+
+	// Progress bar polls /upload-progress on the daemon's HTTP server.
+	// While the daemon is still hashing/encoding (total==0), shows a spinner.
+	// Once shard dispatch starts (total>0), switches to a percentage bar.
+	done := make(chan struct{})
+	start := time.Now()
+	var spinnerWg sync.WaitGroup
+	spinnerWg.Add(1)
+	go func() {
+		defer spinnerWg.Done()
+		httpClient := &http.Client{Timeout: 500 * time.Millisecond}
+		frames := []string{"|", "/", "-", "\\"}
+		frame := 0
+		for {
+			select {
+			case <-done:
+				return
+			case <-time.After(300 * time.Millisecond):
+			}
+			elapsed := int(time.Since(start).Seconds())
+
+			// Poll daemon progress endpoint.
+			var dispatched, total int
+			if r, err := httpClient.Get("http://localhost:7777/upload-progress"); err == nil {
+				var body struct {
+					Dispatched int `json:"dispatched"`
+					Total      int `json:"total"`
+				}
+				if json.NewDecoder(r.Body).Decode(&body) == nil {
+					dispatched, total = body.Dispatched, body.Total
+				}
+				r.Body.Close()
+			}
+
+			if total > 0 {
+				pct := dispatched * 100 / total
+				filled := pct / 5 // 20-cell bar
+				bar := strings.Repeat("█", filled) + strings.Repeat("░", 20-filled)
+				fmt.Printf("\r  [%s] %3d%%  %ds  ", bar, pct, elapsed)
+			} else {
+				fmt.Printf("\r  %s  preparing...  %ds  ", frames[frame%len(frames)], elapsed)
+				frame++
+			}
+		}
+	}()
+
 	resp, uploadErr := client.SendRequest("uploadFile", protocol.UploadFileRequest{
-		Path: filePath,
-	})
+		Path: absPath,
+	}, uploadTimeout)
+	elapsed := time.Since(start)
+	close(done)
+	spinnerWg.Wait()
+	fmt.Print("\r" + strings.Repeat(" ", 50) + "\r") // clear progress line
+
 	exitOnErr(uploadErr, "Error uploading file.")
 
 	var cmdResp protocol.UploadFileResponse
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
-	message := fmt.Sprintf("\nFile '%v' uploaded successfully to network.\n- Available storage remaining: %d GB.\n",
-		cmdResp.FileName, cmdResp.AvailableStorage)
-	fmt.Println(message)
+	if !cmdResp.Success && cmdResp.Busy {
+		fmt.Printf("\nAnother operation is in progress (%s). Please try again in a moment.\n", cmdResp.BusyWith)
+		os.Exit(1)
+	}
+	if !cmdResp.Success {
+		fmt.Printf("\nError uploading file: %s\n", cmdResp.Details)
+		os.Exit(1)
+	}
+	if cmdResp.PeersReached > 0 {
+		fmt.Printf("\nFile '%v' saved locally and distributed to %d peer(s).\n- Time: %s\n- Available storage remaining: %d GB.\n\n",
+			cmdResp.FileName, cmdResp.PeersReached, elapsed.Round(time.Second), cmdResp.AvailableStorage)
+	} else {
+		fmt.Printf("\nFile '%v' saved locally (no peers connected — shards will be distributed when you join the network).\n- Time: %s\n- Available storage remaining: %d GB.\n\n",
+			cmdResp.FileName, elapsed.Round(time.Second), cmdResp.AvailableStorage)
+	}
 }
 
 // Uploads a folder to the network
@@ -504,36 +831,113 @@ func uploadFolder() {
 // Downloads a file from the network
 func downloadFile() {
 	filePath := args[3]
-	resp, err := client.SendRequest("downloadFile", protocol.DownloadFileRequest{FilePath: filePath})
-	exitOnErr(err, "Error downloading "+filePath+": ")
+	fmt.Printf("Downloading %s...\n", filePath)
+
+	waitForActiveOp()
+
+	done := make(chan struct{})
+	start := time.Now()
+	var spinnerWg sync.WaitGroup
+	spinnerWg.Add(1)
+	go func() {
+		defer spinnerWg.Done()
+		httpClient := &http.Client{Timeout: 500 * time.Millisecond}
+		frames := []string{"|", "/", "-", "\\"}
+		frame := 0
+		for {
+			select {
+			case <-done:
+				return
+			case <-time.After(300 * time.Millisecond):
+			}
+			elapsed := int(time.Since(start).Seconds())
+
+			var prog struct {
+				Received int `json:"received"`
+				Needed   int `json:"needed"`
+			}
+			if r, err := httpClient.Get("http://localhost:7777/download-progress"); err == nil {
+				json.NewDecoder(r.Body).Decode(&prog)
+				r.Body.Close()
+			}
+
+			if prog.Needed > 0 {
+				pct := prog.Received * 100 / prog.Needed
+				filled := pct / 5
+				bar := strings.Repeat("█", filled) + strings.Repeat("░", 20-filled)
+				fmt.Printf("\r  [%s] %3d%%  fetching shards (%d/%d)  %ds  ",
+					bar, pct, prog.Received, prog.Needed, elapsed)
+			} else {
+				fmt.Printf("\r  %s  fetching...  %ds  ", frames[frame%len(frames)], elapsed)
+				frame++
+			}
+		}
+	}()
+
+	resp, dlErr := client.SendRequest("downloadFile", protocol.DownloadFileRequest{FilePath: filePath}, 2*time.Minute)
+	elapsed := time.Since(start)
+	close(done)
+	spinnerWg.Wait()
+	fmt.Print("\r" + strings.Repeat(" ", 60) + "\r")
+
+	exitOnErr(dlErr, "Error downloading "+filePath+": ")
 
 	var cmdResp protocol.DownloadFileResponse
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
-	message := fmt.Sprintf("\nFile '%v' downloaded successfully from network.\n"+
-		"- Storage Remaining: %d GB\n", cmdResp.FileName, cmdResp.AvailableStorage)
-	fmt.Println(message)
+	if !cmdResp.Success && cmdResp.Busy {
+		fmt.Printf("\nAnother operation is in progress (%s). Please try again in a moment.\n", cmdResp.BusyWith)
+		os.Exit(1)
+	}
+	if !cmdResp.Success {
+		fmt.Printf("\nError downloading '%v': %s\n", cmdResp.FileName, cmdResp.Details)
+		os.Exit(1)
+	}
+	fmt.Printf("\nFile '%v' downloaded successfully.\n- Time: %s\n- Storage Remaining: %d GB\n\n",
+		cmdResp.FileName, elapsed.Round(time.Second), cmdResp.AvailableStorage)
 }
 
 // Downloads a folder from the network
 func downloadFolder() {
 	filePath := args[3]
-	resp, err := client.SendRequest("downloadFolder", protocol.DownloadFolderRequest{FolderPath: filePath})
+	resp, err := client.SendRequest("downloadFolder", protocol.DownloadFolderRequest{FolderPath: filePath}, 2*time.Minute)
 	exitOnErr(err, "Error downloading "+filePath+": ")
 
 	var cmdResp protocol.DownloadFolderResponse
 	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
 		exitOnErr(err, "Error parsing response.")
 	}
+	if !cmdResp.Success {
+		fmt.Printf("\nError downloading '%v': %s\n", cmdResp.FolderName, cmdResp.Details)
+		os.Exit(1)
+	}
 	message := fmt.Sprintf("\nFolder '%v' downloaded successfully from network.\n"+
 		"- Storage Remaining: %d GB\n", cmdResp.FolderName, cmdResp.AvailableStorage)
 	fmt.Println(message)
 }
 
+// Removes only the local stub/cache without touching the manifest
+func deleteStub() {
+	filePath := args[4]
+	resp, err := client.SendRequest("deleteStub", protocol.DeleteStubRequest{FilePath: filePath})
+	exitOnErr(err, "Error deleting stub for "+filePath+": ")
+
+	var cmdResp protocol.DeleteStubResponse
+	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
+		exitOnErr(err, "Error parsing response.")
+	}
+	if !cmdResp.Success {
+		fmt.Println("\nError:", cmdResp.Details)
+		os.Exit(1)
+	}
+	fmt.Printf("\n%s\n", cmdResp.Details)
+}
+
 // Deletes a file from the network
 func deleteFile() {
 	filePath := args[3]
+	waitForActiveOp()
 	resp, err := client.SendRequest("deleteFile", protocol.DeleteFileRequest{FilePath: filePath})
 	exitOnErr(err, "Error deleting "+filePath+": ")
 
@@ -562,6 +966,31 @@ func deleteFolder() {
 	fmt.Println(message)
 }
 
+// Renames a file on the network
+func renameFile() {
+	oldName := args[3]
+	newName := args[4]
+	waitForActiveOp()
+	resp, err := client.SendRequest("renameFile", protocol.RenameFileRequest{FilePath: oldName, NewName: newName})
+	if err != nil {
+		fmt.Println("Error: could not reach daemon. Is mosaic-node running?")
+		fmt.Println("Start it with: mosaic-node &")
+		fmt.Println("Details:", err)
+		os.Exit(1)
+	}
+
+	var cmdResp protocol.RenameFileResponse
+	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
+		fmt.Println("Error parsing response:", err)
+		os.Exit(1)
+	}
+	if !cmdResp.Success {
+		fmt.Println("Error:", cmdResp.Details)
+		os.Exit(1)
+	}
+	fmt.Printf("\nRenamed '%s' to '%s' successfully.\n", oldName, cmdResp.FileName)
+}
+
 // Gets info about a file from the network
 func fileInfo() {
 	filePath := args[3]
@@ -574,9 +1003,10 @@ func fileInfo() {
 		exitOnErr(err, "Error parsing response.")
 	}
 	message := fmt.Sprintf("\nFile '%v' info retrieved successfully from network.\n"+
-		"- NodeID: %s@node-%v\n"+
+		"- Owner:      %s\n"+
+		"- Node:       %d\n"+
 		"- Date Added: %v\n"+
-		"- Size: %v GB\n", cmdResp.FileName, cmdResp.Username, cmdResp.NodeID, cmdResp.DateAdded, cmdResp.Size)
+		"- Size:       %d KB\n", cmdResp.FileName, cmdResp.Username, cmdResp.NodeID, cmdResp.DateAdded, cmdResp.Size/1024)
 	fmt.Println(message)
 }
 
@@ -602,17 +1032,161 @@ func folderInfo() {
 	fmt.Println(message)
 }
 
-// Prints the current version of mos
 func version() {
-	resp, err := client.SendRequest("getVersion", protocol.VersionRequest{})
-	exitOnErr(err, "Error getting version info: ")
+	fmt.Printf("mos version %s  (released %s)\n", buildversion.Version, buildversion.Date)
 
-	var cmdResp protocol.VersionResponse
-	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
-		exitOnErr(err, "Error parsing response.")
+	latest, err := fetchLatestVersion()
+	if err != nil {
+		return // no internet or no releases yet — silently skip
 	}
-	message := fmt.Sprintf("\nmos version %v\n", cmdResp.Version)
-	fmt.Println(message)
+	if newerVersionAvailable(latest, buildversion.Version) {
+		fmt.Printf("A newer version is available: %s — run ./install.sh to update\n", latest)
+	} else {
+		fmt.Println("Up to date")
+	}
+}
+
+// fetchLatestVersion fetches the plain-text version string served by the
+// droplet's version server (deployed by deploy.sh). Returns an error if the
+// request fails, times out, or the server is unreachable.
+func fetchLatestVersion() (string, error) {
+	httpClient := &http.Client{Timeout: 3 * time.Second}
+	resp, err := httpClient.Get(buildversion.LatestReleaseURL)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(body)), nil
+}
+
+// newerVersionAvailable reports whether latest is strictly greater than current.
+// Both are expected to be "major.minor.patch" strings (leading "v" already stripped).
+func newerVersionAvailable(latest, current string) bool {
+	la := splitVersion(latest)
+	cu := splitVersion(current)
+	for i := range la {
+		if la[i] > cu[i] {
+			return true
+		}
+		if la[i] < cu[i] {
+			return false
+		}
+	}
+	return false
+}
+
+func splitVersion(v string) [3]int {
+	var r [3]int
+	parts := strings.SplitN(strings.TrimPrefix(v, "v"), ".", 3)
+	for i, p := range parts {
+		if i >= 3 {
+			break
+		}
+		r[i], _ = strconv.Atoi(p)
+	}
+	return r
+}
+
+// wipeState deletes all local Mosaic state: ~/Mosaic/, all ~/.mosaic-* key files,
+// and the daemon's runtime files. Intended for testing/reset only.
+func wipeState() {
+	fmt.Println("WARNING: This will permanently delete all local Mosaic state:")
+	fmt.Printf("  - %s  (files, shards, manifests)\n", shared.MosaicDir())
+	fmt.Println("  - ~/.mosaic-* key/session files")
+	fmt.Println("  - Daemon PID, socket, and log files")
+	fmt.Println()
+	fmt.Print("Type \"wipe\" to confirm: ")
+
+	var confirm string
+	fmt.Scanln(&confirm)
+	if confirm != "wipe" {
+		fmt.Println("Aborted.")
+		os.Exit(0)
+	}
+
+	goos := runtime.GOOS
+
+	// Gracefully leave the P2P network first (notifies peers) if the daemon is up.
+	// Best-effort — if the daemon isn't running we skip straight to killing it.
+	if isDaemonRunning(goos) {
+		fmt.Print("Leaving network...")
+		resp, err := client.SendRequest("leaveNetwork", protocol.LeaveNetworkRequest{AccountID: helpers.GetAccountID()})
+		if err == nil {
+			var cmdResp protocol.LeaveNetworkResponse
+			if mapToStruct(resp.Data, &cmdResp) == nil && cmdResp.Username != "" {
+				fmt.Printf(" done (%s)\n", cmdResp.Username)
+			} else {
+				fmt.Println(" done")
+			}
+		} else {
+			fmt.Println(" skipped (not connected)")
+		}
+	}
+
+	// Stop the macOS menu bar app if present.
+	if goos == "darwin" {
+		exec.Command("pkill", "-x", "Mosaic").Run()           //nolint:errcheck
+		exec.Command("pkill", "-x", "MosaicFinderSync").Run() //nolint:errcheck
+	}
+
+	// Kill the daemon so it doesn't hold stale in-memory state.
+	if pidBytes, err := os.ReadFile(shared.DaemonPIDFile); err == nil {
+		pidStr := strings.TrimSpace(string(pidBytes))
+		if pid, err := strconv.Atoi(pidStr); err == nil {
+			killProcess(pid, goos)
+		}
+	} else if isDaemonRunning(goos) {
+		killByName("mosaicd", goos)
+	}
+
+	errs := 0
+
+	// Wipe ~/Mosaic/ entirely, then recreate it empty.
+	mosaicDir := shared.MosaicDir()
+	if err := os.RemoveAll(mosaicDir); err != nil {
+		fmt.Println("  error removing Mosaic dir:", err)
+		errs++
+	}
+	if err := os.MkdirAll(mosaicDir, 0755); err != nil {
+		fmt.Println("  error recreating Mosaic dir:", err)
+		errs++
+	}
+
+	// Remove all ~/.mosaic-* and session files.
+	for _, path := range []string{
+		shared.LoginKeyPath(),
+		shared.UserKeyPath(),
+		shared.NetworkKeyPath(),
+		shared.ShardKeyPath(),
+		shared.SessionPath(),
+	} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			fmt.Printf("  error removing %s: %v\n", path, err)
+			errs++
+		}
+	}
+
+	// Remove daemon runtime files.
+	for _, path := range []string{
+		shared.DaemonPIDFile,
+		shared.SocketPath,
+		shared.DaemonLogFile,
+	} {
+		os.Remove(path) //nolint:errcheck — best-effort cleanup
+	}
+
+	if errs == 0 {
+		fmt.Println("State wiped. Run './install.sh' and 'mos login <key>' to start fresh.")
+	} else {
+		fmt.Printf("Done with %d error(s). Some files may need manual cleanup.\n", errs)
+	}
 }
 
 // help prints the help message
@@ -623,7 +1197,12 @@ func help() {
 // ExitOnErr prints the message and error and exits if err is not nil
 func exitOnErr(err error, msg string) {
 	if err != nil {
-		fmt.Println(msg, err)
+		if strings.Contains(err.Error(), "failed to connect to daemon") {
+			fmt.Println("Error: could not reach daemon. Is mosaic-node running?")
+			fmt.Println("Start it with: mosaic-node & or ./install.sh")
+		} else {
+			fmt.Println(msg, err)
+		}
 		os.Exit(1)
 	}
 }
@@ -661,17 +1240,17 @@ func Shutdown() {
 		daemonName = "mosaicd.exe"
 		needsSudo = false
 	case "darwin":
-		pidFile = "/tmp/mosaicd.pid"
-		sockFile = "/tmp/mosaicd.sock"
-		logFile = "/tmp/mosaicd.log"
-		binDir = "/usr/local/bin"
+		pidFile = shared.DaemonPIDFile
+		sockFile = shared.SocketPath
+		logFile = shared.DaemonLogFile
+		binDir = filepath.Join(os.Getenv("HOME"), ".local", "bin")
 		cliName = "mos"
 		daemonName = "mosaicd"
-		needsSudo = true
+		needsSudo = false
 	case "linux":
-		pidFile = "/tmp/mosaicd.pid"
-		sockFile = "/tmp/mosaicd.sock"
-		logFile = "/tmp/mosaicd.log"
+		pidFile = shared.DaemonPIDFile
+		sockFile = shared.SocketPath
+		logFile = shared.DaemonLogFile
 		binDir = filepath.Join(os.Getenv("HOME"), ".local", "bin")
 		cliName = "mos"
 		daemonName = "mosaicd"
@@ -679,6 +1258,15 @@ func Shutdown() {
 	default:
 		fmt.Printf("Unsupported operating system: %s\n", goos)
 		os.Exit(1)
+	}
+
+	// Stop the Swift menu bar app (macOS only)
+	if goos == "darwin" {
+		fmt.Println("Stopping Mosaic app...")
+		stopAppCmd := exec.Command("pkill", "-x", "Mosaic")
+		stopAppCmd.Run()
+		exec.Command("pkill", "-x", "MosaicFinderSync").Run()
+		fmt.Println("✓ Mosaic app stopped")
 	}
 
 	// Try to stop the daemon - first by PID file
@@ -826,70 +1414,82 @@ func isDaemonRunning(goos string) bool {
 	}
 }
 
-// ... (keep the killProcess, killByName, and isDaemonRunning functions the same) ...
+func debugSendMsg(message string) {
+	resp, err := client.SendRequest("debugSendMsg", protocol.DebugSendMsgRequest{Message: message})
+	exitOnErr(err, "Error sending debug message: ")
 
-// This is the old version of upload folder which I kept because I am proud of my recursive solution heh :)
-// Unfortunately it will eventually have to go but not today!
-/*
-func uploadFolder() {
-	root := args[3]
-
-	info, err := os.Stat(root)
-	if os.IsNotExist(err) {
-		fmt.Println("Error: folder does not exist at path:", root)
+	var cmdResp protocol.DebugSendMsgResponse
+	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
+		exitOnErr(err, "Error parsing response.")
+	}
+	if !cmdResp.Success {
+		fmt.Printf("Send failed (%d peer(s) connected): %s\n", cmdResp.PeerCount, cmdResp.Details)
 		os.Exit(1)
 	}
-	exitOnErr(err, "Error reading folder info:")
-
-	if !info.IsDir() {
-		fmt.Println("Error: path points to a file. Use 'mos upload file <path>' instead.")
-		os.Exit(1)
-	}
-
-	fmt.Printf("Starting upload of folder: %s\n", root)
-	err = UploadFolderRecursive(root, false, true)
-	exitOnErr(err, "Error uploading folder:")
-	if root == "." {
-		fmt.Println("Finished uploading current folder.")
-	} else {
-		fmt.Printf("Finished uploading folder: %s\n", root)
-	}
-	storage := helpers.AvailableStorage()
-	fmt.Printf("Storage remaining: %d GB\n", storage)
+	fmt.Printf("Sent to %d peer(s). Watch the other node's daemon log for:\n", cmdResp.PeerCount)
+	fmt.Printf("  [DEBUG] received from ...: %q\n", message)
 }
-func UploadFolderRecursive(path string, showSubFiles bool, isRoot bool) error {
-	entries, err := os.ReadDir(path)
+
+func debugTransfer() {
+	fmt.Println("Logging transfer diagnostics for 15 s — watch the daemon log for [DBG-TFR] lines.")
+	fmt.Println("Run this while an upload is in progress on the same node.")
+	resp, err := client.SendRequest("debugTransfer", protocol.DebugTransferRequest{}, 20*time.Second)
+	exitOnErr(err, "Error running transfer diagnostics:")
+
+	var cmdResp protocol.DebugTransferResponse
+	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
+		exitOnErr(err, "Error parsing response.")
+	}
+	if !cmdResp.Success {
+		fmt.Println("Diagnostics failed:", cmdResp.Details)
+		os.Exit(1)
+	}
+	fmt.Println(cmdResp.Details)
+}
+
+// doctor runs the daemon self-test and prints a per-check report. The daemon
+// reachability check is done here (CLI-side) because a dead daemon can't report
+// its own absence — if the socket doesn't answer, that is the first failed line.
+func doctor() {
+	fmt.Print("\nMosaic Doctor — self-test\n\n")
+
+	resp, err := client.SendRequest("doctor", protocol.DoctorRequest{}, 20*time.Second)
 	if err != nil {
-		return err
+		fmt.Printf("  %s daemon            not running or unreachable\n", doctorSymbol("fail"))
+		fmt.Printf("       %v\n", err)
+		fmt.Println("\n  Start it with:  ./install.sh   (or)   mosaic-node > /tmp/mosaicd.log 2>&1 &")
+		os.Exit(1)
+	}
+	fmt.Printf("  %s daemon            running\n", doctorSymbol("ok"))
+
+	var cmdResp protocol.DoctorResponse
+	if err := mapToStruct(resp.Data, &cmdResp); err != nil {
+		exitOnErr(err, "Error parsing response.")
 	}
 
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), ".") {
-			continue
-		}
-		fullPath := filepath.Join(path, entry.Name())
-
-		if entry.IsDir() {
-			if isRoot || showSubFiles {
-				fmt.Println("Uploading folder:", entry.Name())
-			}
-			//fmt.Println("Uploading folder:", entry.Name())
-			err := UploadFolderRecursive(fullPath, showSubFiles, false)
-			if err != nil {
-				return err
-			}
-		} else {
-			// replace with: uploadErr := uploadFile(fullPath)
-			_, uploadErr := client.SendRequest("uploadFile", protocol.UploadRequest{
-				Path: fullPath,
-			})
-			exitOnErr(uploadErr, "Error uploading file: "+fullPath)
-			if isRoot || showSubFiles {
-				fmt.Println("Uploading file:", entry.Name())
-			}
-		}
+	for _, c := range cmdResp.Checks {
+		fmt.Printf("  %s %-16s  %s\n", doctorSymbol(c.Status), c.Name, c.Detail)
 	}
 
-	return nil
+	fmt.Println()
+	if cmdResp.Success {
+		fmt.Println("  All critical checks passed.")
+	} else {
+		fmt.Println("  Some checks failed — see the ✗ lines above.")
+		os.Exit(1)
+	}
 }
-*/
+
+// doctorSymbol maps a check status to a display glyph.
+func doctorSymbol(status string) string {
+	switch status {
+	case "ok":
+		return "✓"
+	case "warn":
+		return "⚠"
+	case "fail":
+		return "✗"
+	default: // "skip"
+		return "–"
+	}
+}

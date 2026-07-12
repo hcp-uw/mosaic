@@ -17,20 +17,34 @@ After pairing, all file transfer, manifest sync, and peer ping/pong go directly 
 
 ---
 
-## Authentication
+## NAT Traversal Fallback Chain
 
-Every client must present a valid JWT when registering. The STUN server calls the auth server's `/auth/verify` endpoint to validate it. Clients without a valid token are rejected before any pairing happens.
+Direct hole-punching works for most NAT configurations, but fails in two specific cases: symmetric NAT (where the router assigns a different external port for each destination) and networks that block UDP entirely. Mosaic falls back to a TLS TCP relay for both:
 
-```
-Client → STUN:  ClientRegister { token: "<JWT>" }
-STUN   → Auth:  POST /auth/verify { token: "<JWT>" }
-Auth   → STUN:  200 OK  (or 401 Unauthorized)
-STUN   → Client: RegisterSuccess { id, queuePosition }  (or ServerError AUTH_REQUIRED)
-```
+| Tier | Mechanism | When it activates | What it survives |
+|------|-----------|-------------------|-----------------|
+| 1 | **Direct UDP** (hole-punch via STUN) | Immediately on peer assignment | Most NAT types |
+| 2 | **TCP relay** (TLS, port 443) | After ~15s with no direct pong | Symmetric NAT + networks that block all UDP |
 
-The JWT is obtained at login (`mos login account <user> <key>`) and stored in `~/.mosaic-session`. The P2P client reads it automatically when connecting.
+> **TURN (UDP relay, port 3479) is currently disabled** (`DefaultTURNServer = ""` in `internal/cli/shared/paths.go`). The UDP TURN tier had unresolved stability issues — notably, a half-open TURN session (the relay-server dial succeeds but the peer never connects through it) marks the peer `ViaTURN` and blocks the fall-through to the TCP relay, causing the peer to be evicted rather than relayed. The TCP relay on 443 is the reliable single fallback. A `mosaic-turn` server may still be deployed, but the client does not dial it until TURN is verified stable end-to-end and re-enabled.
 
-To disable authentication (development only), start with `-auth ""`.
+### Tier 1 — Direct UDP
+
+STUN exchanges each peer's public IP:port. Both sides send UDP punch packets simultaneously to open holes in their routers, then communicate directly. The STUN server is not involved in data transfer after this point.
+
+### Tier 2 — TCP relay (TLS)
+
+If no direct pong arrives within ~15 seconds (two missed ping cycles, one full cycle before the 30s peer-eviction timeout), the client falls through to the TCP relay. The TCP relay listens on port 443 with TLS — firewalls almost universally allow outbound TCP 443, treating it as normal HTTPS traffic, so this tier survives both symmetric NAT and networks that block UDP entirely. The client's relay address (`DefaultTCPRelayServer`) must match `mosaic-stun`'s `-relay-port` (default 443).
+
+The relay payload is not inspected by the server. All peer-to-peer data is AES-256-GCM encrypted via the X25519 session key before it touches the relay, so the relay server can only see peer IDs and packet sizes, not content. `InsecureSkipVerify` is used on the TLS connection because the relay cert is self-signed — this is safe given the end-to-end encryption above it.
+
+### Why not just always use the TCP relay?
+
+The TCP relay is registered at STUN connection time (so the server can forward inbound messages immediately), but the peer's traffic path is only switched to TCP relay when direct UDP fails. Direct UDP is preferred because:
+
+- Lower latency — no relay hop
+- Lower server cost — relay traffic is bandwidth the server has to pay for
+- QUIC bulk transfer (shard chunks) runs over UDP; routing through a TCP relay adds framing overhead
 
 ---
 
@@ -40,17 +54,12 @@ To disable authentication (development only), start with `-auth ""`.
 Node A                    STUN Server                Node B
   │                           │                         │
   │── ClientRegister ─────────►│                         │
-  │   { token: "<JWT>" }      │── POST /auth/verify ───►│ (Auth server)
-  │                           │◄── 200 OK ──────────────│
   │◄── RegisterSuccess ────────│                         │
   │    { id, queuePosition:1 }│                         │
   │◄── AssignedAsLeader ───────│                         │
   │                           │                         │
   │  (A keeps pinging STUN every 10s as leader)         │
   │                           │◄──── ClientRegister ─────│
-  │                           │      { token: "<JWT>" } │
-  │                           │── POST /auth/verify ───►│ (Auth server)
-  │                           │◄── 200 OK ───────────────│
   │                           │──── RegisterSuccess ────►│
   │                           │     { id, queuePosition:2}
   │◄── PeerAssignment ─────────│                         │
@@ -88,11 +97,22 @@ Mosaic uses a hybrid model: STUN tracks only the leader; peers track each other 
 
 ### Initial Assignment
 
-The first node to connect and pass JWT verification is assigned as **leader** (queue position 1). Subsequent nodes are paired with the leader directly via `PeerAssignment`.
+The first node to connect is assigned as **leader** (queue position 1). Subsequent nodes are paired with the leader directly via `PeerAssignment`.
+
+### Membership & Mesh Formation (STUN-authoritative)
+
+Nodes form a full mesh: every node connects directly to every other. STUN drives this so it does not depend on the leader staying alive during formation. On each registration, in addition to pairing the joiner with the leader, STUN **distributes the full roster** (`distributeRoster`):
+
+- the joiner receives a `CurrentMembers` message listing every other active member, and
+- each existing member receives a `NewPeerJoiner` message announcing the joiner.
+
+Both messages carry IP:port pairs; the client connects to each peer it doesn't already know. The leader *also* gossips the same `CurrentMembers`/`NewPeerJoiner` (via `leaderHandleJoiner`), so the two sources overlap — the client's `addRosterPeer` is **idempotent** (first assignment wins; a peer already connecting or connected is never re-added), so the overlap causes no duplicate connections or session resets.
+
+**Why STUN-authoritative:** previously only the leader gossiped membership. If the leader died mid-formation, members that hadn't yet received the gossip never learned about each other. With STUN distributing the roster directly, the mesh forms even if the leader is slow or dies right after pairing.
 
 ### Queue Positions
 
-Every client receives a **queue position** from STUN on registration — a server-assigned integer starting at 1. Queue positions are monotonically increasing and cannot be influenced by clients. The leader always has the lowest queue position among active nodes.
+Every client receives a **queue position** from STUN on registration — a server-assigned integer starting at 1. Queue positions are monotonically increasing and cannot be influenced by clients (a client's self-reported `nodeID` only reclaims *its own* prior position — see [Queue-Position Persistence](#queue-position-persistence-across-restarts)). The leader always has the lowest queue position among active nodes.
 
 ### Leader Re-election: STUN-driven (leader dies while STUN is running)
 
@@ -132,41 +152,43 @@ If the leader's STUN pings fail 3 times in a row:
 
 | Threat | Mitigation |
 |---|---|
-| Unregistered node joins network | JWT required — rejected before any pairing |
-| Node claims a lower queue position to become leader | Queue positions are assigned and stored server-side; clients cannot influence them |
-| Node sends fake disconnect to trigger leader change | No client-initiated leader change exists — only STUN's cleanup routine triggers election |
-| Node repeatedly re-registers to reset queue position | Re-registration (same IP:port) refreshes the existing record — queue position is not re-assigned |
+| Node claims a lower queue position to become leader | Queue positions are assigned server-side; clients cannot influence them |
+| Node sends fake disconnect to trigger leader change | No client-initiated leader change — only STUN's cleanup routine triggers election |
+| Node repeatedly re-registers to reset queue position | Re-registration (same IP:port) refreshes the existing record without changing queue position |
+| One machine flooding the network with fake identities (Sybil) | Per-IP concurrent registration cap (default 10); excess registrations are rejected with `RATE_LIMITED` |
+| Client spamming STUN with pings to waste CPU | Pings arriving faster than every 5 seconds from the same client are silently dropped |
+| Peer lying about holding shards it doesn't have | Shard probe challenge (nonce + SHA-256 proof); 3 consecutive failures evict the peer |
+| Peer refusing to respond to shard probes | Treated the same as a wrong-hash response — counts toward the 3-strike eviction |
+
+### Dev bypass for rate limits
+
+Both the per-IP cap and ping rate limit are disabled when the STUN server is started with `--no-rate-limit` or `MOSAIC_STUN_NO_RATE_LIMIT=1`. Use this when running multiple test nodes on the same machine locally.
 
 ---
 
-## Known Limitations
+## Queue-Position Persistence (across restarts)
 
-### ⚠️ STUN-restart window: malicious actor can seize leadership
+STUN persists the `nodeID → queuePosition` map to disk (`-position-store`, default `/var/run/mosaic/stun-positions.json`) and reloads it on startup. Each client sends a stable per-machine `nodeID` — a random 16-byte value persisted at `~/.mosaic-stun-id`, created on first join — in its `ClientRegister`. When a node with a known `nodeID` registers (e.g. after a server restart), STUN **reclaims its original position** instead of assigning a fresh one. The queue counter is seeded above the highest restored position so new joiners never collide with a reclaimed one.
 
-**Scenario:** STUN server restarts (crash, reboot, deploy). All client records are lost. The first node to re-register gets queue position 1 and becomes leader.
+This addresses both restart-race limitations that were previously open:
 
-**Why this matters:** If a malicious authenticated node races to re-register before the legitimate leader, it gets promoted as leader and receives all subsequent `PeerAssignment` introductions. It can then intercept file-transfer coordination messages from new joiners.
+- **Member positions survive restarts.** A member that re-registers after the server restarts gets its *original* position back, not a fresh one — so election ordering is preserved.
+- **Leadership converges to the correct node.** Because positions are restored, the lowest-position node is again the rightful leader, and STUN's election (which sorts by position) selects it.
 
-**Current mitigations:**
-- JWT required — the attacker must have a valid account
-- Queue positions cannot be manipulated — the attacker can only win by being first, not by cheating
+**Residual gaps (documented, not fixed):**
 
-**What a full fix would require:**
-- Persistent queue positions: STUN stores `(accountID → queuePosition)` in a database that survives restarts
-- Nodes send their account ID on re-registration so STUN can restore their original position
-- This was not implemented because it requires STUN to maintain persistent state, which conflicts with the "STUN is stateless between restarts" design goal
-
-### ⚠️ Member STUN records expire silently
-
-Because members stop pinging STUN after pairing, their records are cleaned up by STUN's 30-second inactivity timeout. If the leader dies and a member re-registers, they will get a **new** queue position (as if they are a fresh joiner), not their original one.
-
-**Impact:** The re-registering member might not win the election even if they had the second-lowest original queue position, because another member that re-registered earlier (or never had its record expire) may have a lower current position.
-
-**Workaround in practice:** With small networks (2–5 nodes), this is unlikely to matter. All nodes re-register quickly, and whoever had the second-lowest original position will likely still be early in the new queue.
+- **No live demotion.** If a higher-position node happens to re-register *first* after a restart, it becomes leader transiently (STUN promotes the first registrant when it has no leader). The rightful lower-position node reclaims its position on its own re-registration, but leadership only transfers to it at the *next* election (when the transient leader dies) — there is no "you are no longer leader" message to demote a live leader on the spot.
+- **`nodeID` travels in plaintext UDP.** An on-path observer could capture a node's `nodeID` and impersonate it to steal its position. `nodeID`s are random and never broadcast, so targeting a *specific* victim's position requires observing that victim's registration — the same exposure as the plaintext STUN control channel below. Wrapping STUN in DTLS would close this.
 
 ### ⚠️ No transport security
 
-STUN messages are sent over plain UDP with no TLS or DTLS. The JWT token itself is transmitted in plaintext to STUN. In production, this should be wrapped in DTLS or the JWT should be hash-committed so the token cannot be replayed from a network capture.
+STUN messages are sent over plain UDP with no TLS or DTLS. In production, this should be wrapped in DTLS.
+
+---
+
+## Non-JSON Packet Filtering
+
+Port 3478 is the well-known STUN port, so the server occasionally receives non-JSON UDP datagrams — null-byte probes, QUIC Initial packets from random scanners, and STUN/RFC-5389 binary frames from other software. The server silently drops any packet whose first byte is not `{` (0x7B) before attempting JSON deserialization. This prevents log spam from parse errors on malformed or binary payloads.
 
 ### ⚠️ Single point of coordination
 
@@ -177,25 +199,28 @@ STUN is not replicated. If STUN is down for more than 30 seconds, leader re-elec
 ## Running
 
 ```bash
-# Production (auth enabled, default port)
+# Default ports (STUN on 3478, TCP relay on 443)
 go run ./cmd/mosaic-stun
 
-# Custom auth server
-go run ./cmd/mosaic-stun -auth http://178.128.151.84:8081
-
-# Disable auth (development only)
-go run ./cmd/mosaic-stun -auth ""
-
-# Custom port
-go run ./cmd/mosaic-stun -port 3479
+# Local dev with multiple test nodes on the same machine
+MOSAIC_STUN_NO_RATE_LIMIT=1 go run ./cmd/mosaic-stun
+# or equivalently:
+go run ./cmd/mosaic-stun --no-rate-limit
 ```
 
 **Flags:**
 
-| Flag    | Default                 | Description                                  |
-|---------|-------------------------|----------------------------------------------|
-| `-port` | `3478`                  | UDP port to listen on                        |
-| `-auth` | `http://localhost:8081` | Auth server URL. Empty string disables auth. |
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-port` | `3478` | UDP port to listen on |
+| `-relay-port` | `443` | TCP relay port (TLS); `0` to disable |
+| `--no-rate-limit` | off | Disable per-IP registration cap and ping rate limit (local dev) |
+
+**Environment variables:**
+
+| Variable | Effect |
+|---|---|
+| `MOSAIC_STUN_NO_RATE_LIMIT=1` | Same as `--no-rate-limit` |
 
 ---
 
@@ -212,10 +237,22 @@ go run ./cmd/mosaic-stun -port 3479
 
 | Property | Status |
 |---|---|
-| Unauthenticated clients rejected | ✅ JWT verified via auth server on every registration |
 | Leader election manipulation | ✅ Server-assigned queue positions, STUN-driven election |
-| Shard data encrypted in transit | ✅ AES-256-GCM (see transfer package) |
-| STUN-restart leadership race | ⚠️ First re-registrant wins; persistent queue positions not implemented |
-| Member queue position preserved across STUN restart | ⚠️ Records expire — members get new positions on re-registration |
-| Transport security | ⚠️ No TLS/DTLS — JWT transmitted in plaintext over UDP |
+| Shard data encrypted in transit | ✅ AES-256-GCM session encryption |
+| Shard integrity verification | ✅ SHA-256 content hash checked after every download |
+| Shard possession proof | ✅ Nonce-based probe challenge, driven by a periodic background audit (requires deterministic shard encryption so honest copies hash equal) |
+| Fake shard peer eviction | ✅ 3 consecutive probe failures → peer evicted |
+| Sybil attack (one machine, many identities) | ✅ Per-IP concurrent registration cap (default 10) |
+| STUN ping flood | ✅ Pings accepted at most once per 5 seconds per client |
+| TCP relay connection flood | ✅ Hard cap of 200 concurrent relay connections |
+| File history forgery | ✅ ECDSA-signed manifest blocks; signatures verified by peers |
+| STUN-restart leadership race | ⚠️ Positions now persist (`nodeID → queuePosition`), so leadership converges to the rightful node at the next election; a higher-position node re-registering first still leads transiently (no live demotion) |
+| Member queue position preserved across STUN restart | ✅ Persisted per `nodeID`; a returning member reclaims its original position |
+| Mesh formation robustness | ✅ STUN distributes the full roster directly, so the mesh forms even if the leader dies mid-formation |
+| P2P data transport security | ✅ AES-256-GCM session key derived via X25519 (ephemeral Diffie-Hellman); all peer messages encrypted |
+| TURN relay payload security | ✅ Relay only sees AES-256-GCM ciphertext — encryption happens before the relay layer |
+| TCP relay payload security | ✅ TLS transport + AES-256-GCM payload encrypted end-to-end |
+| STUN control channel | ⚠️ Plain UDP — registration and ping messages to the STUN server are unencrypted JSON (no file data, only IP:port pairs) |
+| Control-message injection | ✅ Post-handshake control messages and shard frames must arrive inside the AES-256-GCM session envelope; plaintext is accepted only for the handshake bootstrap and pre-session pings, so spoofed `NodeLeave`/`ShardRequest`/`ShardDelete`/etc. are dropped |
+| Peer identity binding / MITM | ✅ `HandshakeInit` is signed with the account ECDSA key over the ephemeral DH key; a handshake with a missing/invalid signature is rejected, so a MITM can't impersonate an account or splice a session. Requires login to join (every peer must have an account key) |
 | Metadata privacy (who talks to whom) | ⚠️ STUN server sees IP:port pairs during pairing |

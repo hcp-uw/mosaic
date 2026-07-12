@@ -10,8 +10,6 @@ import (
 // Deletes a file from the network and returns an DeleteFolderResponse
 func DeleteFolder(req protocol.DeleteFolderRequest) protocol.DeleteFolderResponse {
 	fmt.Println("Daemon: handling delete for", req.FolderName)
-	// all the actual logic and stuff goes here
-	// Details goes in the logs (not printed in terminal)
 	return protocol.DeleteFolderResponse{
 		Success:          true,
 		Details:          "Delete processed by daemon",

@@ -1,19 +1,151 @@
 package p2p
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/ecdh"
+	"crypto/rand"
 	"fmt"
+	"io"
 	"net"
 	"time"
 
 	"github.com/hcp-uw/mosaic/internal/api"
+	quic "github.com/quic-go/quic-go"
+)
+
+const (
+	sessionEncryptedMagic = 0x02 // first byte of an AES-256-GCM wrapped frame
 )
 
 // PeerInfo holds information about the assigned peer
 type PeerInfo struct {
 	Address      *net.UDPAddr
-	Conn         *net.UDPConn
+	Conn         net.PacketConn // direct *net.UDPConn or a TURN relay PacketConn
 	ID           string
+	IsLeader     bool      // true when this peer is the network leader
 	LastPeerPong time.Time
+	ViaTURN      bool // true when Conn routes through the TURN relay
+
+	// Session encryption — set after X25519 handshake completes.
+	SessionKey       [32]byte
+	HandshakeDone    bool
+	EphemeralPrivKey []byte // our ephemeral X25519 private key; cleared after handshake
+
+	// QUIC data channel — established after the X25519 handshake.
+	QUICPort int        // peer's QUIC listening port (from their HandshakeInit)
+	QUICConn *quic.Conn // nil until QUIC connection is established
+
+	// StunNodeID is the peer's stable per-machine STUN node ID (from their
+	// HandshakeInit). It maps this session's transport to a stable identity used
+	// as the canonical shard-holder ID in the network manifest. Empty until the
+	// handshake completes.
+	StunNodeID string
+
+	// AccountPubKey is the peer's account public key (PKIX DER), verified during
+	// the handshake — so this is the account this session cryptographically belongs
+	// to, not a self-reported claim. Empty until the handshake completes.
+	AccountPubKey []byte
+
+	// Shard probe tracking — consecutive failures evict the peer.
+	ProbeFailures int
+}
+
+// sealForPeer wraps data in AES-256-GCM using the peer's session key.
+// Format: [0x02][12-byte nonce][ciphertext+tag]
+func (peer *PeerInfo) sealForPeer(plaintext []byte) ([]byte, error) {
+	block, err := aes.NewCipher(peer.SessionKey[:])
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, gcm.NonceSize()) // 12 bytes
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, err
+	}
+	ct := gcm.Seal(nil, nonce, plaintext, nil)
+	out := make([]byte, 1+len(nonce)+len(ct))
+	out[0] = sessionEncryptedMagic
+	copy(out[1:], nonce)
+	copy(out[1+len(nonce):], ct)
+	return out, nil
+}
+
+// openFromPeer decrypts a session-encrypted frame. Returns the inner plaintext.
+func (peer *PeerInfo) openFromPeer(frame []byte) ([]byte, error) {
+	if len(frame) < 1+12+16 {
+		return nil, fmt.Errorf("frame too short")
+	}
+	block, err := aes.NewCipher(peer.SessionKey[:])
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonce := frame[1 : 1+gcm.NonceSize()]
+	ct := frame[1+gcm.NonceSize():]
+	return gcm.Open(nil, nonce, ct, nil)
+}
+
+// decryptFromAnyPeer attempts to decrypt a session-encrypted frame, first by
+// looking up the peer by source address and then by trying every peer with a
+// completed handshake. The second path handles TURN relay scenarios where the
+// packet's source address is the relay server rather than the peer's real IP.
+// AES-256-GCM authentication makes false positives cryptographically impossible.
+func (c *Client) decryptFromAnyPeer(data []byte, fromAddr *net.UDPAddr) ([]byte, bool) {
+	// Fast path: peer found by source address.
+	sender := c.getPeerByAddr(fromAddr)
+	if sender != nil && sender.HandshakeDone {
+		inner, err := sender.openFromPeer(data)
+		if err == nil {
+			return inner, true
+		}
+	}
+
+	// Slow path: TURN relay or address mismatch — try all handshake-complete peers.
+	c.mutex.RLock()
+	peers := make([]*PeerInfo, 0, len(c.peers))
+	for _, p := range c.peers {
+		if p.HandshakeDone && p != sender {
+			peers = append(peers, p)
+		}
+	}
+	c.mutex.RUnlock()
+
+	for _, p := range peers {
+		inner, err := p.openFromPeer(data)
+		if err == nil {
+			return inner, true
+		}
+	}
+	return nil, false
+}
+
+// writeToPeer serializes msg, encrypts it if the handshake is done, and sends it.
+func (c *Client) writeToPeer(peer *PeerInfo, msg *api.Message) error {
+	data, err := msg.Serialize()
+	if err != nil {
+		return err
+	}
+	return c.writeRawToPeer(peer, data)
+}
+
+// writeRawToPeer encrypts data (if handshake done) and writes it to the peer.
+func (c *Client) writeRawToPeer(peer *PeerInfo, data []byte) error {
+	if peer.HandshakeDone {
+		encrypted, err := peer.sealForPeer(data)
+		if err != nil {
+			return fmt.Errorf("session encrypt failed: %w", err)
+		}
+		data = encrypted
+	}
+	_, err := peer.Conn.WriteTo(data, peer.Address)
+	return err
 }
 
 // SendToPeer sends data to the connected peer
@@ -26,26 +158,59 @@ func (c *Client) SendToPeer(peerId string, message *api.Message) error {
 	if peerInfo == nil {
 		return fmt.Errorf("no peer information available")
 	}
-
 	if peerInfo.Conn == nil {
 		return fmt.Errorf("not connected to peer")
 	}
+	if state == StateDisconnected {
+		return fmt.Errorf("client disconnected")
+	}
+	return c.writeToPeer(peerInfo, message)
+}
 
-	// Block sending only in truly disconnected state
+func (c *Client) SendToAllPeers(message *api.Message) error {
+	// GetConnectedPeers acquires its own lock; don't hold a second RLock around
+	// this call — a concurrent Lock() (e.g. from QUIC setup) would deadlock.
+	allPeers := c.GetConnectedPeers()
+
+	c.mutex.RLock()
+	state := c.state
+	c.mutex.RUnlock()
+
+	if len(allPeers) == 0 {
+		return fmt.Errorf("no peer information available")
+	}
 	if state == StateDisconnected {
 		return fmt.Errorf("client disconnected")
 	}
 
-	data, err := message.Serialize()
-	if err != nil {
-		return err
+	for _, peer := range allPeers {
+		if err := c.writeToPeer(peer, message); err != nil {
+			return err
+		}
 	}
-
-	_, err = peerInfo.Conn.WriteToUDP(data, peerInfo.Address)
-	return err
+	return nil
 }
 
-func (c *Client) SendToAllPeers(message *api.Message) error {
+// SendRawToPeer sends raw bytes to a single peer by ID, encrypting if the
+// session handshake is complete.
+func (c *Client) SendRawToPeer(peerID string, data []byte) error {
+	c.mutex.RLock()
+	peer := c.GetPeerById(peerID)
+	state := c.state
+	c.mutex.RUnlock()
+
+	if peer == nil || peer.Conn == nil {
+		return fmt.Errorf("peer %s not connected", peerID)
+	}
+	if state == StateDisconnected {
+		return fmt.Errorf("client disconnected")
+	}
+	return c.writeRawToPeer(peer, data)
+}
+
+// SendRawToAllPeers sends raw bytes to all connected peers, encrypting per peer
+// if their session handshake is complete.
+func (c *Client) SendRawToAllPeers(data []byte) error {
 	c.mutex.RLock()
 	allPeers := c.GetConnectedPeers()
 	state := c.state
@@ -54,76 +219,129 @@ func (c *Client) SendToAllPeers(message *api.Message) error {
 	if len(allPeers) == 0 {
 		return fmt.Errorf("no peer information available")
 	}
-
-	// Block sending only in truly disconnected state
 	if state == StateDisconnected {
 		return fmt.Errorf("client disconnected")
 	}
-
-	data, err := message.Serialize()
-	if err != nil {
-		return err
-	}
-
 	for _, peer := range allPeers {
-		_, err := peer.Conn.WriteToUDP(data, peer.Address)
-		if err != nil {
+		if err := c.writeRawToPeer(peer, data); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+// maxProbeFailures is the number of consecutive failed shard probes before a
+// peer is evicted. A probe fails when the peer times out or returns a wrong hash.
+const maxProbeFailures = 3
+
+// RecordProbeResult updates the consecutive-failure counter for a peer.
+// A success resets the counter; maxProbeFailures consecutive failures evict the peer.
+// Only call this after a probe was actually sent (not when the local shard is missing).
+func (c *Client) RecordProbeResult(peerID string, success bool) {
+	var evicted bool
+	c.mutex.Lock()
+	if peer, ok := c.peers[peerID]; ok && peer != nil {
+		if success {
+			peer.ProbeFailures = 0
+		} else {
+			peer.ProbeFailures++
+			if peer.ProbeFailures >= maxProbeFailures {
+				delete(c.peers, peerID)
+				evicted = true
+				fmt.Printf("[P2P] evicted peer %s after %d consecutive probe failures\n",
+					peerID[:minPeerIDLen(peerID)], maxProbeFailures)
+			}
+		}
+	}
+	c.mutex.Unlock()
+	if evicted {
+		c.notifyPeerLeft(peerID)
+	}
+}
+
 // IsPeerCommunicationAvailable returns true if peer communication is possible
 func (c *Client) IsPeerCommunicationAvailable() bool {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-
-	return len(c.GetConnectedPeers()) > 0 && c.state != StateDisconnected
+	if c.state == StateDisconnected {
+		return false
+	}
+	for _, p := range c.peers {
+		if p.Conn != nil {
+			return true
+		}
+	}
+	return false
 }
 
-// ConnectToPeer attempts to establish direct connection to assigned peer using UDP hole punching
+// ConnectToPeer attempts to establish direct connection to assigned peer using UDP hole punching.
+// It also generates an ephemeral X25519 keypair and sends HandshakeInit so both sides can
+// derive a shared AES-256-GCM session key for all subsequent messages.
 func (c *Client) ConnectToPeer(peer *PeerInfo) error {
 	c.mutex.Lock()
-	defer c.mutex.Unlock()
 
 	if peer == nil {
+		c.mutex.Unlock()
 		return fmt.Errorf("no peer assigned")
 	}
-
 	if c.serverConn == nil {
+		c.mutex.Unlock()
 		return fmt.Errorf("not connected to server")
 	}
 
-	// Reuse the existing server connection socket for peer communication
-	// This is the key to proper UDP hole punching
+	// Generate ephemeral X25519 keypair for the session handshake.
+	ephPriv, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		c.mutex.Unlock()
+		return fmt.Errorf("failed to generate handshake key: %w", err)
+	}
+
 	c.peers[peer.ID] = peer
 	c.peers[peer.ID].Conn = c.serverConn
-	c.peers[peer.ID].LastPeerPong = time.Now() // Initialize peer connection time
+	c.peers[peer.ID].LastPeerPong = time.Now()
+	c.peers[peer.ID].EphemeralPrivKey = ephPriv.Bytes()
 	if c.state != StateLeader {
 		c.setState(StateConnectedToPeer)
 	}
 
-	// Start UDP hole punching - send initial packet to peer to establish connection
-	go c.establishPeerConnection(c.peers[peer.ID].Address)
+	peerAddr := c.peers[peer.ID].Address
+	peerID := peer.ID
+	pubKeyBytes := ephPriv.PublicKey().Bytes()
+	c.mutex.Unlock()
+
+	go c.establishPeerConnection(peerID, peerAddr)
+
+	// Send HandshakeInit after punch packets have had a chance to open the path.
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		msg := c.buildHandshakeInit(pubKeyBytes)
+		// Send directly (plaintext) — session key doesn't exist yet.
+		c.mutex.RLock()
+		p := c.peers[peerID]
+		c.mutex.RUnlock()
+		if p != nil && p.Conn != nil {
+			data, _ := msg.Serialize()
+			p.Conn.WriteTo(data, p.Address) //nolint:errcheck — best-effort
+		}
+	}()
 
 	return nil
 }
 
 // establishPeerConnection performs UDP hole punching to establish peer connection
-func (c *Client) establishPeerConnection(peerAddr *net.UDPAddr) {
+func (c *Client) establishPeerConnection(peerID string, peerAddr *net.UDPAddr) {
 	c.mutex.RLock()
-	peerConn := c.GetPeerById(peerAddr.String()).Conn
+	peer := c.GetPeerById(peerID)
 	c.mutex.RUnlock()
 
-	if peerConn == nil {
+	if peer == nil || peer.Conn == nil {
 		return
 	}
+	peerConn := peer.Conn
 
-	// Send initial "punch" packets to establish connection
 	punchMessage := []byte("STUN_PUNCH")
 	for range 3 {
-		_, err := peerConn.WriteToUDP(punchMessage, peerAddr)
+		_, err := peerConn.WriteTo(punchMessage, peerAddr)
 		if err != nil {
 			c.notifyError(fmt.Errorf("failed to send punch packet: %w", err))
 		}

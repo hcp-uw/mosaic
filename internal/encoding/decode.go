@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -42,7 +41,6 @@ func (e *Encoder) DecodeShards(relativePath string, fileLength int) error {
 	outPath := filepath.Dir(filepath.Join(e.dirOut, relativePath))
 	err := os.MkdirAll(outPath, 0755)
 	if err != nil {
-		log.Fatal("here")
 		return err
 	}
 
@@ -70,8 +68,14 @@ func (e *Encoder) DecodeShards(relativePath string, fileLength int) error {
 				defer shardReaders.Done()
 				shard := make([]byte, e.blockSize)
 
-				io.ReadFull(file, shard)
-				// ts silent error is not that tuff
+				// Shard files are exact multiples of blockSize, so a short read means
+				// the shard is truncated or corrupt for this stripe. Report it as an
+				// erasure (nil) so Reed-Solomon reconstructs the block from the other
+				// shards instead of decoding a partial/garbage block into the output.
+				if _, err := io.ReadFull(file, shard); err != nil {
+					shardResults <- shardResult{index: index, result: nil}
+					return
+				}
 
 				shardResults <- shardResult{index: index, result: shard}
 

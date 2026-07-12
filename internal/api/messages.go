@@ -1,8 +1,12 @@
 package api
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"time"
 )
@@ -12,8 +16,9 @@ type MessageType string
 
 const (
 	// Client to Server messages
-	ClientRegister MessageType = "client_register"
-	ClientPing     MessageType = "client_ping"
+	ClientRegister   MessageType = "client_register"
+	ClientPing       MessageType = "client_ping"
+	ClientDeregister MessageType = "client_deregister"
 
 	// Server to Client messages
 	RegisterSuccess  MessageType = "register_success"
@@ -22,16 +27,71 @@ const (
 	WaitingForPeer   MessageType = "waiting_for_peer"
 	AssignedAsLeader MessageType = "assigned_as_leader"
 
-	// Leader to Peer message 
+	// Leader to Peer message
 	// To be sent to the joining node contianing a list of all nodes in the network
 	CurrentMembers MessageType = "current_members"
-	// To be sent to the nodes in the network notifying them of the new node that is joining 
+	// To be sent to the nodes in the network notifying them of the new node that is joining
 	NewPeerJoiner MessageType = "new_joiner"
 
 	// Peer to Peer messages
-	PeerPing MessageType = "peer_ping"
-	PeerPong MessageType = "peer_pong"
+	PeerPing        MessageType = "peer_ping"
+	PeerPong        MessageType = "peer_pong"
 	PeerTextMessage MessageType = "peer_text_message"
+	ManifestSync    MessageType = "manifest_sync"
+	ShardPush       MessageType = "shard_push"
+	ShardRequest    MessageType = "shard_request"
+	ShardResponse   MessageType = "shard_response"
+	ShardChunk      MessageType = "shard_chunk"
+
+	// Identity messages — used by mos status node to detect and verify same-account peers.
+	IdentityAnnounce  MessageType = "identity_announce"
+	IdentityChallenge MessageType = "identity_challenge"
+	IdentityResponse  MessageType = "identity_response"
+
+	// HandshakeInit is sent immediately on peer connect (plaintext).
+	// Both sides send their ephemeral X25519 public key; each derives the
+	// shared AES-256-GCM session key and encrypts all subsequent messages.
+	HandshakeInit MessageType = "handshake_init"
+
+	// NodeLeave is broadcast to all peers just before a node disconnects
+	// gracefully. Receivers evict the sender immediately without waiting for
+	// the 30-second pong timeout.
+	NodeLeave MessageType = "node_leave"
+
+	// ShardDelete asks a holder to delete all locally-stored shards for a file.
+	// Sent by the file owner after a successful network manifest remove.
+	ShardDelete MessageType = "shard_delete"
+
+	// ShardStreamDone is sent by the sender after all chunks of a shard have
+	// been transmitted. The receiver replies with ShardStreamAck listing any
+	// missing chunk indices (empty = all received).
+	ShardStreamDone MessageType = "shard_stream_done"
+
+	// ShardStreamAck is the receiver's reply to ShardStreamDone. MissingChunks
+	// lists chunk indices the receiver did not get; empty means success. The
+	// sender blocks on this before proceeding to the next shard.
+	ShardStreamAck MessageType = "shard_stream_ack"
+
+	// ShardProbe is sent before redistribution to ask a peer whether it already
+	// holds a specific shard. The peer must respond with ShardProbeAck containing
+	// SHA-256(nonce || shard_file_bytes) as proof of possession.
+	ShardProbe MessageType = "shard_probe"
+
+	// ShardProbeAck is the peer's proof-of-possession reply to ShardProbe.
+	// A missing or wrong ContentHash means the peer does not hold the shard.
+	ShardProbeAck MessageType = "shard_probe_ack"
+
+	// TURNRelayAddr is sent by a node after it allocates a TURN relay so that
+	// the peer can route return traffic through the relay instead of sending
+	// directly to the NAT-private IP (which the firewall would drop).
+	TURNRelayAddr MessageType = "turn_relay_addr"
+
+	// TURNRelayAddrFwd is sent by a client TO the STUN server, asking it to
+	// forward a TURNRelayAddr notification to the named peer. This is required
+	// when both nodes are behind symmetric NAT: neither can reach the other via
+	// the TURN relay directly, but both have live UDP connections to the STUN
+	// server (port 3478), so the server can bridge the address exchange.
+	TURNRelayAddrFwd MessageType = "turn_relay_addr_fwd"
 )
 
 // Message represents the base message structure
@@ -51,14 +111,19 @@ func NewSignature(pubKey string) Signature {
 	return Signature{PubKey: pubKey}
 }
 
-// ClientRegisterData represents client registration information (no data needed)
+// ClientRegisterData represents client registration information.
+// NodeID is a stable, per-machine random identifier that lets the STUN server
+// restore a client's original queue position after a server restart (see the
+// position store in internal/stun). It is empty for pings/deregisters and for
+// diagnostic probes that should not claim a persistent position.
 type ClientRegisterData struct {
-	// No fields needed - client ID is derived from network address
+	NodeID string `json:"nodeID,omitempty"`
 }
 
 type RegisterSuccessData struct {
-	Message string `json:"message"`
-	ID      string `json:"id"`
+	Message       string `json:"message"`
+	ID            string `json:"id"`
+	QueuePosition int    `json:"queuePosition"` // server-assigned; 1 = leader, 2 = next, etc.
 }
 
 // Doesnt need to contain anything
@@ -74,7 +139,7 @@ type CurrentMembersData struct {
 
 type NewPeerJoinerData struct {
 	JoinerAddress string `json:"joiner_address"`
-	JoinerID string `json:"joiner_id"`
+	JoinerID      string `json:"joiner_id"`
 }
 
 // just for testing rn -sending text messages between terminals
@@ -101,12 +166,12 @@ type PeerPingData struct {
 
 func NewPeerTextMessage(message, senderID string) *Message {
 	return &Message{
-		Type: PeerTextMessage,
+		Type:      PeerTextMessage,
 		Timestamp: time.Now(),
 		Sign: Signature{
 			PubKey: senderID,
 		},
-		Data: PeerTextMessageData {
+		Data: PeerTextMessageData{
 			Message: message,
 		},
 	}
@@ -114,12 +179,12 @@ func NewPeerTextMessage(message, senderID string) *Message {
 
 func NewNewPeerJoinerMessage(senderID, joinerID, joinerAddr string) *Message {
 	return &Message{
-		Type: NewPeerJoiner,
+		Type:      NewPeerJoiner,
 		Timestamp: time.Now(),
-		Sign: NewSignature(senderID),
+		Sign:      NewSignature(senderID),
 		Data: NewPeerJoinerData{
 			JoinerAddress: joinerAddr,
-			JoinerID: joinerID,
+			JoinerID:      joinerID,
 		},
 	}
 }
@@ -127,15 +192,15 @@ func NewNewPeerJoinerMessage(senderID, joinerID, joinerAddr string) *Message {
 func NewCurrentMembersMessage(members map[string]*net.UDPAddr, senderID string) *Message {
 	stringMembers := make(map[string]string)
 
-    // 2. Iterate and convert each UDPAddr to a string
-    for id, addr := range members {
-        if addr != nil {
-            stringMembers[id] = addr.String()
-        }
-    }
+	// 2. Iterate and convert each UDPAddr to a string
+	for id, addr := range members {
+		if addr != nil {
+			stringMembers[id] = addr.String()
+		}
+	}
 
 	return &Message{
-		Type: CurrentMembers,
+		Type:      CurrentMembers,
 		Timestamp: time.Now(),
 		Sign: Signature{
 			PubKey: senderID,
@@ -155,10 +220,20 @@ func NewServerAssignedLeaderMessage() *Message {
 	}
 }
 
-// NewClientRegisterMessage creates a client registration message
-func NewClientRegisterMessage() *Message {
+// NewClientRegisterMessage creates a client registration message.
+func NewClientRegisterMessage(nodeID string) *Message {
 	return &Message{
 		Type:      ClientRegister,
+		Timestamp: time.Now(),
+		Data:      ClientRegisterData{NodeID: nodeID},
+	}
+}
+
+// NewClientDeregisterMessage creates a graceful-leave message sent to the STUN
+// server so it removes the client immediately instead of waiting for timeout.
+func NewClientDeregisterMessage() *Message {
+	return &Message{
+		Type:      ClientDeregister,
 		Timestamp: time.Now(),
 		Data:      ClientRegisterData{},
 	}
@@ -176,13 +251,14 @@ func NewPeerAssignmentMessage(peerAddr *net.UDPAddr, peerID string) *Message {
 	}
 }
 
-func NewRegisterSuccessMessage(message, id string) *Message {
+func NewRegisterSuccessMessage(message, id string, queuePosition int) *Message {
 	return &Message{
 		Type:      RegisterSuccess,
 		Timestamp: time.Now(),
 		Data: RegisterSuccessData{
-			Message: message,
-			ID:      id,
+			Message:       message,
+			ID:            id,
+			QueuePosition: queuePosition,
 		},
 	}
 }
@@ -258,9 +334,15 @@ func (m *Message) GetClientRegisterData() (*ClientRegisterData, error) {
 	if m.Type != ClientRegister && m.Type != ClientPing {
 		return nil, ErrInvalidMessageType
 	}
-
-	// No data validation needed since ClientRegisterData is empty
-	return &ClientRegisterData{}, nil
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d ClientRegisterData
+	if err := json.Unmarshal(b, &d); err != nil {
+		return nil, err
+	}
+	return &d, nil
 }
 
 func (m *Message) GetCurrentMembersData() (*CurrentMembersData, error) {
@@ -404,6 +486,533 @@ func (m *Message) GetRegisterSuccessData() (*RegisterSuccessData, error) {
 	var data RegisterSuccessData
 	err = json.Unmarshal(dataBytes, &data)
 	return &data, err
+}
+
+// ManifestSyncData carries the full serialized network manifest (JSON, not
+// encrypted — each UserNetworkEntry's Files section is already ECIES-encrypted
+// and the outer envelope is just the manifest index). Transit security comes
+// from the per-entry ECDSA signatures; a tampered payload is rejected on merge.
+type ManifestSyncData struct {
+	ManifestJSON []byte `json:"manifestJSON"`
+}
+
+// NewManifestSyncMessage creates a manifest sync message for P2P broadcast.
+// senderID is the P2P node ID so the receiver can send a reply back.
+// The manifest JSON is gzip-compressed before encoding to avoid UDP fragmentation:
+// []byte fields in Go JSON become base64 (~33% larger), and an uncompressed
+// manifest can exceed the ~1443-byte MTU limit. Gzip cuts it ~70-80%.
+func NewManifestSyncMessage(senderID string, manifestJSON []byte) *Message {
+	var buf bytes.Buffer
+	w := gzip.NewWriter(&buf)
+	w.Write(manifestJSON) //nolint:errcheck — in-memory write cannot fail
+	w.Close()
+	return &Message{
+		Sign:      NewSignature(senderID),
+		Type:      ManifestSync,
+		Timestamp: time.Now(),
+		Data:      ManifestSyncData{ManifestJSON: buf.Bytes()},
+	}
+}
+
+// GetManifestSyncData extracts manifest sync data from a message.
+// Detects gzip magic bytes (0x1f 0x8b) and decompresses transparently.
+func (m *Message) GetManifestSyncData() (*ManifestSyncData, error) {
+	if m.Type != ManifestSync {
+		return nil, ErrInvalidMessageType
+	}
+	dataBytes, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var data ManifestSyncData
+	if err := json.Unmarshal(dataBytes, &data); err != nil {
+		return nil, err
+	}
+	if len(data.ManifestJSON) >= 2 && data.ManifestJSON[0] == 0x1f && data.ManifestJSON[1] == 0x8b {
+		r, err := gzip.NewReader(bytes.NewReader(data.ManifestJSON))
+		if err != nil {
+			return nil, fmt.Errorf("decompress manifest: %w", err)
+		}
+		defer r.Close()
+		decompressed, err := io.ReadAll(r)
+		if err != nil {
+			return nil, fmt.Errorf("decompress manifest: %w", err)
+		}
+		data.ManifestJSON = decompressed
+	}
+	return &data, nil
+}
+
+// ShardPushData carries a single Reed-Solomon shard from an uploading peer.
+type ShardPushData struct {
+	FileHash        string `json:"fileHash"`        // hex SHA-256 of original file
+	FileName        string `json:"fileName"`        // base name without extension
+	FileSize        int    `json:"fileSize"`        // original file size in bytes (needed by DecodeShards)
+	ShardIndex      int    `json:"shardIndex"`      // 0-based index of this shard
+	TotalDataShards int    `json:"totalDataShards"` // minimum shards needed to reconstruct
+	TotalShards     int    `json:"totalShards"`     // data + parity
+	Data            []byte `json:"data"`            // raw shard bytes
+}
+
+// ShardRequestData asks a peer to send a specific shard.
+type ShardRequestData struct {
+	FileHash   string `json:"fileHash"`
+	ShardIndex int    `json:"shardIndex"`
+	Relayed    bool   `json:"relayed,omitempty"` // true = already forwarded once; don't relay again
+}
+
+// ShardResponseData is the reply to a ShardRequest.
+type ShardResponseData struct {
+	FileHash   string `json:"fileHash"`
+	ShardIndex int    `json:"shardIndex"`
+	Found      bool   `json:"found"`
+	Data       []byte `json:"data,omitempty"`
+}
+
+func NewShardPushMessage(sign Signature, d ShardPushData) *Message {
+	return &Message{
+		Sign:      sign,
+		Type:      ShardPush,
+		Timestamp: time.Now(),
+		Data:      d,
+	}
+}
+
+func NewShardRequestMessage(sign Signature, d ShardRequestData) *Message {
+	return &Message{
+		Sign:      sign,
+		Type:      ShardRequest,
+		Timestamp: time.Now(),
+		Data:      d,
+	}
+}
+
+func NewShardResponseMessage(sign Signature, d ShardResponseData) *Message {
+	return &Message{
+		Sign:      sign,
+		Type:      ShardResponse,
+		Timestamp: time.Now(),
+		Data:      d,
+	}
+}
+
+func (m *Message) GetShardPushData() (*ShardPushData, error) {
+	if m.Type != ShardPush {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d ShardPushData
+	err = json.Unmarshal(b, &d)
+	return &d, err
+}
+
+func (m *Message) GetShardRequestData() (*ShardRequestData, error) {
+	if m.Type != ShardRequest {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d ShardRequestData
+	err = json.Unmarshal(b, &d)
+	return &d, err
+}
+
+func (m *Message) GetShardResponseData() (*ShardResponseData, error) {
+	if m.Type != ShardResponse {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d ShardResponseData
+	err = json.Unmarshal(b, &d)
+	return &d, err
+}
+
+// ShardChunkData carries one 32KB slice of a Reed-Solomon shard for large-file transfer.
+// Shards are split into chunks because a full shard (e.g. 100MB) far exceeds the UDP max.
+type ShardChunkData struct {
+	FileHash        string `json:"fileHash"`
+	FileName        string `json:"fileName"`        // base name, no extension
+	FileSize        int    `json:"fileSize"`        // original file size in bytes
+	ShardIndex      int    `json:"shardIndex"`      // 0-based shard number
+	ChunkIndex      int    `json:"chunkIndex"`      // 0-based chunk within this shard
+	TotalChunks     int    `json:"totalChunks"`     // total chunks for this shard
+	TotalDataShards int    `json:"totalDataShards"` // data shards needed to reconstruct
+	TotalShards     int    `json:"totalShards"`     // data + parity
+	Data            []byte `json:"data"`            // ≤32KB raw bytes
+}
+
+func NewShardChunkMessage(sign Signature, d ShardChunkData) *Message {
+	return &Message{
+		Sign:      sign,
+		Type:      ShardChunk,
+		Timestamp: time.Now(),
+		Data:      d,
+	}
+}
+
+func (m *Message) GetShardChunkData() (*ShardChunkData, error) {
+	if m.Type != ShardChunk {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d ShardChunkData
+	err = json.Unmarshal(b, &d)
+	return &d, err
+}
+
+// ShardStreamDoneData is sent by the uploader/sharer after all chunks of a
+// shard have been transmitted so the receiver can check for missing chunks.
+type ShardStreamDoneData struct {
+	FileHash    string `json:"fileHash"`
+	ShardIndex  int    `json:"shardIndex"`
+	TotalChunks int    `json:"totalChunks"`
+}
+
+// ShardStreamAckData is the receiver's reply to ShardStreamDone.
+// MissingChunks lists chunk indices the receiver did not receive; nil/empty = all received.
+type ShardStreamAckData struct {
+	FileHash      string `json:"fileHash"`
+	ShardIndex    int    `json:"shardIndex"`
+	MissingChunks []int  `json:"missingChunks"`
+}
+
+func NewShardStreamDoneMessage(senderID string, d ShardStreamDoneData) *Message {
+	return &Message{
+		Sign:      NewSignature(senderID),
+		Type:      ShardStreamDone,
+		Timestamp: time.Now(),
+		Data:      d,
+	}
+}
+
+func NewShardStreamAckMessage(senderID string, d ShardStreamAckData) *Message {
+	return &Message{
+		Sign:      NewSignature(senderID),
+		Type:      ShardStreamAck,
+		Timestamp: time.Now(),
+		Data:      d,
+	}
+}
+
+func (m *Message) GetShardStreamDoneData() (*ShardStreamDoneData, error) {
+	if m.Type != ShardStreamDone {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d ShardStreamDoneData
+	err = json.Unmarshal(b, &d)
+	return &d, err
+}
+
+func (m *Message) GetShardStreamAckData() (*ShardStreamAckData, error) {
+	if m.Type != ShardStreamAck {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d ShardStreamAckData
+	err = json.Unmarshal(b, &d)
+	return &d, err
+}
+
+// IdentityAnnounceData is broadcast to all peers on connect.
+// AccountPubKey is the hex PKIX DER ECDSA public key that identifies this account.
+type IdentityAnnounceData struct {
+	AccountPubKey string `json:"accountPubKey"`
+}
+
+// IdentityChallengeData is broadcast by a node running mos status node.
+// Nonce is 32 random bytes encoded as hex; all peers respond so the requester
+// can find which ones share the same account key.
+type IdentityChallengeData struct {
+	Nonce string `json:"nonce"`
+}
+
+// IdentityResponseData is the signed reply to an IdentityChallenge.
+// Signature is hex ECDSA-ASN1 of sha256(nonceBytes) under the responder's private key.
+type IdentityResponseData struct {
+	Nonce     string `json:"nonce"`
+	Signature string `json:"signature"`
+}
+
+// HandshakeInitData carries one side's ephemeral X25519 public key.
+type HandshakeInitData struct {
+	EphemeralPubKey []byte `json:"ephemeralPubKey"`
+	QUICPort        int    `json:"quicPort,omitempty"`
+	// NodeID is the sender's stable per-machine STUN node ID. The receiver stores
+	// it on PeerInfo so it can map this session's transport (P2P id) to a stable
+	// identity — used as the canonical shard-holder ID in the network manifest.
+	NodeID string `json:"nodeID,omitempty"`
+	// AccountPubKey (PKIX DER of the account ECDSA public key) and Signature bind
+	// the ephemeral handshake key to the sender's account, so the receiver can
+	// verify WHICH account this session belongs to and reject impersonation/MITM.
+	// Signature is ECDSA (ASN.1) over SHA-256("mosaic-handshake-v1" || accountPubKey
+	// || ephemeralPubKey || nodeID).
+	AccountPubKey []byte `json:"accountPubKey,omitempty"`
+	Signature     []byte `json:"handshakeSig,omitempty"`
+}
+
+// NewHandshakeInitMessage creates a handshake message carrying the sender's
+// ephemeral X25519 public key, QUIC port, stable node ID, account public key, and
+// a signature binding the ephemeral key to that account (see HandshakeInitData).
+func NewHandshakeInitMessage(senderID string, ephemeralPubKey []byte, quicPort int, nodeID string, accountPubKey, signature []byte) *Message {
+	return &Message{
+		Sign:      NewSignature(senderID),
+		Type:      HandshakeInit,
+		Timestamp: time.Now(),
+		Data: HandshakeInitData{
+			EphemeralPubKey: ephemeralPubKey,
+			QUICPort:        quicPort,
+			NodeID:          nodeID,
+			AccountPubKey:   accountPubKey,
+			Signature:       signature,
+		},
+	}
+}
+
+func (m *Message) GetHandshakeInitData() (*HandshakeInitData, error) {
+	if m.Type != HandshakeInit {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d HandshakeInitData
+	return &d, json.Unmarshal(b, &d)
+}
+
+func NewIdentityAnnounceMessage(accountPubKey string) *Message {
+	return &Message{
+		Sign:      NewSignature(accountPubKey),
+		Type:      IdentityAnnounce,
+		Timestamp: time.Now(),
+		Data:      IdentityAnnounceData{AccountPubKey: accountPubKey},
+	}
+}
+
+func NewIdentityChallengeMessage(senderPubKey, nonce string) *Message {
+	return &Message{
+		Sign:      NewSignature(senderPubKey),
+		Type:      IdentityChallenge,
+		Timestamp: time.Now(),
+		Data:      IdentityChallengeData{Nonce: nonce},
+	}
+}
+
+func NewIdentityResponseMessage(responderPubKey, nonce, signature string) *Message {
+	return &Message{
+		Sign:      NewSignature(responderPubKey),
+		Type:      IdentityResponse,
+		Timestamp: time.Now(),
+		Data:      IdentityResponseData{Nonce: nonce, Signature: signature},
+	}
+}
+
+func (m *Message) GetIdentityAnnounceData() (*IdentityAnnounceData, error) {
+	if m.Type != IdentityAnnounce {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d IdentityAnnounceData
+	return &d, json.Unmarshal(b, &d)
+}
+
+func (m *Message) GetIdentityChallengeData() (*IdentityChallengeData, error) {
+	if m.Type != IdentityChallenge {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d IdentityChallengeData
+	return &d, json.Unmarshal(b, &d)
+}
+
+func (m *Message) GetIdentityResponseData() (*IdentityResponseData, error) {
+	if m.Type != IdentityResponse {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d IdentityResponseData
+	return &d, json.Unmarshal(b, &d)
+}
+
+// NewNodeLeaveMessage creates the graceful-leave broadcast sent to all peers
+// just before a node closes its connection.
+func NewNodeLeaveMessage(senderID string) *Message {
+	return &Message{
+		Type: NodeLeave,
+		Sign: NewSignature(senderID),
+	}
+}
+
+// ShardProbeData asks a peer to prove it holds a specific shard.
+// Nonce is 16 random bytes hex-encoded; the expected response is
+// SHA-256(nonce_bytes || shard_file_bytes), preventing replay attacks.
+type ShardProbeData struct {
+	FileHash   string `json:"file_hash"`
+	ShardIndex int    `json:"shard_index"`
+	Nonce      string `json:"nonce"`
+}
+
+// ShardProbeAckData is the peer's proof-of-possession reply to ShardProbe.
+// ContentHash is SHA-256(nonce_bytes || shard_file_bytes), or absent if the
+// peer does not hold the shard.
+type ShardProbeAckData struct {
+	FileHash    string `json:"file_hash"`
+	ShardIndex  int    `json:"shard_index"`
+	Nonce       string `json:"nonce"`
+	ContentHash string `json:"content_hash"`
+}
+
+func NewShardProbeMessage(senderID string, d ShardProbeData) *Message {
+	return &Message{
+		Sign:      NewSignature(senderID),
+		Type:      ShardProbe,
+		Timestamp: time.Now(),
+		Data:      d,
+	}
+}
+
+func NewShardProbeAckMessage(senderID string, d ShardProbeAckData) *Message {
+	return &Message{
+		Sign:      NewSignature(senderID),
+		Type:      ShardProbeAck,
+		Timestamp: time.Now(),
+		Data:      d,
+	}
+}
+
+func (m *Message) GetShardProbeData() (*ShardProbeData, error) {
+	if m.Type != ShardProbe {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d ShardProbeData
+	return &d, json.Unmarshal(b, &d)
+}
+
+func (m *Message) GetShardProbeAckData() (*ShardProbeAckData, error) {
+	if m.Type != ShardProbeAck {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d ShardProbeAckData
+	return &d, json.Unmarshal(b, &d)
+}
+
+// ShardDeleteData tells a holder to delete all local shards for a file.
+type ShardDeleteData struct {
+	ContentHash string `json:"contentHash"`
+}
+
+// NewShardDeleteMessage creates a shard-delete broadcast for a specific file.
+func NewShardDeleteMessage(senderID, contentHash string) *Message {
+	return &Message{
+		Sign:      NewSignature(senderID),
+		Type:      ShardDelete,
+		Timestamp: time.Now(),
+		Data:      ShardDeleteData{ContentHash: contentHash},
+	}
+}
+
+func (m *Message) GetShardDeleteData() (*ShardDeleteData, error) {
+	if m.Type != ShardDelete {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d ShardDeleteData
+	return &d, json.Unmarshal(b, &d)
+}
+
+// TURNRelayAddrData carries the TURN relay transport address allocated by the sender.
+// The receiver should route all future traffic for this peer to RelayAddr so that
+// the TURN server can forward it back to the NAT-private node.
+type TURNRelayAddrData struct {
+	RelayAddr string `json:"relayAddr"`
+}
+
+func NewTURNRelayAddrMessage(senderID string, d TURNRelayAddrData) *Message {
+	return &Message{
+		Sign:      NewSignature(senderID),
+		Type:      TURNRelayAddr,
+		Timestamp: time.Now(),
+		Data:      d,
+	}
+}
+
+func (m *Message) GetTURNRelayAddrData() (*TURNRelayAddrData, error) {
+	if m.Type != TURNRelayAddr {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d TURNRelayAddrData
+	return &d, json.Unmarshal(b, &d)
+}
+
+// TURNRelayAddrFwdData is sent by a client to the STUN server to forward a
+// relay address to a peer that cannot be reached directly (symmetric NAT).
+// TargetPeerID is the peer's STUN-assigned ID (their registered IP:port string).
+type TURNRelayAddrFwdData struct {
+	TargetPeerID string `json:"targetPeerID"`
+	RelayAddr    string `json:"relayAddr"`
+}
+
+func NewTURNRelayAddrFwdMessage(senderID string, d TURNRelayAddrFwdData) *Message {
+	return &Message{
+		Sign:      NewSignature(senderID),
+		Type:      TURNRelayAddrFwd,
+		Timestamp: time.Now(),
+		Data:      d,
+	}
+}
+
+func (m *Message) GetTURNRelayAddrFwdData() (*TURNRelayAddrFwdData, error) {
+	if m.Type != TURNRelayAddrFwd {
+		return nil, ErrInvalidMessageType
+	}
+	b, err := json.Marshal(m.Data)
+	if err != nil {
+		return nil, err
+	}
+	var d TURNRelayAddrFwdData
+	return &d, json.Unmarshal(b, &d)
 }
 
 // Error types

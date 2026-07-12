@@ -40,6 +40,9 @@ Listens on `localhost:7777`. Used by the Swift menu bar app and Finder Sync exte
 | `GET` | `/files/{name}/info` | Metadata for a single file |
 | `DELETE` | `/files/{name}` | Delete file from network |
 | `POST` | `/files/{name}/fetch` | Download and cache file locally |
+| `GET` | `/upload-progress` | Shard dispatch counts for the active upload |
+| `GET` | `/download-progress` | Shard fetch counts for the active download |
+| `GET` | `/active-op` | Current in-flight operation, or `null` when idle |
 
 The fetch endpoint (`POST /files/{name}/fetch`) does more than just download:
 1. Calls `DownloadFile` handler to fetch bytes and write `~/Mosaic/<name>`
@@ -56,16 +59,76 @@ Watches `~/Mosaic/` using `fsnotify` and maps filesystem events to network opera
 
 | User action in Finder | Events seen | Network result |
 |----------------------|-------------|----------------|
-| Delete `notes.md` | `REMOVE notes.md` | Network delete |
-| Rename `notes.md` → `notes_v2.md` | `RENAME notes.md` + `CREATE notes_v2.md` within 75ms | Network rename |
-| Move `notes.md` out of `~/Mosaic/` | `RENAME notes.md` + no `CREATE` within 75ms | Network delete |
-| Copy `notes.md` (Cmd+C / Cmd+V) | `CREATE notes.md copy` | Ignored — copy is not an upload |
+| Delete cached `notes.md` | `REMOVE notes.md` | Network delete (after 500ms window) |
+| Delete stub `notes.md.mosaic` | `REMOVE notes.md.mosaic` | Full network delete (same as deleting the cached file) |
+| Rename `notes.md` → `notes_v2.md` | `RENAME notes.md` + `CREATE notes_v2.md` within 500ms | Network rename + meta.json updated |
+| Rename stub `notes.md.mosaic` → `notes_v2.md.mosaic` | `RENAME` + `CREATE` within 500ms | Network rename (same as cached rename) |
+| Move `notes.md` out of `~/Mosaic/` | `RENAME notes.md` + no `CREATE` within 500ms | Network delete |
+| Drag a new file into `~/Mosaic/` | `CREATE newfile.txt` + no prior `RENAME` within 500ms | Upload to network |
+| Undo a delete (Cmd+Z) | `REMOVE notes.md` then `CREATE notes.md` (same name) | Manifest entry restored |
+| Copy `notes.md` (Cmd+C / Cmd+V) | `CREATE notes.md copy` | Upload to network (treated as new file) |
 
-**Rename detection:** macOS only fires a `RENAME` event on the old path — it doesn't tell you what the file became. The watcher starts a 75ms timer when it sees a `RENAME`. If a `CREATE` arrives inside `~/Mosaic/` before the timer fires, the two events are paired as a rename. If the timer expires with no `CREATE`, the file was moved out of the folder and is treated as a delete.
+**Rename detection:** macOS fires events in either order — `RENAME`+`CREATE` or `CREATE`+`RENAME`. The watcher handles both:
+- `RENAME` arrives first: the old path is parked in the `disappeared` map with a 500ms timer. If a `CREATE` arrives before the timer fires, the pair is matched as a rename. If no `CREATE` arrives, the action is a move-out or delete.
+- `CREATE` arrives first: it is parked in `recentCreates` for 500ms. If a `RENAME` arrives claiming a manifest entry, the pair is matched as a rename. If no `RENAME` arrives and the file is not in the manifest, it is treated as a drag-and-drop upload.
 
-**Suppression:** Daemon-initiated operations (e.g. deleting a stub after a fetch) call `SuppressNext(path)` before touching the file. This prevents the watcher from misinterpreting its own actions as user actions. Suppression auto-expires after 500ms if the event never fires.
+The CREATE-pair check runs before the `Cached` check, so stub renames (`.mosaic` files) are correctly detected as renames rather than stub deletions.
 
-**Ignored paths:** Hidden files (names starting with `.`) are always ignored — this covers the manifest, the `.tmp` atomic write file, and any macOS metadata files.
+**Stub deletions:** When the user removes a `.mosaic` stub, the watcher treats it as a full network delete — the same path as deleting a cached file. The network manifest is updated, peers are notified, and all shard holders delete their copies. To remove only the local stub without touching the network, use `mos delete file -s` explicitly.
+
+**Rename + meta.json:** When a rename is detected and confirmed, `RenameFile` handler updates the shard metadata (`meta.json` inside `.shards/<hash>/`) so that `StreamShardToPeer` and `FetchFileBytes` serve the file under the new name.
+
+**Suppression:** Daemon-initiated operations (e.g. deleting a stub after a fetch, writing rename events) call `SuppressNext(path)` before touching the file. This prevents the watcher from misinterpreting its own actions as user actions. Suppression auto-expires after 500ms if the event never fires.
+
+**Ignored events:** `WRITE` and `CHMOD` events are silently dropped — they fire on every chunk written during reconstruction and would cause massive noise. Hidden files (names starting with `.`) are also always ignored — this covers the manifest, temp files, and macOS metadata.
+
+---
+
+## Active operation serialization
+
+Heavy network operations — upload and download — are serialized through a global mutex in `internal/daemon/handlers/activeOp.go`. Only one such operation can run at a time. This prevents concurrent transfers from flooding the UDP send buffer, which caused OS-level "no buffer space available" crashes when redistribution and upload ran simultaneously.
+
+### How it works
+
+**Daemon side (`activeOp.go`):**
+
+```
+TryAcquireOp(kind, description) bool  // acquire if idle; returns false if busy
+GetActiveOp() *ActiveOp               // returns current op or nil
+ReleaseOp()                           // clear when done
+```
+
+`upload file` and `download file` handlers call `TryAcquireOp` at the start and `defer ReleaseOp()` at the end. If they can't acquire, they return a response with `"busy": true` and a human-readable `"busyWith"` field so the CLI can report a meaningful error.
+
+**CLI side (`CLI.go`):**
+
+`waitForActiveOp()` polls `GET /active-op` every 500ms and blocks until the response is `null`. It prints a "Waiting: <description>..." status line while blocking, then clears it when the op finishes.
+
+### Which commands wait
+
+| Command | Behaviour |
+|---------|-----------|
+| `mos upload file` | acquires the lock — is the heavy op |
+| `mos download file` | acquires the lock — is the heavy op |
+| `mos delete file` | waits — would delete shards mid-upload |
+| `mos rename file` | waits — broadcasts manifest mid-transfer is unsafe |
+| `mos status node` | waits — broadcasts identity challenge to all peers |
+| `mos empty storage` | waits — broadcasts manifest deletion |
+| `mos leave network` | waits — disconnecting peers mid-transfer corrupts the transfer |
+| `mos logout` | waits — same as leave + deletes shards |
+| `mos status network`, `mos list`, `mos status account` | no wait — local reads only |
+| `mos join network` | no wait — has its own `IsJoinSettling()` guard |
+| `mos wipe`, `mos shutdown` | no wait — lifecycle commands that must proceed |
+
+### HTTP endpoint
+
+`GET /active-op` returns the current operation as JSON or `null`:
+
+```json
+{ "kind": "upload", "description": "Uploading notes.md", "startedAt": "..." }
+```
+
+The Swift menu bar app can use this to show a progress indicator or disable fetch buttons while a transfer is running.
 
 ---
 

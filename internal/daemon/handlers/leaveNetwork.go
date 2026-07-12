@@ -7,14 +7,31 @@ import (
 	"github.com/hcp-uw/mosaic/internal/daemon/handlers/helpers"
 )
 
-// Leaves the network and returns a LeaveNetworkResponse
 func LeaveNetwork(req protocol.LeaveNetworkRequest) protocol.LeaveNetworkResponse {
 	fmt.Println("Daemon: leaving network.")
-	// all the actual logic and stuff goes here
-	// Details goes in the logs (not printed in terminal)
+
+	client := GetP2PClient()
+	if client == nil {
+		return protocol.LeaveNetworkResponse{
+			Success:  false,
+			Details:  "not currently connected to a network",
+			Username: helpers.GetUsername(),
+		}
+	}
+
+	if err := client.DisconnectFromStun(); err != nil {
+		return protocol.LeaveNetworkResponse{
+			Success:  false,
+			Details:  fmt.Sprintf("failed to disconnect: %v", err),
+			Username: helpers.GetUsername(),
+		}
+	}
+
+	SetP2PClient(nil)
+
 	return protocol.LeaveNetworkResponse{
 		Success:  true,
-		Details:  "Network left successfully.",
+		Details:  "Left network successfully.",
 		Username: helpers.GetUsername(),
 	}
 }
